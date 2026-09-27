@@ -1,4 +1,4 @@
-/* Card Grading Lab: standalone app. Everything runs in the browser, and history is kept in localStorage. */
+/* Card Grading Lab: standalone app. Two screens: scan, then report. Everything runs in the browser. */
 "use strict";
 
 const CRITERIA = window.GRADING_CRITERIA;
@@ -15,12 +15,19 @@ const SEV_TEXT = {
   moderate: "Obvious at arm's length",
   major: "Heavy damage",
 };
+const CONDITION_WORDS = [
+  [10.5, "Pristine"], [10, "Gem Mint"], [9, "Mint"], [8, "NM-MT"], [7, "Near Mint"],
+  [6, "Excellent-MT"], [5, "Excellent"], [4, "VG-EX"], [3, "Very Good"], [2, "Good"], [0, "Poor"],
+];
 
 const state = {
+  view: "scan",
+  scans: { front: null, back: null },  // {img: canvas, lines, width, height, confidence}
+  thumbs: { front: null, back: null },
   centering: { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } },
   defects: [],
-  thumbs: { front: null, back: null },
-  pick: { side: null, location: null, severity: null },
+  activeSide: "front",
+  sheet: { side: null, location: null, type: null, severity: null },
   example: false,
   report: null,
 };
@@ -28,10 +35,12 @@ const state = {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const pretty = (s) => s.replace(/_/g, " ");
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmtShare = (v) => {
   const r = Math.round(v * 10) / 10;
   return Number.isInteger(r) ? String(r) : r.toFixed(1);
 };
+const splitText = (v) => `${fmtShare(v)}/${fmtShare(100 - v)}`;
 const whereText = (d) => {
   const comp = COMPONENT_OF[d.location];
   return d.location === "surface" ? `${d.side} surface` : `${d.side} ${pretty(d.location)} ${comp === "corners" ? "corner" : "edge"}`;
@@ -47,7 +56,7 @@ function toast(msg) {
 
 /* ---------------------------------------------------------------- storage */
 
-const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v1" };
+const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v2" };
 
 const localStore = {
   read(key, fallback) {
@@ -66,6 +75,9 @@ const localStore = {
       return false;
     }
   },
+  remove(key) {
+    try { localStorage.removeItem(key); } catch (_) { /* ignore */ }
+  },
   cards() { return this.read(KEYS.cards, []); },
   saveCards(cards) { return this.write(KEYS.cards, cards); },
 };
@@ -80,10 +92,7 @@ function canvasFromRGBA(rgba) {
   return c;
 }
 
-/**
- * Decode a photo, apply its EXIF rotation, downscale it, and return RGBA pixels.
- * Safari decodes iPhone HEIC photos here too.
- */
+/** Decode a photo (EXIF rotation applied, HEIC decoded by Safari), downscale it, return RGBA pixels. */
 function readImage(file, maxSide = 2400) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -107,14 +116,14 @@ function readImage(file, maxSide = 2400) {
   });
 }
 
-function thumbnail(warped, margin) {
-  const w = warped.width - 2 * margin, h = warped.height - 2 * margin;
-  const tw = 160, th = Math.round((h * tw) / w);
+function thumbnail(warpedCanvas, margin, width = 200) {
+  const w = warpedCanvas.width - 2 * margin, h = warpedCanvas.height - 2 * margin;
+  const th = Math.round((h * width) / w);
   const c = document.createElement("canvas");
-  c.width = tw;
+  c.width = width;
   c.height = th;
-  c.getContext("2d").drawImage(canvasFromRGBA(warped), margin, margin, w, h, 0, 0, tw, th);
-  return c.toDataURL("image/jpeg", 0.75);
+  c.getContext("2d").drawImage(warpedCanvas, margin, margin, w, h, 0, 0, width, th);
+  return c.toDataURL("image/jpeg", 0.8);
 }
 
 /** A sample "photo" of a slightly off-center card on a dark mat, used for the example. */
@@ -133,7 +142,8 @@ function samplePhoto(side) {
   const border = side === "front" ? { l: 44, r: 33, t: 44, b: 46 } : { l: 40, r: 44, t: 41, b: 47 };
   ctx.fillStyle = side === "front" ? "#f4cf2e" : "#1d58b0";
   ctx.beginPath();
-  ctx.roundRect ? ctx.roundRect(0, 0, cw, ch, 26) : ctx.rect(0, 0, cw, ch);
+  if (ctx.roundRect) ctx.roundRect(0, 0, cw, ch, 26);
+  else ctx.rect(0, 0, cw, ch);
   ctx.fill();
   const iw = cw - border.l - border.r, ih = ch - border.t - border.b;
   const grad = ctx.createLinearGradient(0, 0, iw, ih);
@@ -166,146 +176,126 @@ function samplePhoto(side) {
   return { width: W, height: H, data: data.data };
 }
 
-/* ---------------------------------------------------------------- centering */
+/* ---------------------------------------------------------------- scanning */
 
-class SideScanner {
-  constructor(root, side) {
-    this.side = side;
-    root.append($("#side-template").content.cloneNode(true));
-    $("h3", root).textContent = side === "front" ? "Front" : "Back";
-    this.zone = $(".dropzone", root);
-    this.canvas = $("canvas", root);
+const shareOf = (a, b) => (a + b <= 0 ? 50 : (Math.max(a, b) / (a + b)) * 100);
+
+function centeringFromLines(lines) {
+  const { outer, inner } = lines;
+  return {
+    lr: shareOf(Math.max(0, inner.left - outer.left), Math.max(0, outer.right - inner.right)),
+    tb: shareOf(Math.max(0, inner.top - outer.top), Math.max(0, outer.bottom - inner.bottom)),
+  };
+}
+
+function applyScan(side, scan) {
+  const img = canvasFromRGBA(scan.warped);
+  state.scans[side] = { img, lines: scan.lines, width: scan.width, height: scan.height, confidence: scan.confidence.borders };
+  state.thumbs[side] = thumbnail(img, scan.margin);
+  state.centering[side] = centeringFromLines(scan.lines);
+}
+
+async function scanFile(side, file) {
+  leaveExample();
+  const slot = $(`.slot[data-side="${side}"]`);
+  slot.classList.add("busy");
+  $("#guide-wrap").classList.toggle("busy", state.view === "report");
+  try {
+    const pixels = await readImage(file);
+    await new Promise((r) => setTimeout(r, 30));  // let the busy overlay paint
+    applyScan(side, Vision.scan(pixels, "auto"));
+    if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the edges were hard to find. Check the guide lines in the report.`);
+  } catch (err) {
+    toast(err.message || "Couldn't measure this photo.");
+  } finally {
+    slot.classList.remove("busy");
+    $("#guide-wrap").classList.remove("busy");
+  }
+  renderSlots();
+  if (state.view === "report") {
+    state.activeSide = side;
+    renderCentering();
+    runGrade();
+  }
+}
+
+function renderSlots() {
+  for (const side of SIDES) {
+    const slot = $(`.slot[data-side="${side}"]`);
+    const img = $(".slot-img", slot);
+    const thumb = state.thumbs[side];
+    const done = !!state.scans[side];
+    slot.classList.toggle("done", done);
+    img.hidden = !done;
+    if (done) img.src = thumb;
+    $(".slot-meta", slot).textContent = done
+      ? `${splitText(state.centering[side].lr)} · ${splitText(state.centering[side].tb)}`
+      : "Tap to add photo";
+  }
+  const front = !!state.scans.front, back = !!state.scans.back;
+  $("#get-report").disabled = !(front && back);
+  $("#front-only").hidden = !(front && !back);
+}
+
+/* ---------------------------------------------------------------- centering editor */
+
+const guide = {
+  canvas: null, ctx: null, drag: null, pointer: null,
+
+  init() {
+    this.canvas = $("#guide-canvas");
     this.ctx = this.canvas.getContext("2d");
-    this.lrInput = $(".lr", root);
-    this.tbInput = $(".tb", root);
-    this.lrInput.id = `${side}-lr`;
-    this.tbInput.id = `${side}-tb`;
-    this.lrOther = $(".lr-other", root);
-    this.tbOther = $(".tb-other", root);
-    this.confEl = $(".conf", root);
-    this.cropped = $(".cropped", root);
-    this.cropped.id = `${side}-cropped`;
-    $$("input[type=file]", root).forEach((input, i) => (input.id = `${side}-file-${i}`));
-    this.canvas.setAttribute("aria-label", `${side} scan with centering guides`);
-    this.img = null;
-    this.lines = null;
-    this.drag = null;
-    this.pointer = null;
-
-    for (const input of $$("input[type=file]", root)) {
-      input.addEventListener("change", (e) => {
-        if (e.target.files[0]) this.upload(e.target.files[0]);
-        e.target.value = "";
-      });
-    }
-    this.zone.addEventListener("dragover", (e) => { e.preventDefault(); this.zone.classList.add("drag"); });
-    this.zone.addEventListener("dragleave", () => this.zone.classList.remove("drag"));
-    this.zone.addEventListener("drop", (e) => {
-      e.preventDefault();
-      this.zone.classList.remove("drag");
-      if (e.dataTransfer.files[0]) this.upload(e.dataTransfer.files[0]);
-    });
-    for (const input of [this.lrInput, this.tbInput]) input.addEventListener("input", () => this.manualChange());
-    this.canvas.addEventListener("pointerdown", (e) => this.onDown(e));
-    this.canvas.addEventListener("pointermove", (e) => this.onMove(e));
-    this.canvas.addEventListener("pointerup", (e) => this.onUp(e));
-    this.canvas.addEventListener("pointercancel", (e) => this.onUp(e));
-    this.canvas.addEventListener("pointerleave", () => { if (!this.drag) { this.pointer = null; this.draw(); } });
-    // On touch screens, block page scrolling only when the finger lands on a guide.
-    this.canvas.addEventListener("touchstart", (e) => {
-      if (!this.lines || e.touches.length !== 1) return;
-      if (this.hit(this.toNative(e.touches[0], "touch"))) e.preventDefault();
+    const c = this.canvas;
+    c.addEventListener("pointerdown", (e) => this.onDown(e));
+    c.addEventListener("pointermove", (e) => this.onMove(e));
+    c.addEventListener("pointerup", (e) => this.onUp(e));
+    c.addEventListener("pointercancel", (e) => this.onUp(e));
+    c.addEventListener("pointerleave", () => { if (!this.drag) { this.pointer = null; this.draw(); } });
+    // On touch screens, block page scrolling only when the finger lands on a guide line.
+    c.addEventListener("touchstart", (e) => {
+      if (e.touches.length === 1 && this.scan() && this.hit(this.toNative(e.touches[0], "touch"))) e.preventDefault();
     }, { passive: false });
-    this.canvas.addEventListener("touchmove", (e) => { if (this.drag) e.preventDefault(); }, { passive: false });
-  }
+    c.addEventListener("touchmove", (e) => { if (this.drag) e.preventDefault(); }, { passive: false });
+  },
 
-  async upload(file) {
-    leaveExample();
-    this.zone.classList.add("busy");
-    try {
-      const pixels = await readImage(file);
-      await new Promise((r) => setTimeout(r, 30));  // let the "Measuring…" overlay paint
-      this.loadScan(Vision.scan(pixels, this.cropped.checked ? "cropped" : "auto"));
-    } catch (err) {
-      toast(err.message || "Couldn't measure this photo.");
-    } finally {
-      this.zone.classList.remove("busy");
+  scan() { return state.scans[state.activeSide]; },
+
+  show() {
+    const s = this.scan();
+    $("#guide-wrap").classList.toggle("empty", !s);
+    if (!s) {
+      $("#guide-empty-text").textContent = state.thumbs[state.activeSide]
+        ? "The photo isn't kept after saving. Retake it to adjust the guides, or type the ratios below."
+        : `No ${state.activeSide} photo. Add one, or type the ratios below.`;
+      return;
     }
-  }
-
-  loadScan(scan, { quiet = false } = {}) {
-    this.img = canvasFromRGBA(scan.warped);
-    this.canvas.width = scan.width;
-    this.canvas.height = scan.height;
-    this.lines = scan.lines;
-    state.thumbs[this.side] = thumbnail(scan.warped, scan.margin);
-    this.zone.classList.add("has-image");
-    const conf = scan.confidence.borders;
-    this.confEl.textContent = `Auto-detect confidence ${Math.round(conf * 100)}%`;
-    this.confEl.classList.toggle("low", conf < 0.6);
-    if (conf < 0.6 && !quiet) toast(`${this.side === "front" ? "Front" : "Back"}: low confidence. Check the guides.`);
-    this.fromLines();
-  }
-
-  clear() {
-    this.img = null;
-    this.lines = null;
-    this.zone.classList.remove("has-image");
-    this.confEl.textContent = "";
-    this.confEl.classList.remove("low");
-    this.setValues(50, 50);
-  }
-
-  setValues(lr, tb) {
-    this.lrInput.value = fmtShare(lr);
-    this.tbInput.value = fmtShare(tb);
-    this.lrOther.textContent = fmtShare(100 - lr);
-    this.tbOther.textContent = fmtShare(100 - tb);
-    state.centering[this.side] = { lr: +lr.toFixed(2), tb: +tb.toFixed(2) };
-  }
-
-  manualChange() {
-    leaveExample();
-    const clamp = (v) => Math.min(100, Math.max(50, isNaN(v) ? 50 : v));
-    const lr = clamp(parseFloat(this.lrInput.value));
-    const tb = clamp(parseFloat(this.tbInput.value));
-    this.lrOther.textContent = fmtShare(100 - lr);
-    this.tbOther.textContent = fmtShare(100 - tb);
-    state.centering[this.side] = { lr, tb };
-    scheduleGrade();
-  }
-
-  fromLines() {
-    const { outer, inner } = this.lines;
-    const share = (a, b) => (a + b <= 0 ? 50 : (Math.max(a, b) / (a + b)) * 100);
-    const L = inner.left - outer.left, R = outer.right - inner.right;
-    const T = inner.top - outer.top, B = outer.bottom - inner.bottom;
-    this.setValues(share(Math.max(0, L), Math.max(0, R)), share(Math.max(0, T), Math.max(0, B)));
+    this.canvas.width = s.width;
+    this.canvas.height = s.height;
     this.draw();
-    scheduleGrade();
-  }
+  },
 
   toNative(e, pointerType = e.pointerType) {
     const r = this.canvas.getBoundingClientRect();
     const k = this.canvas.width / r.width;
     return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k, k, touch: pointerType === "touch" || pointerType === "pen" };
-  }
+  },
 
   hit(p) {
-    const tol = (p.touch ? 22 : 10) * p.k;  // fingers need a bigger target
+    const s = this.scan();
+    const tol = (p.touch ? 22 : 10) * p.k;
     let best = null;
     for (const kind of ["inner", "outer"]) {
       for (const edge of ["left", "right", "top", "bottom"]) {
-        const v = this.lines[kind][edge];
+        const v = s.lines[kind][edge];
         const d = edge === "left" || edge === "right" ? Math.abs(p.x - v) : Math.abs(p.y - v);
         if (d <= tol && (!best || d < best.d)) best = { kind, edge, d };
       }
     }
     return best;
-  }
+  },
 
   onDown(e) {
-    if (!this.lines) return;
+    if (!this.scan()) return;
     const p = this.toNative(e);
     const h = this.hit(p);
     if (!h) return;
@@ -314,41 +304,45 @@ class SideScanner {
     this.pointer = p;
     try { this.canvas.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
     this.draw();
-  }
+  },
 
   onMove(e) {
-    if (!this.lines) return;
+    const s = this.scan();
+    if (!s) return;
     const p = this.toNative(e);
     this.pointer = p;
     if (this.drag) {
       const { kind, edge } = this.drag;
       const vertical = edge === "left" || edge === "right";
       const max = vertical ? this.canvas.width : this.canvas.height;
-      this.lines[kind][edge] = Math.max(0, Math.min(max, vertical ? p.x : p.y));
-      this.fromLines();
+      s.lines[kind][edge] = Math.max(0, Math.min(max, vertical ? p.x : p.y));
+      state.centering[state.activeSide] = centeringFromLines(s.lines);
+      renderRatioInputs();
+      scheduleGrade();
     } else {
       const h = this.hit(p);
-      this.canvas.style.cursor = h ? (h.edge === "left" || h.edge === "right" ? "ew-resize" : "ns-resize") : "crosshair";
-      this.draw();
+      this.canvas.style.cursor = h ? (h.edge === "left" || h.edge === "right" ? "ew-resize" : "ns-resize") : "default";
     }
-  }
+    this.draw();
+  },
 
   onUp(e) {
     this.drag = null;
     try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) { /* ignore */ }
     this.draw();
-  }
+  },
 
   draw() {
-    if (!this.img) return;
+    const s = this.scan();
+    if (!s) return;
     const { ctx, canvas } = this;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(this.img, 0, 0);
-    this.drawLines(ctx, canvas.width, canvas.height, 2);
-    if (this.drag && this.pointer) this.drawLoupe();
-  }
+    ctx.drawImage(s.img, 0, 0);
+    this.drawLines(ctx, s.lines, canvas.width, canvas.height, 2.5);
+    if (this.drag && this.pointer) this.drawLoupe(s);
+  },
 
-  drawLines(ctx, W, H, width) {
+  drawLines(ctx, lines, W, H, width) {
     const css = getComputedStyle(document.documentElement);
     const color = { outer: css.getPropertyValue("--outer").trim() || "#38bdf8", inner: css.getPropertyValue("--inner").trim() || "#f472b6" };
     for (const kind of ["outer", "inner"]) {
@@ -356,7 +350,7 @@ class SideScanner {
       ctx.lineWidth = width;
       ctx.setLineDash(kind === "outer" ? [10, 6] : []);
       for (const edge of ["left", "right", "top", "bottom"]) {
-        const v = this.lines[kind][edge];
+        const v = lines[kind][edge];
         ctx.beginPath();
         if (edge === "left" || edge === "right") { ctx.moveTo(v, 0); ctx.lineTo(v, H); }
         else { ctx.moveTo(0, v); ctx.lineTo(W, v); }
@@ -364,9 +358,9 @@ class SideScanner {
       }
     }
     ctx.setLineDash([]);
-  }
+  },
 
-  drawLoupe() {
+  drawLoupe(s) {
     const { ctx, canvas } = this;
     const zoom = 4, src = 60, size = src * zoom;
     const p = this.pointer;
@@ -379,18 +373,35 @@ class SideScanner {
     ctx.imageSmoothingEnabled = false;
     ctx.translate(dx - (p.x - src / 2) * zoom, dy - (p.y - src / 2) * zoom);
     ctx.scale(zoom, zoom);
-    ctx.drawImage(this.img, 0, 0);
-    this.drawLines(ctx, canvas.width, canvas.height, 0.6);
+    ctx.drawImage(s.img, 0, 0);
+    this.drawLines(ctx, s.lines, canvas.width, canvas.height, 0.6);
     ctx.restore();
     ctx.strokeStyle = "#f2b53a";
     ctx.lineWidth = 3;
     ctx.strokeRect(dx, dy, size, size);
-  }
+  },
+};
+
+function renderRatioInputs() {
+  const c = state.centering[state.activeSide];
+  const lr = $("#ratio-lr"), tb = $("#ratio-tb");
+  if (document.activeElement !== lr) lr.value = fmtShare(c.lr);
+  if (document.activeElement !== tb) tb.value = fmtShare(c.tb);
+  $("#lr-other").textContent = fmtShare(100 - c.lr);
+  $("#tb-other").textContent = fmtShare(100 - c.tb);
+  const s = state.scans[state.activeSide];
+  const conf = $("#conf");
+  conf.textContent = s ? `Edge detection ${Math.round(s.confidence * 100)}%` : "Typed in";
+  conf.classList.toggle("low", !!s && s.confidence < 0.6);
 }
 
-const scanners = {};
+function renderCentering() {
+  $$("#centering-section .segmented button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
+  guide.show();
+  renderRatioInputs();
+}
 
-/* ---------------------------------------------------------------- defect map */
+/* ---------------------------------------------------------------- defects */
 
 function buildMap(fig, side) {
   const ns = "http://www.w3.org/2000/svg";
@@ -401,65 +412,75 @@ function buildMap(fig, side) {
     for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
     return n;
   };
-  svg.append(el("rect", { x: 1, y: 1, width: 148, height: 208, rx: 9, class: "card-body" }));
+  svg.append(el("rect", { x: 1, y: 1, width: 148, height: 208, rx: 10, class: "card-body" }));
   const zones = {
-    top_left: [0, 0, 30, 30], top_right: [120, 0, 30, 30],
-    bottom_left: [0, 180, 30, 30], bottom_right: [120, 180, 30, 30],
-    top: [32, 0, 86, 20], bottom: [32, 190, 86, 20], left: [0, 32, 20, 146], right: [130, 32, 20, 146],
-    surface: [26, 26, 98, 158],
+    top_left: [3, 3, 28, 28], top_right: [119, 3, 28, 28],
+    bottom_left: [3, 179, 28, 28], bottom_right: [119, 179, 28, 28],
+    top: [34, 3, 82, 18], bottom: [34, 189, 82, 18], left: [3, 34, 18, 142], right: [129, 34, 18, 142],
+    surface: [27, 27, 96, 156],
   };
   for (const [loc, [x, y, w, h]] of Object.entries(zones)) {
-    const r = el("rect", { x, y, width: w, height: h, rx: 4, class: "zone", "data-loc": loc, "data-side": side, tabindex: 0, role: "button" });
-    const title = el("title", {});
-    title.textContent = `${side} ${pretty(loc)}`;
-    r.append(title);
-    r.addEventListener("click", () => pickZone(side, loc));
-    r.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickZone(side, loc); } });
+    const r = el("rect", { x, y, width: w, height: h, rx: 5, class: "zone", "data-loc": loc, "data-side": side, tabindex: 0, role: "button", "aria-label": `${side} ${pretty(loc)}` });
+    r.addEventListener("click", () => openSheet(side, loc));
+    r.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSheet(side, loc); } });
     svg.append(r);
   }
   fig.append(svg);
 }
 
-function pickZone(side, location) {
-  state.pick = { side, location, severity: state.pick.severity };
+function openSheet(side, location) {
   const comp = COMPONENT_OF[location];
-  const where = whereText({ side, location });
-  $("#picked").textContent = where.charAt(0).toUpperCase() + where.slice(1);
-  const select = $("#defect-type");
-  select.innerHTML = "";
+  state.sheet = { side, location, type: null, severity: null };
+  $("#sheet-where").textContent = cap(whereText({ side, location }));
+  const chips = $("#type-chips");
+  chips.innerHTML = "";
   for (const [key, spec] of Object.entries(CRITERIA.defects.types)) {
     if (!spec.applies_to.includes(comp)) continue;
-    const o = document.createElement("option");
-    o.value = key;
-    o.textContent = spec.label;
-    select.append(o);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.type = key;
+    b.textContent = spec.label;
+    b.addEventListener("click", () => { state.sheet.type = key; updateSheet(); });
+    chips.append(b);
   }
-  select.disabled = false;
-  updateAddButton();
-  paintZones();
+  $("#defect-note").value = "";
+  updateSheet();
+  $("#defect-sheet").hidden = false;
 }
 
-function updateAddButton() {
-  $("#add-defect").disabled = !(state.pick.location && state.pick.severity);
-  $$("#severity button").forEach((b) => b.classList.toggle("active", b.dataset.sev === state.pick.severity));
-  const spec = CRITERIA.defects.types[$("#defect-type").value];
-  const sev = state.pick.severity;
-  if (sev) {
-    const cap = spec ? spec.caps[sev] : null;
-    const shown = cap == null ? "" : cap >= 10 ? " · still allows Gem Mint" : ` · caps this area at ${cap}`;
-    $("#sev-hint").textContent = SEV_TEXT[sev] + shown;
+function closeSheet() {
+  $("#defect-sheet").hidden = true;
+}
+
+function updateSheet() {
+  const { type, severity } = state.sheet;
+  $$("#type-chips button").forEach((b) => b.classList.toggle("active", b.dataset.type === type));
+  $$("#sev-seg button").forEach((b) => b.classList.toggle("active", b.dataset.sev === severity));
+  $("#sheet-add").disabled = !(type && severity);
+  if (severity) {
+    const capValue = type ? CRITERIA.defects.types[type].caps[severity] : null;
+    const effect = capValue == null ? "" : capValue >= 10 ? " · still allows Gem Mint" : ` · limits this area to ${capValue}`;
+    $("#sev-hint").textContent = SEV_TEXT[severity] + effect;
   }
+}
+
+function addDefectFromSheet() {
+  leaveExample();
+  const { side, location, type, severity } = state.sheet;
+  const note = $("#defect-note").value.trim();
+  state.defects.push({ side, location, type, severity, note: note || null });
+  closeSheet();
+  renderDefects();
+  runGrade();
 }
 
 function paintZones() {
   $$(".zone").forEach((z) => {
-    z.classList.remove("selected", "sev-micro", "sev-minor", "sev-moderate", "sev-major");
-    const { side, loc } = z.dataset;
+    z.classList.remove("sev-micro", "sev-minor", "sev-moderate", "sev-major");
     const worst = state.defects
-      .filter((d) => d.side === side && d.location === loc)
+      .filter((d) => d.side === z.dataset.side && d.location === z.dataset.loc)
       .sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity])[0];
     if (worst) z.classList.add(`sev-${worst.severity}`);
-    if (state.pick.side === side && state.pick.location === loc) z.classList.add("selected");
   });
 }
 
@@ -467,28 +488,29 @@ function renderDefects() {
   const list = $("#defect-list");
   list.innerHTML = "";
   if (!state.defects.length) {
-    list.innerHTML = '<li class="empty">No defects logged, so the card is treated as flawless.</li>';
+    list.innerHTML = '<li class="empty">Nothing logged yet, so corners, edges and surface count as flawless.</li>';
   }
   state.defects.forEach((d, i) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="sev-pill ${d.severity}"></span>
-      <span><span class="d-label"></span><br><span class="where"></span></span>
-      <button type="button" aria-label="Remove defect">✕</button>`;
-    $(".sev-pill", li).textContent = d.severity;
+    li.innerHTML = `<span class="sev-dot ${d.severity}" aria-hidden="true"></span>
+      <span class="d-text"><span class="d-label"></span><br><span class="where"></span></span>
+      <button type="button" class="remove" aria-label="Remove defect">✕</button>`;
     $(".d-label", li).textContent = CRITERIA.defects.types[d.type].label;
-    $(".where", li).textContent = whereText(d) + (d.note ? ` · ${d.note}` : "");
-    $("button", li).addEventListener("click", () => {
+    $(".where", li).textContent = `${cap(d.severity)} · ${whereText(d)}${d.note ? ` · ${d.note}` : ""}`;
+    $(".remove", li).addEventListener("click", () => {
       leaveExample();
       state.defects.splice(i, 1);
       renderDefects();
-      scheduleGrade();
+      runGrade();
     });
     list.append(li);
   });
+  const n = state.defects.length;
+  $("#defect-summary").textContent = n ? `${n} logged` : "None logged";
   paintZones();
 }
 
-/* ---------------------------------------------------------------- grading */
+/* ---------------------------------------------------------------- grading + report */
 
 function assessment() {
   return {
@@ -496,7 +518,7 @@ function assessment() {
       name: $("#card-name").value.trim(),
       set_name: $("#card-set").value.trim(),
       number: $("#card-number").value.trim(),
-      holo: $("#card-holo").checked,
+      holo: false,
       notes: "",
     },
     centering: state.centering,
@@ -514,65 +536,113 @@ function runGrade() {
   const a = assessment();
   try {
     state.report = Grading.gradeAll(a, CRITERIA);
-    renderReport(state.report, a.card);
   } catch (err) {
     toast(`Grading failed: ${err.message}`);
+    return;
   }
-  if (!state.example) localStore.write(KEYS.draft, a);
+  renderReport();
+  saveDraft();
 }
 
 const bigGrade = (g) => (g.tier >= 99 ? "—" : g.grade % 1 === 0 ? g.grade.toFixed(0) : g.grade.toFixed(1));
 const isPristine = (g) => g.label.startsWith("Pristine");
+const conditionWord = (v) => CONDITION_WORDS.find(([min]) => v >= min)[1];
+const status = (v) => (v >= 10 ? "good" : v >= 8.5 ? "warn" : "bad");
 
-function renderGradeBar(report) {
-  const btn = $("#grade-bar-btn");
-  btn.innerHTML = "";
-  btn.setAttribute("aria-label", `${report.summary} Tap for details.`);
+// Rank for the "Best shot" badge: the highest grade wins, with Pristine and Black Label above a plain 10.
+const gradeRank = (g) => (g.tier >= 99 ? -1 : g.label.includes("Black Label") ? 11 : isPristine(g) ? 10.5 : g.grade);
+
+function bestCompany(report) {
+  let best = null;
+  for (const g of Object.values(report.grades)) if (!best || gradeRank(g) > gradeRank(best)) best = g;
+  return best;
+}
+
+function renderTiles(report) {
+  const box = $("#tiles");
+  box.innerHTML = "";
+  const top = bestCompany(report);
   for (const g of Object.values(report.grades)) {
-    const item = document.createElement("span");
-    item.className = "gb-item" + (g.company === report.best_fit ? " best" : "");
-    item.dataset.co = g.company;
-    item.innerHTML = `<span class="gb-co">${g.company}</span><span class="gb-grade">${bigGrade(g)}${isPristine(g) ? "<small>P</small>" : ""}</span>`;
-    btn.append(item);
+    const best = g === top && g.tier < 99;
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = "tile" + (best ? " best" : "");
+    tile.dataset.co = g.company;
+    tile.innerHTML = `<span class="tile-co">${g.company}${best ? '<span class="tile-badge">Best shot</span>' : ""}</span>
+      <span class="tile-grade"></span><span class="tile-label"></span><span class="tile-sub"></span>`;
+    $(".tile-grade", tile).innerHTML = bigGrade(g) + (isPristine(g) ? "<small>P</small>" : "");
+    $(".tile-label", tile).textContent = g.label.replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
+    $(".tile-sub", tile).textContent = g.company === "TAG" && g.score != null ? `${g.score} / 1000` : g.qualifiers.length ? g.qualifiers.join(" · ") : " ";
+    tile.addEventListener("click", () => {
+      const d = $(`.company[data-co="${g.company}"]`);
+      d.open = true;
+      d.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    box.append(tile);
   }
+  $("#best-line").textContent = top.tier >= 99
+    ? "This card looks altered, so no company would give it a number."
+    : `Your best shot is ${top.company} ${top.label}. Tap a grade for the breakdown.`;
+}
+
+function renderOverview(report) {
+  const psa = report.grades.PSA;
+  const list = $("#overview");
+  list.innerHTML = "";
+  const rows = [];
+  if (psa.tier >= 99) {
+    rows.push({ name: "Authenticity", detail: "Logged as trimmed, recolored or altered", pill: "Altered", cls: "bad" });
+  } else {
+    const f = state.centering.front, b = state.centering.back;
+    rows.push({
+      name: "Centering",
+      detail: `Front ${splitText(Math.max(f.lr, f.tb))} · Back ${splitText(Math.max(b.lr, b.tb))} (worst axis)`,
+      mono: true, value: psa.subgrades.centering,
+    });
+    for (const comp of ["corners", "edges", "surface"]) {
+      const ds = state.defects.filter((d) => COMPONENT_OF[d.location] === comp);
+      const worst = ds.sort((x, y) => SEV_RANK[y.severity] - SEV_RANK[x.severity])[0];
+      rows.push({
+        name: cap(comp),
+        detail: worst ? `${cap(worst.severity)} ${CRITERIA.defects.types[worst.type].label.toLowerCase()}${ds.length > 1 ? ` +${ds.length - 1} more` : ""}` : "No issues logged",
+        value: psa.subgrades[comp],
+      });
+    }
+  }
+  for (const r of rows) {
+    const li = document.createElement("li");
+    const pill = r.pill || conditionWord(r.value);
+    const cls = r.cls || status(r.value);
+    li.innerHTML = `<span class="ov-name"></span><span class="pill ${cls}"></span><span class="ov-detail${r.mono ? " mono" : ""}"></span>`;
+    $(".ov-name", li).textContent = r.name;
+    $(".pill", li).textContent = pill;
+    $(".ov-detail", li).textContent = r.detail;
+    list.append(li);
+  }
+  const f = state.centering.front, b = state.centering.back;
+  $("#centering-summary").textContent = `${splitText(Math.max(f.lr, f.tb))} · ${splitText(Math.max(b.lr, b.tb))}`;
 }
 
 function subLabel(company, v) {
-  if (typeof v !== "number" || company === "TAG") return String(v);  // TAG areas are points
+  if (typeof v !== "number" || company === "TAG") return String(v);
   return v >= 10.5 ? "10P" : String(v);
 }
 
-function renderReport(report, card = {}) {
-  renderGradeBar(report);
-  const box = $("#grades");
+function renderCompanies(report) {
+  const box = $("#companies");
+  const open = new Set($$(".company[open]", box).map((d) => d.dataset.co));
   box.innerHTML = "";
-  $("#best-fit").textContent = report.summary.split(". ")[0] + ".";
-  $("#disclaimer").textContent = report.disclaimer;
-  const cardLine = [card.name || "Your card", card.number].filter(Boolean).join(" · ");
   for (const g of Object.values(report.grades)) {
-    const slab = document.createElement("div");
-    slab.className = "slab" + (g.company === report.best_fit ? " best" : "");
-    slab.dataset.co = g.company;
-    slab.innerHTML = `
-      <div class="slab-label">
-        <span class="slab-co">${g.company}</span>
-        <div class="slab-grade"><div class="slab-num"></div><div class="slab-desc"></div></div>
-        <span class="slab-card"></span>
-      </div>
-      <div class="slab-body">
-        <div class="slab-sub"></div>
-        <div class="chips"></div>
-        <div class="slab-alt"></div>
-        <details><summary>Why this grade</summary><ul></ul></details>
-      </div>`;
-    $(".slab-num", slab).innerHTML = `${bigGrade(g)}${isPristine(g) ? "<small>PRISTINE</small>" : ""}`;
-    $(".slab-desc", slab).textContent = g.label.replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
-    $(".slab-card", slab).textContent = cardLine;
-    $(".slab-sub", slab).textContent =
-      g.company === "TAG" && g.score != null ? `TAG Score ${g.score} / 1000`
-      : g.company === "PSA" ? "One overall grade. The component values are estimates."
-      : "Subgrades";
-    const chips = $(".chips", slab);
+    const d = document.createElement("details");
+    d.className = "company";
+    d.dataset.co = g.company;
+    d.open = open.has(g.company);
+    d.innerHTML = `<summary><span class="co-code">${g.company}</span><span class="co-label"></span><span class="co-grade"></span></summary>
+      <div class="co-body"><div class="chips"></div><p class="co-alt"></p><ul class="why"></ul><ul class="notes"></ul></div>`;
+    $(".co-label", d).textContent = g.label;
+    $(".co-grade", d).textContent = bigGrade(g);
+    const chips = $(".chips", d);
+    if (g.score != null) chips.insertAdjacentHTML("beforeend", `<span class="chip">TAG Score <b>${g.score}</b></span>`);
     for (const q of g.qualifiers) {
       const c = document.createElement("span");
       c.className = "chip q";
@@ -582,44 +652,138 @@ function renderReport(report, card = {}) {
     for (const [k, v] of Object.entries(g.subgrades)) {
       const c = document.createElement("span");
       c.className = "chip";
-      c.textContent = `${k} ${subLabel(g.company, v)}`;
+      c.innerHTML = `${k} <b></b>`;
+      $("b", c).textContent = subLabel(g.company, v);
       chips.append(c);
     }
-    $(".slab-alt", slab).textContent = g.alternatives.join(" · ");
-    const ul = $("ul", slab);
-    const reasons = g.limiting_factors.length ? g.limiting_factors : ["Nothing is holding this card back at this company."];
-    for (const r of [...reasons, ...g.notes]) {
+    const alt = $(".co-alt", d);
+    alt.textContent = g.alternatives.join(" · ");
+    alt.hidden = !g.alternatives.length;
+    const why = $(".why", d);
+    for (const r of g.limiting_factors.length ? g.limiting_factors : ["Nothing is holding this card back at this company."]) {
       const li = document.createElement("li");
       li.textContent = r;
-      ul.append(li);
+      why.append(li);
     }
-    box.append(slab);
+    const notes = $(".notes", d);
+    for (const n of g.notes) {
+      const li = document.createElement("li");
+      li.textContent = n;
+      notes.append(li);
+    }
+    box.append(d);
   }
 }
 
-/* ---------------------------------------------------------------- example card */
+function renderThumbs() {
+  const box = $("#thumbs");
+  box.innerHTML = "";
+  for (const side of SIDES) {
+    const src = state.thumbs[side];
+    if (src) {
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = `${side} of card`;
+      box.append(img);
+    } else {
+      box.insertAdjacentHTML("beforeend", '<span class="ph" aria-hidden="true"></span>');
+    }
+  }
+}
+
+function renderReport() {
+  const report = state.report;
+  if (!report) return;
+  renderTiles(report);
+  renderOverview(report);
+  renderCompanies(report);
+  $("#disclaimer").textContent = report.disclaimer;
+}
+
+/* ---------------------------------------------------------------- views */
+
+function setView(view, { animate = true } = {}) {
+  state.view = view;
+  $("#app").dataset.view = view;
+  $("#scan-screen").hidden = view !== "scan";
+  $("#report-screen").hidden = view !== "report";
+  window.scrollTo({ top: 0 });
+  if (view === "report") {
+    const screen = $("#report-screen");
+    screen.classList.remove("enter");
+    if (animate) { void screen.offsetWidth; screen.classList.add("enter"); }
+    renderThumbs();
+    renderCentering();
+    renderDefects();
+    runGrade();
+  } else {
+    renderSlots();
+    renderResume();
+  }
+}
+
+function resetCard() {
+  state.scans = { front: null, back: null };
+  state.thumbs = { front: null, back: null };
+  state.centering = { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } };
+  state.defects = [];
+  state.activeSide = "front";
+  state.example = false;
+  state.report = null;
+  for (const id of ["#card-name", "#card-set", "#card-number"]) $(id).value = "";
+  $("#example-note").hidden = true;
+}
+
+function newScan() {
+  resetCard();
+  localStore.remove(KEYS.draft);
+  setView("scan");
+}
+
+/* ---------------------------------------------------------------- example + drafts */
 
 function showExample() {
-  state.example = true;
-  $("#example-banner").hidden = false;
-  $("#card-name").value = "Charizard ex (example)";
-  $("#card-set").value = "Obsidian Flames";
-  $("#card-number").value = "223/197";
-  $("#card-holo").checked = true;
-  for (const side of SIDES) scanners[side].loadScan(Vision.scan(samplePhoto(side)), { quiet: true });
+  resetCard();
+  for (const side of SIDES) applyScan(side, Vision.scan(samplePhoto(side)));
   state.defects = [
     { side: "back", location: "top_right", type: "corner_whitening", severity: "minor", note: null },
     { side: "front", location: "surface", type: "holo_scratch", severity: "micro", note: "Only under a lamp" },
   ];
-  renderDefects();
-  runGrade();
+  $("#card-name").value = "Charizard ex";
+  $("#card-set").value = "Obsidian Flames";
+  $("#card-number").value = "223/197";
+  state.example = true;
+  $("#example-note").hidden = false;
+  setView("report");
 }
 
 function leaveExample() {
   if (!state.example) return;
   state.example = false;
-  $("#example-banner").hidden = true;
-  if ($("#card-name").value === "Charizard ex (example)") $("#card-name").value = "Charizard ex";
+  $("#example-note").hidden = true;
+}
+
+function saveDraft() {
+  if (state.example || state.view !== "report") return;
+  localStore.write(KEYS.draft, { ...assessment(), thumbs: state.thumbs, saved_at: new Date().toISOString() });
+}
+
+function renderResume() {
+  const draft = localStore.read(KEYS.draft, null);
+  const btn = $("#resume");
+  btn.hidden = !(draft && draft.centering);
+  if (!btn.hidden) btn.textContent = `Resume ${draft.card && draft.card.name ? draft.card.name : "last card"}`;
+}
+
+function loadAssessment(a, thumbs) {
+  resetCard();
+  $("#card-name").value = a.card.name || "";
+  $("#card-set").value = a.card.set_name || "";
+  $("#card-number").value = a.card.number || "";
+  state.centering = { front: { ...a.centering.front }, back: { ...a.centering.back } };
+  state.defects = (a.defects || []).map((d) => ({ ...d }));
+  state.thumbs = { front: (thumbs && thumbs.front) || null, back: (thumbs && thumbs.back) || null };
+  setView("report");
 }
 
 /* ---------------------------------------------------------------- history */
@@ -629,20 +793,24 @@ function renderHistory() {
   list.innerHTML = "";
   const cards = localStore.cards();
   if (!cards.length) {
-    list.innerHTML = '<li class="empty">No saved cards yet. Grade a card and tap Save card.</li>';
+    list.innerHTML = '<li class="empty">No saved cards yet. Scan a card and tap Save to History.</li>';
     return;
   }
   for (const c of cards) {
     const li = document.createElement("li");
-    li.innerHTML = `${c.front_thumb ? '<img alt="">' : '<div class="ph"></div>'}
+    li.innerHTML = `${c.front_thumb ? '<img alt="">' : '<span class="ph"></span>'}
       <div><div class="h-name"></div><div class="h-meta"></div><div class="h-grades"></div></div>
-      <div class="h-actions"><button type="button" class="ghost del" aria-label="Delete saved card">✕</button></div>`;
+      <button type="button" class="del" aria-label="Delete saved card">✕</button>`;
     if (c.front_thumb) $("img", li).src = c.front_thumb;
     const card = c.assessment.card;
-    $(".h-name", li).textContent = card.name || "(unnamed card)";
+    $(".h-name", li).textContent = card.name || "Unnamed card";
     $(".h-meta", li).textContent = [card.set_name, card.number, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
     $(".h-grades", li).textContent = Object.values(c.report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ");
-    li.addEventListener("click", () => loadCard(c.id));
+    li.addEventListener("click", () => {
+      $("#history").hidden = true;
+      loadAssessment(c.assessment, { front: c.front_thumb, back: c.back_thumb });
+      toast("Loaded from History");
+    });
     const del = $(".del", li);
     del.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -666,33 +834,14 @@ function openHistory() {
   $("#history").hidden = false;
 }
 
-function loadCard(id) {
-  const saved = localStore.cards().find((c) => c.id === id);
-  if (!saved) return;
-  resetForm();
-  const a = saved.assessment;
-  $("#card-name").value = a.card.name || "";
-  $("#card-set").value = a.card.set_name || "";
-  $("#card-number").value = a.card.number || "";
-  $("#card-holo").checked = !!a.card.holo;
-  for (const side of SIDES) scanners[side].setValues(a.centering[side].lr, a.centering[side].tb);
-  state.defects = a.defects;
-  state.thumbs = { front: saved.front_thumb, back: saved.back_thumb };
-  renderDefects();
-  runGrade();
-  $("#history").hidden = true;
-  toast("Loaded saved card");
-}
-
 function saveCard() {
   leaveExample();
   runGrade();
   const cards = localStore.cards();
-  const a = assessment();
   cards.unshift({
     id: `${Date.now()}`,
     created_at: new Date().toISOString(),
-    assessment: a,
+    assessment: assessment(),
     report: state.report,
     front_thumb: state.thumbs.front,
     back_thumb: state.thumbs.back,
@@ -738,64 +887,71 @@ function restoreFrom(text) {
   toast(added ? `Restored ${added} card${added === 1 ? "" : "s"}.` : "Those cards are already here.");
 }
 
-/* ---------------------------------------------------------------- reset / init */
-
-function resetForm() {
-  leaveExample();
-  for (const id of ["#card-name", "#card-set", "#card-number"]) $(id).value = "";
-  $("#card-holo").checked = false;
-  for (const side of SIDES) scanners[side].clear();
-  state.defects = [];
-  state.thumbs = { front: null, back: null };
-  state.pick = { side: null, location: null, severity: null };
-  $("#picked").textContent = "Select a spot on the card map";
-  $("#defect-type").innerHTML = "";
-  $("#defect-type").disabled = true;
-  $("#defect-note").value = "";
-  updateAddButton();
-  renderDefects();
-}
-
-function restoreDraft(draft) {
-  $("#card-name").value = draft.card.name || "";
-  $("#card-set").value = draft.card.set_name || "";
-  $("#card-number").value = draft.card.number || "";
-  $("#card-holo").checked = !!draft.card.holo;
-  for (const side of SIDES) scanners[side].setValues(draft.centering[side].lr, draft.centering[side].tb);
-  state.defects = draft.defects || [];
-  renderDefects();
-  runGrade();
-}
+/* ---------------------------------------------------------------- init */
 
 function init() {
-  for (const root of $$(".side")) scanners[root.dataset.side] = new SideScanner(root, root.dataset.side);
+  guide.init();
   for (const fig of $$(".map")) buildMap(fig, fig.dataset.side);
 
-  $$("#severity button").forEach((b) => b.addEventListener("click", () => {
-    state.pick.severity = b.dataset.sev;
-    updateAddButton();
-  }));
-  $("#defect-type").addEventListener("change", updateAddButton);
-  $("#add-defect").addEventListener("click", () => {
-    leaveExample();
-    const { side, location, severity } = state.pick;
-    const note = $("#defect-note").value.trim();
-    state.defects.push({ side, location, type: $("#defect-type").value, severity, note: note || null });
-    $("#defect-note").value = "";
-    renderDefects();
-    scheduleGrade();
-  });
-  for (const id of ["#card-name", "#card-set", "#card-number", "#card-holo"]) {
-    $(id).addEventListener("input", () => { leaveExample(); scheduleGrade(); });
+  // Scan screen
+  for (const side of SIDES) {
+    const input = $(`#file-${side}`);
+    input.addEventListener("change", (e) => {
+      const f = e.target.files[0];
+      e.target.value = "";
+      if (f) scanFile(side, f);
+    });
+    const slot = $(`.slot[data-side="${side}"]`);
+    slot.tabIndex = 0;
+    slot.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
   }
+  $("#get-report").addEventListener("click", () => setView("report"));
+  $("#front-only").addEventListener("click", () => setView("report"));
+  $("#try-example").addEventListener("click", showExample);
+  $("#resume").addEventListener("click", () => {
+    const draft = localStore.read(KEYS.draft, null);
+    if (draft) loadAssessment(draft, draft.thumbs);
+  });
+
+  // Report screen
+  $("#back-to-scan").addEventListener("click", newScan);
+  $("#new-scan").addEventListener("click", newScan);
+  $("#scan-own").addEventListener("click", newScan);
   $("#save-card").addEventListener("click", saveCard);
-  $("#new-card").addEventListener("click", () => { resetForm(); runGrade(); window.scrollTo({ top: 0 }); });
-  $("#start-own").addEventListener("click", () => { resetForm(); runGrade(); });
-  $("#open-history").addEventListener("click", openHistory);
+  for (const id of ["#open-history", "#open-history-2"]) $(id).addEventListener("click", openHistory);
+  $$("#centering-section .segmented button").forEach((b) => b.addEventListener("click", () => {
+    state.activeSide = b.dataset.side;
+    renderCentering();
+  }));
+  for (const [id, key] of [["#ratio-lr", "lr"], ["#ratio-tb", "tb"]]) {
+    $(id).addEventListener("input", (e) => {
+      const v = parseFloat(e.target.value);
+      if (isNaN(v)) return;
+      leaveExample();
+      state.centering[state.activeSide][key] = Math.min(100, Math.max(50, v));
+      renderRatioInputs();
+      scheduleGrade();
+    });
+    $(id).addEventListener("blur", renderRatioInputs);
+  }
+  $("#retake-file").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (f) scanFile(state.activeSide, f);
+  });
+  for (const id of ["#card-name", "#card-set", "#card-number"]) {
+    $(id).addEventListener("input", () => { leaveExample(); saveDraft(); });
+  }
+
+  // Defect sheet
+  $$("#sev-seg button").forEach((b) => b.addEventListener("click", () => { state.sheet.severity = b.dataset.sev; updateSheet(); }));
+  $("#sheet-add").addEventListener("click", addDefectFromSheet);
+  $("#sheet-cancel").addEventListener("click", closeSheet);
+  $("#defect-sheet").addEventListener("click", (e) => { if (e.target.id === "defect-sheet") closeSheet(); });
+
+  // History sheet
   $("#close-history").addEventListener("click", () => ($("#history").hidden = true));
   $("#history").addEventListener("click", (e) => { if (e.target.id === "history") $("#history").hidden = true; });
-  $("#grade-bar-btn").addEventListener("click", () => $("#results").scrollIntoView({ behavior: "smooth", block: "start" }));
-
   $("#copy-backup").addEventListener("click", () => {
     const text = backupText();
     const box = $("#backup-text");
@@ -829,11 +985,13 @@ function init() {
     if (f) restoreFrom(await f.text());
   });
   $("#restore-text").addEventListener("click", () => restoreFrom($("#backup-text").value));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    closeSheet();
+    $("#history").hidden = true;
+  });
 
-  renderDefects();
-  const draft = localStore.read(KEYS.draft, null);
-  if (draft && draft.centering && draft.card) restoreDraft(draft);
-  else showExample();
+  setView("scan", { animate: false });
 }
 
 init();
