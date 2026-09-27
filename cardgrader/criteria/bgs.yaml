@@ -1,0 +1,58 @@
+# Beckett (BGS) grading criteria (theoretical model).
+# BGS scores four subgrades (centering, corners, edges, surface) in 0.5 steps and
+# derives the overall grade from them.
+# Published BGS centering tables differ between sources. These rows follow
+# Beckett's classic scale, which uses "X one way, Y the other" for the front:
+#   front       = limit for the WORSE axis
+#   front_other = limit for the BETTER axis (optional)
+company: BGS
+last_verified: "2026-09-27"
+sources:
+  - https://www.beckett.com/grading/scale
+  - https://growthscribe.com/beckett-grading-scale/
+  - http://cardmonopoly.blogspot.com/2014/04/beckett-grading-service-formula.html
+tolerance: 0.5
+grades: [10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1]
+labels:
+  10: Pristine 10
+  9.5: Gem Mint 9.5
+  9: Mint 9
+  8.5: NM-MT+ 8.5
+  8: NM-MT 8
+  7.5: NM+ 7.5
+  7: NM 7
+  6.5: EX-MT+ 6.5
+  6: EX-MT 6
+  5.5: EX+ 5.5
+  5: EX 5
+  4.5: VG-EX+ 4.5
+  4: VG-EX 4
+  3.5: VG+ 3.5
+  3: VG 3
+  2.5: G+ 2.5
+  2: G 2
+  1.5: Fair 1.5
+  1: Poor 1
+black_label: Pristine 10 (Black Label)
+centering:
+  - {grade: 10,  front: 55, front_other: 50, back: 60}
+  - {grade: 9.5, front: 55, back: 60}
+  - {grade: 9,   front: 60, front_other: 55, back: 80}
+  - {grade: 8.5, front: 65, front_other: 60, back: 90}
+  - {grade: 8,   front: 65, back: 90}
+  - {grade: 7,   front: 70, back: 90}
+  - {grade: 6,   front: 75, back: 95}
+  - {grade: 5,   front: 80, back: 100}
+  - {grade: 4,   front: 85, back: 100}
+  - {grade: 3,   front: 90, back: 100}
+  - {grade: 2,   front: 95, back: 100}
+  - {grade: 1,   front: 100, back: 100}
+overall_rules:
+  # The overall grade may be at most 0.5 above the lowest subgrade.
+  # If two or more subgrades tie for lowest, the overall grade equals that lowest subgrade.
+  # If the lowest subgrade is 2.5+ points below every other subgrade (e.g. a 7 among 9.5s), the overall may be lowest + 1.
+  # Pristine 10 needs at least three 10s, with the fourth at 9.5 or higher. Black Label needs four 10s.
+  # Gem Mint 9.5 needs at least three 9.5s, with the fourth at 9 or higher.
+  max_above_lowest: 0.5
+  outlier_gap: 2.5
+  outlier_bonus: 1.0

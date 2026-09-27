@@ -1,0 +1,47 @@
+# CGC Cards grading criteria (theoretical model).
+# In this file, grade 10.5 stands for the "Pristine 10" label and 10 for "Gem Mint 10".
+# Centering is quoted for the front, plus the back where CGC publishes one. Rows the
+# scale leaves blank are interpolated and marked "interp".
+company: CGC
+last_verified: "2026-09-27"
+sources:
+  - https://www.cgccards.com/card-grading/grading-scale/
+tolerance: 0.5
+grades: [10.5, 10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1]
+labels:
+  10.5: Pristine 10
+  10: Gem Mint 10
+  9.5: Mint+ 9.5
+  9: Mint 9
+  8.5: NM/Mint+ 8.5
+  8: NM/Mint 8
+  7.5: Near Mint+ 7.5
+  7: Near Mint 7
+  6.5: Ex/NM+ 6.5
+  6: Ex/NM 6
+  5.5: Excellent+ 5.5
+  5: Excellent 5
+  4.5: VG/Ex+ 4.5
+  4: VG/Ex 4
+  3.5: Very Good+ 3.5
+  3: Very Good 3
+  2.5: Good+ 2.5
+  2: Good 2
+  1.5: Fair 1.5
+  1: Poor 1
+centering:
+  - {grade: 10.5, front: 50, back: 55}    # "50/50"; back assumed 55/45
+  - {grade: 10,   front: 55, back: 75}
+  - {grade: 9.5,  front: 55, back: 75}    # interp: "exceptional centering"
+  - {grade: 9,    front: 60, back: 90}
+  - {grade: 8.5,  front: 62.5, back: 90}  # interp
+  - {grade: 8,    front: 65, back: 90}
+  - {grade: 7.5,  front: 65, back: 90}
+  - {grade: 7,    front: 70, back: 90}
+  - {grade: 6,    front: 75, back: 90}
+  - {grade: 5,    front: 80, back: 90}    # interp
+  - {grade: 4.5,  front: 85, back: 90}
+  - {grade: 3.5,  front: 90, back: 95}
+  - {grade: 1,    front: 100, back: 100}
+overall_rules:
+  max_above_lowest: 0.5

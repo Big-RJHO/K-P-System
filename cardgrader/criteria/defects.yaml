@@ -1,0 +1,116 @@
+# Defect catalog, tuned for Pokémon / TCG cards.
+#
+# Each severity has a "cap": the highest condition grade the affected component
+# (corners, edges or surface) can still get with that defect. The cap uses a shared
+# condition scale where 10.5 = flawless (Pristine), 10 = Gem Mint and 9 = Mint.
+# Each grader converts that condition into its own scale (for example, BGS 9.5 subgrade or TAG points).
+#
+# Severity guide:
+#   micro    - visible only under magnification or angled light. Rules out Pristine, not Gem Mint.
+#   minor    - visible on close inspection with the naked eye.
+#   moderate - obvious at arm's length.
+#   major    - heavy damage.
+#
+# Optional keys:
+#   qualifier: PSA qualifier this defect can trigger at moderate or worse severity
+#   fatal:     the card is altered and no company will give it a numeric grade
+#   overrides: per-company caps, e.g. {PSA: {minor: 9}}
+component_rules:
+  stack_penalty: 0.5        # each additional non-micro defect in the same component lowers it by this
+  max_stack_penalty: 1.5
+  micro_stack_count: 3      # this many micro defects in one component cap it at 9.5
+
+types:
+  corner_whitening:
+    label: Corner whitening
+    applies_to: [corners]
+    caps: {micro: 10, minor: 9, moderate: 8, major: 6}
+  corner_softening:
+    label: Soft / fuzzy / rounded corner
+    applies_to: [corners]
+    caps: {micro: 10, minor: 8.5, moderate: 7, major: 4.5}
+  corner_ding:
+    label: Corner ding or bend
+    applies_to: [corners]
+    caps: {micro: 9, minor: 8, moderate: 6, major: 4}
+
+  edge_whitening:
+    label: Edge whitening (blue back border)
+    applies_to: [edges]
+    caps: {micro: 10, minor: 9, moderate: 8, major: 6}
+  edge_chipping:
+    label: Edge chipping / nicks
+    applies_to: [edges]
+    caps: {micro: 10, minor: 8.5, moderate: 7, major: 5}
+  edge_silvering:
+    label: Edge silvering (foil showing on the edge)
+    applies_to: [edges]
+    caps: {micro: 10, minor: 9.5, moderate: 8.5, major: 7}
+  rough_cut:
+    label: Rough factory cut
+    applies_to: [edges]
+    caps: {micro: 10, minor: 9, moderate: 8, major: 7}
+  edge_dent:
+    label: Edge dent / notch
+    applies_to: [edges]
+    caps: {micro: 9, minor: 8, moderate: 6, major: 4}
+
+  surface_scratch:
+    label: Surface scratch / scuff
+    applies_to: [surface]
+    caps: {micro: 10, minor: 9, moderate: 7, major: 5}
+  holo_scratch:
+    label: Holo scratch
+    applies_to: [surface]
+    caps: {micro: 10, minor: 9, moderate: 8, major: 6}
+  print_line:
+    label: Print / roller line
+    applies_to: [surface]
+    caps: {micro: 10, minor: 9, moderate: 8, major: 7}
+    qualifier: PD
+  print_spot:
+    label: Print spot / ink dot / speck
+    applies_to: [surface]
+    caps: {micro: 10, minor: 9, moderate: 8, major: 7}
+    qualifier: PD
+  indentation:
+    label: Indentation / dent / pressure mark
+    applies_to: [surface]
+    caps: {micro: 9, minor: 8, moderate: 6, major: 4}
+  gloss_loss:
+    label: Loss of gloss / fading
+    applies_to: [surface]
+    caps: {micro: 10, minor: 8.5, moderate: 6, major: 4}
+  misregistration:
+    label: Out of focus / color misregistration
+    applies_to: [surface]
+    caps: {micro: 10, minor: 8.5, moderate: 7, major: 5}
+    qualifier: OF
+  stain:
+    label: Stain / discoloration / water damage
+    applies_to: [surface]
+    caps: {micro: 9, minor: 7, moderate: 5, major: 3}
+    qualifier: ST
+  writing:
+    label: Ink / pencil / writing
+    applies_to: [surface]
+    caps: {micro: 7, minor: 6, moderate: 4, major: 2}
+    qualifier: MK
+  crease:
+    label: Crease / wrinkle
+    applies_to: [surface, corners]
+    caps: {micro: 7, minor: 5, moderate: 3.5, major: 2}
+  miscut:
+    label: Factory miscut (shows part of the next card)
+    applies_to: [edges]
+    caps: {micro: 8, minor: 6, moderate: 4, major: 2}
+    qualifier: MC
+  hole:
+    label: Pin / staple hole, missing stock
+    applies_to: [surface, corners, edges]
+    caps: {micro: 3, minor: 2, moderate: 1.5, major: 1}
+  altered:
+    label: Trimmed / recolored / altered
+    applies_to: [surface, corners, edges]
+    caps: {micro: 1, minor: 1, moderate: 1, major: 1}
+    fatal: true

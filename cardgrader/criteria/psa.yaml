@@ -1,0 +1,48 @@
+# PSA grading criteria (theoretical model).
+# PSA gives one overall grade with no subgrades. Half grades exist from 1.5 to 8.5,
+# and there is no PSA 9.5. Centering values are the largest share allowed, so 55
+# means 55/45. "front" is checked against the worse of the L/R and T/B axes.
+company: PSA
+last_verified: "2026-09-27"
+sources:
+  - https://www.psacard.com/gradingstandards
+  - https://www.cardcenteringcalculator.com/articles/card-centering-tolerance-by-grade
+tolerance: 0.5        # measurement slack in percentage points ("~55/45")
+grades: [10, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1]
+labels:
+  10: GEM MT 10
+  9: MINT 9
+  8.5: NM-MT+ 8.5
+  8: NM-MT 8
+  7.5: NM+ 7.5
+  7: NM 7
+  6.5: EX-MT+ 6.5
+  6: EX-MT 6
+  5.5: EX+ 5.5
+  5: EX 5
+  4.5: VG-EX+ 4.5
+  4: VG-EX 4
+  3.5: VG+ 3.5
+  3: VG 3
+  2.5: GOOD+ 2.5
+  2: GOOD 2
+  1.5: FR 1.5
+  1: PR 1
+centering:            # highest grade first; a card gets the first row it passes
+  - {grade: 10, front: 55, back: 75}
+  - {grade: 9,  front: 60, back: 90}
+  - {grade: 8,  front: 65, back: 90}
+  - {grade: 7,  front: 70, back: 90}
+  - {grade: 6,  front: 80, back: 90}
+  - {grade: 5,  front: 85, back: 90}
+  - {grade: 4,  front: 85, back: 90}
+  - {grade: 3,  front: 90, back: 90}
+  - {grade: 2,  front: 90, back: 90}
+  - {grade: 1,  front: 100, back: 100}
+qualifiers:
+  OC: Off-center. The card would otherwise grade higher but misses the centering standard.
+  ST: Staining
+  PD: Print defect
+  OF: Out of focus / misregistration
+  MK: Marks (ink, pencil, writing)
+  MC: Miscut
