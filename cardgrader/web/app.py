@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -17,6 +18,7 @@ from ..engine import grade_all
 from ..models import CORNER_LOCATIONS, EDGE_LOCATIONS, CardAssessment, GradeReport, SideCentering
 from ..storage import CardStore
 from ..vision import decode_image, find_card, measure_borders, warp_card
+from .network import lan_addresses, qr_svg
 
 HERE = Path(__file__).parent
 MARGIN = 24  # px of surrounding photo kept around the warped card
@@ -39,6 +41,21 @@ def _data_url(img: np.ndarray, width: int | None = None, quality: int = 90) -> s
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (HERE / "templates" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+def apple_touch_icon() -> FileResponse:
+    return FileResponse(HERE / "static" / "apple-touch-icon.png", media_type="image/png")
+
+
+@app.get("/api/connect")
+def connect(request: Request) -> dict:
+    """How to open this app on a phone: LAN URLs plus a QR code for the first one."""
+    lan_enabled = os.environ.get("CARDGRADER_LAN") == "1"
+    port = request.url.port or int(os.environ.get("CARDGRADER_PORT", 8000))
+    urls = [f"http://{ip}:{port}" for ip in lan_addresses()] if lan_enabled else []
+    return {"lan_enabled": lan_enabled, "urls": urls, "qr_svg": qr_svg(urls[0]) if urls else None}
 
 
 @app.get("/api/criteria")

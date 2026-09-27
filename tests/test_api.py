@@ -50,3 +50,41 @@ def test_bad_inputs(client):
     assert client.post("/api/grade", json=bad).status_code == 422
     bad_loc = {"defects": [{"side": "front", "location": "middle", "type": "stain", "severity": "minor"}]}
     assert client.post("/api/grade", json=bad_loc).status_code == 422
+
+
+def test_connect_info(client, monkeypatch):
+    monkeypatch.setenv("CARDGRADER_LAN", "0")
+    assert client.get("/api/connect").json() == {"lan_enabled": False, "urls": [], "qr_svg": None}
+
+    from cardgrader.web import app as webapp
+
+    monkeypatch.setenv("CARDGRADER_LAN", "1")
+    monkeypatch.setattr(webapp, "lan_addresses", lambda: ["192.168.1.20"])
+    info = client.get("/api/connect").json()
+    assert info["urls"][0].startswith("http://192.168.1.20:")
+    assert info["qr_svg"].startswith("<svg")
+
+
+def test_qr_code_decodes():
+    import cv2
+    import numpy as np
+
+    from cardgrader.web.network import qr_svg
+
+    url = "http://192.168.1.20:8000"
+    svg = qr_svg(url, module=8)
+    # Rasterise the SVG's rects and read it back with OpenCV's detector.
+    import re
+
+    size = int(re.search(r'viewBox="0 0 (\d+)', svg).group(1))
+    img = np.full((size, size), 255, np.uint8)
+    for x, y in re.findall(r'<rect x="(\d+)" y="(\d+)" width="8"', svg):
+        img[int(y) : int(y) + 8, int(x) : int(x) + 8] = 0
+    assert cv2.QRCodeDetector().detectAndDecode(img)[0] == url
+
+
+def test_home_screen_assets(client):
+    assert client.get("/apple-touch-icon.png").headers["content-type"] == "image/png"
+    assert client.get("/static/manifest.webmanifest").status_code == 200
+    html = client.get("/").text
+    assert 'capture="environment"' in html and "apple-mobile-web-app-capable" in html

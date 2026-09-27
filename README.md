@@ -13,10 +13,28 @@ pip install -e ".[dev]"
 python -m cardgrader.web          # opens on http://127.0.0.1:8000
 ```
 
+## Using it on an iPhone
+
+The app runs on your computer, and your iPhone opens it in Safari over your home Wi-Fi.
+
+1. Start the app with LAN access:
+   ```bash
+   python -m cardgrader.web --lan
+   ```
+   The terminal prints the address to open on the phone, for example `http://192.168.1.20:8000`.
+2. On the computer, click **On iPhone** in the top bar to show a QR code. Point the iPhone camera at it, or type the address into Safari. The iPhone must be on the same Wi-Fi.
+3. In Safari, tap **Share → Add to Home Screen**. It then opens full-screen like an app, with its own icon.
+
+On the phone, **Camera** takes the photo directly and **Photos** picks one from your library. Photos are resized and converted to JPEG on the phone before upload, which also handles HEIC. Drag the centering guides with a finger; a magnifier shows the line under your finger. The bar at the bottom always shows the four estimated grades, and tapping it jumps to the details.
+
+For good centering from a phone photo: put the card on a dark, plain background, hold the phone parallel to the card, fill most of the frame, and avoid glare on holo cards.
+
+> `--lan` makes the app reachable by any device on your network, with no login. Only use it on a network you trust, such as your home Wi-Fi.
+
 ## How it works
 
 1. **Card.** Enter the name, set and number (optional, used for your history).
-2. **Centering.** Upload a scan or a straight-on photo of the front and the back.
+2. **Centering.** Upload a scan, or take a straight-on photo of the front and the back.
    - The card is found, perspective-corrected, and its border widths are measured with OpenCV.
    - Blue dashed guides mark the card edge and pink guides mark the inner frame. Drag any guide to correct it; a magnifier appears while you drag.
    - For full-art cards, or when you have no scan, type the L/R and T/B ratios directly.

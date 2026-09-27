@@ -31,6 +31,29 @@ function toast(msg) {
   toast.timer = setTimeout(() => (t.hidden = true), 2600);
 }
 
+/**
+ * Downscale a photo in the browser before upload and re-encode it as JPEG.
+ * This keeps uploads from a phone small and fast, applies the EXIF rotation,
+ * and turns iPhone HEIC photos into something OpenCV can read.
+ */
+function prepareImage(file, maxSide = 2400) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => resolve(blob || file), "image/jpeg", 0.92);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };  // let the server try
+    img.src = url;
+  });
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, opts);
   if (!res.ok) {
@@ -62,10 +85,12 @@ class SideScanner {
     this.drag = null;
     this.pointer = null;
 
-    $("input[type=file]", root).addEventListener("change", (e) => {
-      if (e.target.files[0]) this.upload(e.target.files[0]);
-      e.target.value = "";
-    });
+    for (const input of $$("input[type=file]", root)) {
+      input.addEventListener("change", (e) => {
+        if (e.target.files[0]) this.upload(e.target.files[0]);
+        e.target.value = "";
+      });
+    }
     this.zone.addEventListener("dragover", (e) => { e.preventDefault(); this.zone.classList.add("drag"); });
     this.zone.addEventListener("dragleave", () => this.zone.classList.remove("drag"));
     this.zone.addEventListener("drop", (e) => {
@@ -79,14 +104,23 @@ class SideScanner {
     this.canvas.addEventListener("pointerdown", (e) => this.onDown(e));
     this.canvas.addEventListener("pointermove", (e) => this.onMove(e));
     this.canvas.addEventListener("pointerup", (e) => this.onUp(e));
+    this.canvas.addEventListener("pointercancel", (e) => this.onUp(e));
     this.canvas.addEventListener("pointerleave", () => { if (!this.drag) { this.pointer = null; this.draw(); } });
+    // On touch screens, only block page scrolling when the finger lands on a guide line.
+    this.canvas.addEventListener("touchstart", (e) => {
+      if (!this.lines || e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (this.hit(this.toNative(t, "touch"))) e.preventDefault();
+    }, { passive: false });
+    this.canvas.addEventListener("touchmove", (e) => { if (this.drag) e.preventDefault(); }, { passive: false });
   }
 
   async upload(file) {
-    const form = new FormData();
-    form.append("file", file);
-    form.append("mode", this.cropped.checked ? "cropped" : "auto");
     this.zone.classList.add("busy");
+    const image = await prepareImage(file);
+    const form = new FormData();
+    form.append("file", image, "scan.jpg");
+    form.append("mode", this.cropped.checked ? "cropped" : "auto");
     try {
       const scan = await api("/api/scan", { method: "POST", body: form });
       await this.loadScan(scan);
@@ -154,14 +188,14 @@ class SideScanner {
     scheduleGrade();
   }
 
-  toNative(e) {
+  toNative(e, pointerType = e.pointerType) {
     const r = this.canvas.getBoundingClientRect();
     const k = this.canvas.width / r.width;
-    return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k, k };
+    return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k, k, touch: pointerType === "touch" || pointerType === "pen" };
   }
 
   hit(p) {
-    const tol = 10 * p.k;
+    const tol = (p.touch ? 22 : 10) * p.k;  // fingers need a bigger target
     let best = null;
     for (const kind of ["inner", "outer"]) {
       for (const edge of ["left", "right", "top", "bottom"]) {
@@ -239,7 +273,8 @@ class SideScanner {
     const zoom = 4, src = 60, size = src * zoom;
     const p = this.pointer;
     const dx = p.x > canvas.width / 2 ? 12 : canvas.width - size - 12;
-    const dy = 12;
+    // Keep the loupe away from the finger: top normally, bottom when dragging near the top.
+    const dy = p.y < size + 60 ? canvas.height - size - 12 : 12;
     ctx.save();
     ctx.beginPath();
     ctx.rect(dx, dy, size, size);
@@ -306,6 +341,13 @@ function pickZone(side, location) {
   paintZones();
 }
 
+const SEV_TEXT = {
+  micro: "Only under magnification or angled light",
+  minor: "Visible on close inspection",
+  moderate: "Obvious at arm's length",
+  major: "Heavy damage",
+};
+
 function updateAddButton() {
   $("#add-defect").disabled = !(state.pick.location && state.pick.severity);
   $$("#severity button").forEach((b) => b.classList.toggle("active", b.dataset.sev === state.pick.severity));
@@ -313,6 +355,12 @@ function updateAddButton() {
   $$("#severity button").forEach((b) => {
     b.title = b.title.split(" · ")[0] + (caps ? ` · caps component at ${caps.caps[b.dataset.sev]}` : "");
   });
+  const sev = state.pick.severity;
+  if (sev) {
+    const cap = caps ? caps.caps[sev] : null;
+    const shown = cap == null ? "" : cap >= 10 ? " · still allows Gem Mint" : ` · caps this area at ${cap}`;
+    $("#sev-hint").textContent = SEV_TEXT[sev] + shown;
+  }
 }
 
 function paintZones() {
@@ -392,7 +440,23 @@ function subLabel(company, v) {
   return v >= 10.5 ? "10P" : String(v);
 }
 
+function renderGradeBar(report) {
+  const btn = $("#grade-bar-btn");
+  btn.innerHTML = "";
+  btn.setAttribute("aria-label", `${report.summary} Tap for details.`);
+  for (const g of Object.values(report.grades)) {
+    const item = document.createElement("span");
+    item.className = "gb-item" + (g.company === report.best_fit ? " best" : "");
+    item.dataset.co = g.company;
+    const big = g.tier >= 99 ? "—" : (g.grade % 1 === 0 ? g.grade.toFixed(0) : g.grade.toFixed(1));
+    const top = g.label.startsWith("Pristine") ? "P" : "";
+    item.innerHTML = `<span class="gb-co">${g.company}</span><span class="gb-grade">${big}${top ? "<small>P</small>" : ""}</span>`;
+    btn.append(item);
+  }
+}
+
 function renderReport(report) {
+  renderGradeBar(report);
   const box = $("#grades");
   box.innerHTML = "";
   $("#best-fit").textContent = report.summary.split(". ")[0] + ".";
@@ -505,6 +569,32 @@ function resetForm() {
   renderDefects();
 }
 
+/* ---------------------------------------------------------------- open on iPhone */
+
+async function openPhone() {
+  const body = $("#phone-body");
+  body.innerHTML = "<p class='hint'>Looking up your network address…</p>";
+  $("#phone").hidden = false;
+  const info = await api("/api/connect");
+  if (info.lan_enabled && info.urls.length) {
+    body.innerHTML = `<div class="qr"></div><div class="url"></div>
+      <ol>
+        <li>Connect your iPhone to the same Wi-Fi as this computer.</li>
+        <li>Point the iPhone camera at the code, or type the address into Safari.</li>
+        <li>In Safari, tap <b>Share → Add to Home Screen</b> to open it like an app.</li>
+      </ol>`;
+    $(".qr", body).innerHTML = info.qr_svg;
+    $(".url", body).textContent = info.urls[0];
+  } else {
+    body.innerHTML = `<p>The app is only listening on this computer right now. Restart it with LAN access:</p>
+      <p class="url">python -m cardgrader.web --lan</p>
+      <ol>
+        <li>Connect your iPhone to the same Wi-Fi.</li>
+        <li>Come back here and tap <b>On iPhone</b> again for a QR code.</li>
+      </ol>`;
+  }
+}
+
 /* ---------------------------------------------------------------- init */
 
 async function init() {
@@ -545,6 +635,10 @@ async function init() {
   $("#close-history").addEventListener("click", () => ($("#history").hidden = true));
   $("#history").addEventListener("click", (e) => { if (e.target.id === "history") $("#history").hidden = true; });
   $("#new-card").addEventListener("click", () => { resetForm(); scheduleGrade(); });
+  $("#grade-bar-btn").addEventListener("click", () => $("#results").scrollIntoView({ behavior: "smooth", block: "start" }));
+  $("#open-phone").addEventListener("click", () => openPhone().catch((err) => toast(err.message)));
+  $("#close-phone").addEventListener("click", () => ($("#phone").hidden = true));
+  $("#phone").addEventListener("click", (e) => { if (e.target.id === "phone") $("#phone").hidden = true; });
 
   renderDefects();
   runGrade();
