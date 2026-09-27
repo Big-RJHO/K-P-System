@@ -4,7 +4,26 @@ An in-house pre-grading tool for Pokémon / TCG cards. You scan a card and log w
 
 > These are theoretical estimates. The tool is not affiliated with or endorsed by PSA, Beckett, CGC or TAG, and real grades depend on each company's own inspection.
 
-## Quick start
+## Standalone app (no computer needed)
+
+There is also a version that runs entirely on your phone. Grading, centering measurement and your saved cards all stay in the browser, with no server.
+
+- **Claude link:** a private page on your claude.ai account. Open it in Safari on the iPhone while signed in to claude.ai.
+- **GitHub Pages:** a normal web address that also works offline. In Safari, tap **Share → Add to Home Screen** to open it full-screen like an app. One-time setup, which you can do from the GitHub app or github.com on your phone:
+  1. Merge this branch into `main`.
+  2. Go to **Settings → Pages** and set **Source** to **GitHub Actions**. On a free GitHub plan the repository must be public for Pages to work.
+  3. The **Deploy standalone app to GitHub Pages** workflow publishes the site at `https://<your-user>.github.io/<repo>/`. You can re-run it any time from the **Actions** tab.
+
+Saved cards live only in the browser that saved them. Use **History → Copy backup** now and then (paste the text into Notes), and **Restore pasted backup** to bring them back or move them to another device.
+
+The standalone app's source is in `standalone/src/`:
+- `grading.js` is a JavaScript port of the Python graders.
+- `vision.js` is a pure-JavaScript port of the OpenCV centering measurement.
+- `app.js`, `style.css` and `index.html` are the page.
+
+`python scripts/build_standalone.py` embeds the same `cardgrader/criteria/*.yaml` rules. It writes `standalone/dist/card-grading-lab.html` for the Claude link and `site/` for GitHub Pages. `tests/test_standalone_parity.py` checks that the JavaScript engine grades 400 random cards exactly like the Python one.
+
+## Quick start (Python app)
 
 ```bash
 python3 -m venv .venv
@@ -76,7 +95,7 @@ Published BGS centering tables vary between sources, so check them against your 
 ## Development
 
 ```bash
-pytest               # grader rules, centering vision on synthetic scans, API round-trip
+pytest               # grader rules, centering vision, API round-trip, and JS-vs-Python parity (needs node)
 ```
 
 Code layout: `cardgrader/vision` handles card detection and border measurement, `cardgrader/graders` has one module per company, `cardgrader/condition.py` turns defects into component condition, and `cardgrader/web` holds the FastAPI app and UI.

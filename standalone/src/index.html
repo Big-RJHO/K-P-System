@@ -1,0 +1,127 @@
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l10 10-10 10L2 12z"/><path class="logo-cut" d="M12 7.5l4.5 4.5-4.5 4.5L7.5 12z"/></svg>
+    <div>
+      <h1>Card Grading Lab</h1>
+      <p>PSA · BGS · CGC · TAG estimates<span class="wide-only"> for Pokémon / TCG cards</span></p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <button id="new-card" type="button" class="ghost">New card</button>
+    <button id="open-history" type="button" class="ghost">History</button>
+  </div>
+</header>
+
+<div id="example-banner" class="example-banner" hidden>
+  <span><b>Example card.</b> This is a sample scan with two logged defects, so you can see how grading works.</span>
+  <button id="start-own" type="button" class="primary">Grade my card</button>
+</div>
+
+<main class="layout">
+  <section class="workflow">
+    <article class="panel">
+      <h2><span class="step">1</span>Card</h2>
+      <div class="grid-4">
+        <label for="card-name">Name<input id="card-name" placeholder="Charizard ex" autocomplete="off"></label>
+        <label for="card-set">Set<input id="card-set" placeholder="Obsidian Flames" autocomplete="off"></label>
+        <label for="card-number">Number<input id="card-number" placeholder="223/197" autocomplete="off"></label>
+        <label class="check" for="card-holo"><input type="checkbox" id="card-holo"> Holo / foil</label>
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2><span class="step">2</span>Centering</h2>
+      <p class="hint">Photograph each side straight on, with the card on a dark, plain background. The app finds the card, flattens it and measures the borders.
+        Drag the <span class="swatch outer"></span> card-edge and <span class="swatch inner"></span> frame guides to fine-tune them.
+        For full-art cards, line the frame guides up with the printed frame or type the ratios.</p>
+      <div class="sides">
+        <div class="side" data-side="front"></div>
+        <div class="side" data-side="back"></div>
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2><span class="step">3</span>Corners, edges &amp; surface</h2>
+      <p class="hint">Tap a corner, edge or the middle of the card to log a defect there. Look under a bright light, tilt the card, and use a loupe if you have one.</p>
+      <div class="defect-editor">
+        <div class="maps">
+          <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
+          <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
+        </div>
+        <div class="defect-form">
+          <div class="picked" id="picked">Select a spot on the card map</div>
+          <label for="defect-type">Defect<select id="defect-type" disabled></select></label>
+          <div class="severity" id="severity" role="group" aria-label="Severity">
+            <button type="button" data-sev="micro">Micro</button>
+            <button type="button" data-sev="minor">Minor</button>
+            <button type="button" data-sev="moderate">Moderate</button>
+            <button type="button" data-sev="major">Major</button>
+          </div>
+          <p class="sev-hint" id="sev-hint">Micro: only under magnification · Minor: close look · Moderate: arm's length · Major: heavy damage</p>
+          <label for="defect-note">Note<input id="defect-note" placeholder="optional" autocomplete="off"></label>
+          <button id="add-defect" type="button" class="primary" disabled>Add defect</button>
+        </div>
+      </div>
+      <ul class="defect-list" id="defect-list"></ul>
+    </article>
+  </section>
+
+  <aside class="results" id="results">
+    <div class="results-inner">
+      <div class="results-head">
+        <h2>Estimated grades</h2>
+        <button id="save-card" type="button" class="primary">Save card</button>
+      </div>
+      <div id="best-fit" class="best-fit"></div>
+      <div id="grades" class="grades"></div>
+      <p id="disclaimer" class="disclaimer"></p>
+    </div>
+  </aside>
+</main>
+
+<nav id="grade-bar" class="grade-bar" aria-label="Estimated grades">
+  <button type="button" id="grade-bar-btn"></button>
+</nav>
+
+<div id="history" class="drawer" hidden>
+  <div class="drawer-panel" role="dialog" aria-labelledby="history-title">
+    <div class="drawer-head">
+      <h2 id="history-title">Graded cards</h2>
+      <button id="close-history" type="button" class="ghost">Close</button>
+    </div>
+    <ul id="history-list" class="history-list"></ul>
+    <section class="backup">
+      <h3>Backup &amp; restore</h3>
+      <p class="hint">Saved cards live only in this browser. Copy a backup now and then, and paste it back here to restore it on this or another device.</p>
+      <div class="backup-actions">
+        <button id="copy-backup" type="button">Copy backup</button>
+        <!--SITE_ONLY_START--><button id="download-backup" type="button" hidden>Download backup</button><!--SITE_ONLY_END-->
+        <label class="file-btn alt" for="restore-file">Restore from file<input id="restore-file" type="file" accept="application/json,.json,text/plain" hidden></label>
+      </div>
+      <label for="backup-text">Backup text<textarea id="backup-text" rows="4" placeholder="Paste a backup here, then tap Restore pasted backup" spellcheck="false"></textarea></label>
+      <button id="restore-text" type="button">Restore pasted backup</button>
+    </section>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<template id="side-template">
+  <div class="side-head">
+    <h3></h3>
+    <div class="side-tools">
+      <label class="mini"><input type="checkbox" class="cropped"> Already cropped</label>
+      <label class="file-btn camera">Camera<input type="file" accept="image/*" capture="environment" hidden></label>
+      <label class="file-btn alt"><span class="touch-only">Photos</span><span class="desktop-only">Upload</span><input type="file" accept="image/*" hidden></label>
+    </div>
+  </div>
+  <div class="dropzone">
+    <canvas></canvas>
+    <div class="drop-msg">Take a photo or drop an image here<small>Fill the frame, hold the phone parallel to the card, and avoid glare</small></div>
+  </div>
+  <div class="readout">
+    <label>L/R <input type="number" inputmode="decimal" class="lr" min="50" max="100" step="0.1" value="50"><span class="pct">/ <b class="lr-other">50</b></span></label>
+    <label>T/B <input type="number" inputmode="decimal" class="tb" min="50" max="100" step="0.1" value="50"><span class="pct">/ <b class="tb-other">50</b></span></label>
+    <span class="conf"></span>
+  </div>
+</template>

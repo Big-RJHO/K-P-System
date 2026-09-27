@@ -5,3 +5,5 @@ __pycache__/
 data/
 *.db
 *.egg-info/
+standalone/dist/
+site/
