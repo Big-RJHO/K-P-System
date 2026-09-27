@@ -15,7 +15,12 @@
     <div class="scan-body">
       <div class="scan-intro">
         <h1 id="scan-title">Scan your card</h1>
-        <p>Photograph the front and back. You'll get estimated PSA, BGS, CGC and TAG grades.</p>
+        <p>Pick the game, then photograph the front and back. You'll get estimated PSA, BGS, CGC and TAG grades.</p>
+      </div>
+
+      <div class="segmented game-seg" id="game-seg" role="radiogroup" aria-label="Card game">
+        <button type="button" role="radio" data-game="pokemon" aria-checked="true">Pokémon</button>
+        <button type="button" role="radio" data-game="riftbound" aria-checked="false">Riftbound</button>
       </div>
 
       <div class="slots">
@@ -47,11 +52,7 @@
         </label>
       </div>
 
-      <ul class="tips" aria-label="Photo tips">
-        <li>Dark, plain background</li>
-        <li>Phone parallel to the card</li>
-        <li>No glare on holo</li>
-      </ul>
+      <ul class="tips" id="tips" aria-label="Photo tips"></ul>
     </div>
 
     <div class="scan-actions">
@@ -86,6 +87,7 @@
       <div class="identity reveal">
         <div class="thumbs" id="thumbs"></div>
         <div class="identity-fields">
+          <span class="game-chip" id="game-chip"></span>
           <label class="sr-only" for="card-name">Card name</label>
           <input id="card-name" class="name-input" placeholder="Name this card" autocomplete="off">
           <div class="meta-inputs">
@@ -139,7 +141,7 @@
       <details class="card-panel section reveal" id="condition-section" open>
         <summary><h2>Corners, edges &amp; surface</h2><span class="summary-value" id="defect-summary"></span></summary>
         <div class="section-body">
-          <p class="hint">Tap where you see wear. Check under a bright light, tilting the card.</p>
+          <p class="hint" id="condition-hint">Tap where you see wear. Check under a bright light, tilting the card.</p>
           <div class="maps">
             <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
             <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>

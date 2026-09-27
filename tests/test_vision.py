@@ -36,3 +36,24 @@ def test_cropped_mode_uses_whole_image():
     img = make_card(40, 30, 45, 45)
     corners, _ = find_card(img, mode="cropped")
     assert corners[0].tolist() == [0, 0]
+
+
+# Riftbound: black-bordered fronts and black backs photographed on a light surface,
+# and white (Rune) / blue (main deck) backs on a dark surface.
+RIFTBOUND_CASES = [
+    ((40, 31, 44, 47), 3, (20, 20, 20), 215),
+    ((36, 44, 45, 40), -5, (28, 24, 22), 200),
+    ((42, 38, 41, 49), 4, (235, 235, 235), 35),
+    ((44, 36, 46, 43), -2, (150, 70, 25), 35),
+]
+
+
+@pytest.mark.parametrize("borders,angle,color,bg", RIFTBOUND_CASES)
+def test_riftbound_style_cards(borders, angle, color, bg):
+    img = place_on_background(make_card(*borders, border_bgr=color), angle, bg=bg)
+    corners, _ = find_card(img)
+    m = measure_borders(warp_card(img, corners, MARGIN), MARGIN)
+    got = SideCentering.from_borders(m.borders)
+    exp = expected(*borders)
+    assert abs(got.lr - exp.lr) <= 1.0
+    assert abs(got.tb - exp.tb) <= 1.0

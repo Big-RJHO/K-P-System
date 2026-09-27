@@ -27,11 +27,11 @@ def make_card(
     return card
 
 
-def place_on_background(card: np.ndarray, angle: float = 3.0, seed: int = 1) -> np.ndarray:
+def place_on_background(card: np.ndarray, angle: float = 3.0, seed: int = 1, bg: int = 35) -> np.ndarray:
     """Rotate the card and paste it onto a larger, noisy dark background, like a photo."""
     rng = np.random.default_rng(seed)
     bh, bw = int(H * 1.5), int(W * 1.6)
-    bg = np.clip(rng.normal(35, 10, (bh, bw, 3)), 0, 255).astype(np.uint8)
+    bg = np.clip(rng.normal(bg, 10, (bh, bw, 3)), 0, 255).astype(np.uint8)
     center = (bw / 2, bh / 2)
     matrix = cv2.getRotationMatrix2D((W / 2, H / 2), angle, 1.0)
     matrix[0, 2] += center[0] - W / 2

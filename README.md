@@ -1,12 +1,12 @@
 # Card Grading Lab
 
-An in-house pre-grading tool for Pokémon / TCG cards. You scan a card and log what you see. It then estimates the grade the card would receive from **PSA, Beckett (BGS), CGC and TAG**, based on each company's published grading standards. It also explains what is holding the card back at each company.
+An in-house pre-grading tool for Pokémon and Riftbound (League of Legends TCG) cards, and other standard 63 × 88 mm TCG cards. You scan a card and log what you see. It then estimates the grade the card would receive from **PSA, Beckett (BGS), CGC and TAG**, based on each company's published grading standards. It also explains what is holding the card back at each company.
 
 > These are theoretical estimates. The tool is not affiliated with or endorsed by PSA, Beckett, CGC or TAG, and real grades depend on each company's own inspection.
 
 ## Standalone app (no computer needed)
 
-There is also a version that runs entirely on your phone. Grading, centering measurement and your saved cards all stay in the browser, with no server.
+There is also a version that runs entirely on your phone. Pick **Pokémon** or **Riftbound** on the scan screen. The grading rules are the same, because PSA, BGS, CGC and TAG apply the same standards to all TCG cards. The photo tips, hints and example card change with the game. For Riftbound's black-bordered fronts and black Legend/Battlefield backs, photograph on a light, plain surface so the card edge stands out. Grading, centering measurement and your saved cards all stay in the browser, with no server.
 
 - **Claude link:** a private page on your claude.ai account. Open it in Safari on the iPhone while signed in to claude.ai.
 - **GitHub Pages:** a normal web address that also works offline. In Safari, tap **Share → Add to Home Screen** to open it full-screen like an app. One-time setup, which you can do from the GitHub app or github.com on your phone:

@@ -68,6 +68,18 @@ def test_js_centering_within_one_point(tmp_path):
         assert res["confidence"]["borders"] > 0.6
 
 
+def test_js_riftbound_style_cards(tmp_path):
+    from test_vision import RIFTBOUND_CASES
+
+    images, truth = [], []
+    for borders, angle, color, bg in RIFTBOUND_CASES:
+        images.append((place_on_background(make_card(*borders, border_bgr=color), angle, bg=bg), "auto"))
+        truth.append(expected(*borders))
+    for (lr, tb), res in zip(truth, run(images, tmp_path)):
+        assert abs(res["centering"]["lr"] - lr) <= 1.0, (lr, tb, res)
+        assert abs(res["centering"]["tb"] - tb) <= 1.0, (lr, tb, res)
+
+
 def test_js_cropped_mode_and_guides(tmp_path):
     card = make_card(40, 30, 45, 45)
     [res] = run([(card, "cropped")], tmp_path)

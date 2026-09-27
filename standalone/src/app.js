@@ -20,7 +20,40 @@ const CONDITION_WORDS = [
   [6, "Excellent-MT"], [5, "Excellent"], [4, "VG-EX"], [3, "Very Good"], [2, "Good"], [0, "Poor"],
 ];
 
+// Per-game photo tips, placeholders, hints and example card. Grading rules are the same:
+// PSA, BGS, CGC and TAG grade all 63 x 88 mm TCG cards against the same standards.
+const GAMES = {
+  pokemon: {
+    label: "Pokémon",
+    tips: ["Dark, plain background", "Phone parallel to the card", "No glare on holo"],
+    placeholders: { name: "Name this card", set: "Set", number: "No." },
+    hint: "Tap where you see wear. Check under a bright light, tilting the card. Whitening shows most on the blue back border.",
+    example: {
+      name: "Charizard ex", set: "Obsidian Flames", number: "223/197",
+      defects: [
+        { side: "back", location: "top_right", type: "corner_whitening", severity: "minor", note: null },
+        { side: "front", location: "surface", type: "holo_scratch", severity: "micro", note: "Only under a lamp" },
+      ],
+    },
+  },
+  riftbound: {
+    label: "Riftbound",
+    tips: ["Light, plain background for black borders and black backs", "Dark background for white Rune backs", "Phone parallel, no glare on foils"],
+    placeholders: { name: "Name this card", set: "Set, e.g. Origins", number: "No." },
+    hint: "Tap where you see wear. Many Origins cards left the factory with burred edges: log those as Rough factory cut / burred edge, not chipping. Whitening shows most on black borders and black backs.",
+    example: {
+      name: "Example Riftbound card", set: "Origins", number: "",
+      defects: [
+        { side: "front", location: "top", type: "rough_cut", severity: "minor", note: "Factory burr" },
+        { side: "back", location: "bottom_left", type: "corner_whitening", severity: "micro", note: null },
+      ],
+    },
+  },
+};
+const gameInfo = (g) => GAMES[g] || GAMES.pokemon;
+
 const state = {
+  game: "pokemon",
   view: "scan",
   scans: { front: null, back: null },  // {img: canvas, lines, width, height, confidence}
   thumbs: { front: null, back: null },
@@ -56,7 +89,7 @@ function toast(msg) {
 
 /* ---------------------------------------------------------------- storage */
 
-const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v2" };
+const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v2", game: "cardGradingLab.game" };
 
 const localStore = {
   read(key, fallback) {
@@ -126,8 +159,9 @@ function thumbnail(warpedCanvas, margin, width = 200) {
   return c.toDataURL("image/jpeg", 0.8);
 }
 
-/** A sample "photo" of a slightly off-center card on a dark mat, used for the example. */
-function samplePhoto(side) {
+/** A sample "photo" of a slightly off-center card, used for the example. */
+function samplePhoto(side, game = "pokemon") {
+  if (game === "riftbound") return riftboundSample(side);
   const W = 1200, H = 1500;
   const c = document.createElement("canvas");
   c.width = W;
@@ -171,6 +205,51 @@ function samplePhoto(side) {
     ctx.beginPath();
     ctx.arc(cw / 2, ch / 2, 170, 0, Math.PI * 2);
     ctx.fill();
+  }
+  const data = c.getContext("2d").getImageData(0, 0, W, H);
+  return { width: W, height: H, data: data.data };
+}
+
+/** Riftbound-style sample: black-bordered front and blue back, photographed on a light mat. */
+function riftboundSample(side) {
+  const W = 1200, H = 1500;
+  const c = document.createElement("canvas");
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#d7dadf";
+  ctx.fillRect(0, 0, W, H);
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(((side === "front" ? -2.2 : 1.6) * Math.PI) / 180);
+  const cw = 750, ch = 1048;
+  ctx.translate(-cw / 2, -ch / 2);
+  const border = side === "front" ? { l: 38, r: 30, t: 36, b: 37 } : { l: 39, r: 37, t: 40, b: 42 };
+  ctx.fillStyle = side === "front" ? "#141417" : "#1b3f86";
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(0, 0, cw, ch, 26);
+  else ctx.rect(0, 0, cw, ch);
+  ctx.fill();
+  const iw = cw - border.l - border.r, ih = ch - border.t - border.b;
+  const grad = ctx.createLinearGradient(0, 0, 0, ih);
+  if (side === "front") {
+    grad.addColorStop(0, "#5b3fb8");
+    grad.addColorStop(0.55, "#2b8fb0");
+    grad.addColorStop(1, "#e2c46a");
+  } else {
+    grad.addColorStop(0, "#3a6fd8");
+    grad.addColorStop(1, "#122a66");
+  }
+  ctx.fillStyle = grad;
+  ctx.fillRect(border.l, border.t, iw, ih);
+  if (side === "front") {
+    ctx.fillStyle = "rgba(245,240,228,.9)";
+    ctx.fillRect(border.l + 24, border.t + ih * 0.62, iw - 48, ih * 0.3);
+  } else {
+    ctx.strokeStyle = "#e8c35a";
+    ctx.lineWidth = 18;
+    ctx.beginPath();
+    ctx.arc(cw / 2, ch / 2, 190, 0, Math.PI * 2);
+    ctx.stroke();
   }
   const data = c.getContext("2d").getImageData(0, 0, W, H);
   return { width: W, height: H, data: data.data };
@@ -515,6 +594,7 @@ function renderDefects() {
 function assessment() {
   return {
     card: {
+      game: state.game,
       name: $("#card-name").value.trim(),
       set_name: $("#card-set").value.trim(),
       number: $("#card-number").value.trim(),
@@ -700,6 +780,31 @@ function renderReport() {
   $("#disclaimer").textContent = report.disclaimer;
 }
 
+/* ---------------------------------------------------------------- game */
+
+function renderGame() {
+  const g = gameInfo(state.game);
+  $$("#game-seg button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.game === state.game)));
+  const tips = $("#tips");
+  tips.innerHTML = "";
+  for (const t of g.tips) {
+    const li = document.createElement("li");
+    li.textContent = t;
+    tips.append(li);
+  }
+  $("#card-name").placeholder = g.placeholders.name;
+  $("#card-set").placeholder = g.placeholders.set;
+  $("#card-number").placeholder = g.placeholders.number;
+  $("#condition-hint").textContent = g.hint;
+  $("#game-chip").textContent = g.label;
+}
+
+function setGame(game, { remember = true } = {}) {
+  state.game = GAMES[game] ? game : "pokemon";
+  if (remember) localStore.write(KEYS.game, state.game);
+  renderGame();
+}
+
 /* ---------------------------------------------------------------- views */
 
 function setView(view, { animate = true } = {}) {
@@ -744,14 +849,12 @@ function newScan() {
 
 function showExample() {
   resetCard();
-  for (const side of SIDES) applyScan(side, Vision.scan(samplePhoto(side)));
-  state.defects = [
-    { side: "back", location: "top_right", type: "corner_whitening", severity: "minor", note: null },
-    { side: "front", location: "surface", type: "holo_scratch", severity: "micro", note: "Only under a lamp" },
-  ];
-  $("#card-name").value = "Charizard ex";
-  $("#card-set").value = "Obsidian Flames";
-  $("#card-number").value = "223/197";
+  const ex = gameInfo(state.game).example;
+  for (const side of SIDES) applyScan(side, Vision.scan(samplePhoto(side, state.game)));
+  state.defects = ex.defects.map((d) => ({ ...d }));
+  $("#card-name").value = ex.name;
+  $("#card-set").value = ex.set;
+  $("#card-number").value = ex.number;
   state.example = true;
   $("#example-note").hidden = false;
   setView("report");
@@ -777,6 +880,7 @@ function renderResume() {
 
 function loadAssessment(a, thumbs) {
   resetCard();
+  setGame((a.card && a.card.game) || "pokemon", { remember: false });
   $("#card-name").value = a.card.name || "";
   $("#card-set").value = a.card.set_name || "";
   $("#card-number").value = a.card.number || "";
@@ -804,7 +908,7 @@ function renderHistory() {
     if (c.front_thumb) $("img", li).src = c.front_thumb;
     const card = c.assessment.card;
     $(".h-name", li).textContent = card.name || "Unnamed card";
-    $(".h-meta", li).textContent = [card.set_name, card.number, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
+    $(".h-meta", li).textContent = [gameInfo(card.game).label, card.set_name, card.number, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
     $(".h-grades", li).textContent = Object.values(c.report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ");
     li.addEventListener("click", () => {
       $("#history").hidden = true;
@@ -894,6 +998,8 @@ function init() {
   for (const fig of $$(".map")) buildMap(fig, fig.dataset.side);
 
   // Scan screen
+  $$("#game-seg button").forEach((b) => b.addEventListener("click", () => setGame(b.dataset.game)));
+  setGame(localStore.read(KEYS.game, "pokemon"), { remember: false });
   for (const side of SIDES) {
     const input = $(`#file-${side}`);
     input.addEventListener("change", (e) => {
