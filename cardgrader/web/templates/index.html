@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Card Grading Lab</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1l7 7-7 7-7-7z' fill='%23f5c542'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◆</span>
+      <div>
+        <h1>Card Grading Lab</h1>
+        <p>Theoretical PSA · BGS · CGC · TAG grade estimates for Pokémon / TCG cards</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button id="new-card" class="ghost">New card</button>
+      <button id="open-history" class="ghost">History</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="workflow">
+      <!-- Step 1 -->
+      <article class="panel">
+        <h2><span class="step">1</span> Card</h2>
+        <div class="grid-4">
+          <label>Name<input id="card-name" placeholder="Charizard ex"></label>
+          <label>Set<input id="card-set" placeholder="Obsidian Flames"></label>
+          <label>Number<input id="card-number" placeholder="223/197"></label>
+          <label class="check"><input type="checkbox" id="card-holo"> Holo / foil</label>
+        </div>
+      </article>
+
+      <!-- Step 2 -->
+      <article class="panel">
+        <h2><span class="step">2</span> Centering</h2>
+        <p class="hint">Upload a flat scan or a straight-on photo of each side. The card is found and flattened, and its borders are measured automatically.
+          Drag the <span class="swatch outer"></span> outer (card edge) and <span class="swatch inner"></span> inner (frame) guides to fine-tune them.
+          For full-art cards, line the inner guides up with the printed frame or type the ratios below.</p>
+        <div class="sides">
+          <div class="side" data-side="front"></div>
+          <div class="side" data-side="back"></div>
+        </div>
+      </article>
+
+      <!-- Step 3 -->
+      <article class="panel">
+        <h2><span class="step">3</span> Corners, edges &amp; surface</h2>
+        <p class="hint">Click a corner, edge or the middle of the card to log a defect there. Check under a bright light, tilted, and use a loupe if you have one.</p>
+        <div class="defect-editor">
+          <div class="maps">
+            <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
+            <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
+          </div>
+          <div class="defect-form" id="defect-form">
+            <div class="picked" id="picked">Select a spot on the card map</div>
+            <label>Defect<select id="defect-type" disabled></select></label>
+            <div class="severity" id="severity">
+              <button data-sev="micro" title="Only under magnification or angled light">Micro</button>
+              <button data-sev="minor" title="Visible on close naked-eye inspection">Minor</button>
+              <button data-sev="moderate" title="Obvious at arm's length">Moderate</button>
+              <button data-sev="major" title="Heavy damage">Major</button>
+            </div>
+            <label>Note<input id="defect-note" placeholder="optional"></label>
+            <button id="add-defect" class="primary" disabled>Add defect</button>
+          </div>
+        </div>
+        <ul class="defect-list" id="defect-list"></ul>
+      </article>
+    </section>
+
+    <!-- Results -->
+    <aside class="results">
+      <div class="results-inner">
+        <div class="results-head">
+          <h2>Estimated grades</h2>
+          <button id="save-card" class="primary">Save card</button>
+        </div>
+        <div id="best-fit" class="best-fit"></div>
+        <div id="grades" class="grades"></div>
+        <p id="disclaimer" class="disclaimer"></p>
+      </div>
+    </aside>
+  </main>
+
+  <div id="history" class="drawer" hidden>
+    <div class="drawer-panel">
+      <div class="drawer-head">
+        <h2>Graded cards</h2>
+        <button id="close-history" class="ghost">Close</button>
+      </div>
+      <ul id="history-list" class="history-list"></ul>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <template id="side-template">
+    <div class="side-head">
+      <h3></h3>
+      <div class="side-tools">
+        <label class="mini"><input type="checkbox" class="cropped"> Already cropped</label>
+        <label class="file-btn">Upload<input type="file" accept="image/*" hidden></label>
+      </div>
+    </div>
+    <div class="dropzone">
+      <canvas></canvas>
+      <div class="drop-msg">Drop an image here<br><small>or use Upload</small></div>
+    </div>
+    <div class="readout">
+      <label>L/R <input type="number" class="lr" min="50" max="100" step="0.1" value="50"><span class="pct">/ <b class="lr-other">50</b></span></label>
+      <label>T/B <input type="number" class="tb" min="50" max="100" step="0.1" value="50"><span class="pct">/ <b class="tb-other">50</b></span></label>
+      <span class="conf"></span>
+    </div>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
