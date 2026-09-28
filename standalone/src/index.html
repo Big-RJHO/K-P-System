@@ -85,33 +85,81 @@
 
       <!-- identity -->
       <div class="identity reveal">
-        <div class="thumbs" id="thumbs"></div>
-        <div class="identity-fields">
-          <span class="game-chip" id="game-chip"></span>
-          <label class="sr-only" for="card-name">Card name</label>
-          <input id="card-name" class="name-input" placeholder="Name this card" autocomplete="off">
-          <div class="meta-inputs">
-            <label class="sr-only" for="card-set">Set</label>
-            <input id="card-set" placeholder="Set" autocomplete="off">
-            <label class="sr-only" for="card-number">Number</label>
-            <input id="card-number" placeholder="No." autocomplete="off">
-          </div>
+        <span class="game-chip" id="game-chip"></span>
+        <label class="sr-only" for="card-name">Card name</label>
+        <input id="card-name" class="name-input" placeholder="Name this card" autocomplete="off">
+        <div class="meta-inputs">
+          <label class="sr-only" for="card-set">Set</label>
+          <input id="card-set" placeholder="Set" autocomplete="off">
+          <label class="sr-only" for="card-number">Number</label>
+          <input id="card-number" placeholder="No." autocomplete="off">
         </div>
       </div>
 
-      <!-- headline grades -->
-      <div class="tiles reveal" id="tiles"></div>
-      <p class="best-line reveal" id="best-line"></p>
-
-      <!-- overview -->
-      <section class="card-panel reveal" aria-labelledby="overview-title">
-        <h2 id="overview-title">Condition overview</h2>
-        <ul class="overview" id="overview"></ul>
+      <!-- report header: card viewer + score, laid out like a TAG DIG report -->
+      <section class="report-hero reveal" aria-label="Your card's results">
+        <div class="viewer">
+          <div class="segmented viewer-side" role="tablist" aria-label="Card side">
+            <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
+            <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
+          </div>
+          <div class="viewer-frame">
+            <canvas id="viewer-canvas" aria-label="Your card with centering lines and numbered defect markers. Tap the card to log a defect."></canvas>
+          </div>
+          <label class="overlay-slider" for="overlay">
+            <span>Photo</span>
+            <input id="overlay" type="range" min="0" max="100" value="100">
+            <span>Overlay</span>
+          </label>
+        </div>
+        <div class="score-block">
+          <div class="score-top">
+            <span class="score-grade" id="score-grade"></span>
+            <span class="score-label" id="score-label"></span>
+          </div>
+          <div class="score-num"><b id="score-num"></b><span>/ 1000</span></div>
+          <div class="meter" aria-hidden="true"><span id="score-bar"></span><i style="left:94.4%"></i><i style="left:98.9%"></i></div>
+          <p class="score-caption">Lab score on TAG's 1000-point scale</p>
+        </div>
       </section>
 
+      <div class="metrics reveal" id="metrics"></div>
+
+      <!-- eight subgrades -->
+      <section class="card-panel reveal" aria-labelledby="subgrades-title">
+        <div class="panel-head">
+          <h2 id="subgrades-title">Subgrades</h2>
+          <span class="panel-note">Scores out of 1000</span>
+        </div>
+        <div class="subgrades" id="subgrades"></div>
+      </section>
+
+      <!-- every company -->
+      <section class="reveal" aria-labelledby="tiles-title">
+        <h2 id="tiles-title" class="section-title">Estimated grade by company</h2>
+        <div class="tiles" id="tiles"></div>
+        <p class="best-line" id="best-line"></p>
+      </section>
+
+      <!-- defects -->
+      <details class="card-panel section reveal" id="condition-section" open>
+        <summary><h2>DINGS</h2><span class="summary-value" id="defect-summary"></span></summary>
+        <div class="section-body">
+          <p class="hint" id="condition-hint">Tap where you see wear. Check under a bright light, tilting the card.</p>
+          <ol class="defect-list" id="defect-list"></ol>
+          <details class="map-picker">
+            <summary>Pick a spot on a card map instead</summary>
+            <div class="maps">
+              <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
+              <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
+            </div>
+          </details>
+        </div>
+      </details>
+
       <!-- centering -->
-      <details class="card-panel section reveal" id="centering-section" open>
-        <summary><h2>Centering</h2><span class="summary-value" id="centering-summary"></span></summary>
+      <details class="card-panel section reveal" id="centering-section">
+        <summary><h2>Centering measurements</h2><span class="summary-value" id="centering-summary"></span></summary>
         <div class="section-body">
           <div class="segmented" role="tablist" aria-label="Side">
             <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
@@ -137,22 +185,9 @@
         </div>
       </details>
 
-      <!-- condition -->
-      <details class="card-panel section reveal" id="condition-section" open>
-        <summary><h2>Corners, edges &amp; surface</h2><span class="summary-value" id="defect-summary"></span></summary>
-        <div class="section-body">
-          <p class="hint" id="condition-hint">Tap where you see wear. Check under a bright light, tilting the card.</p>
-          <div class="maps">
-            <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
-            <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
-          </div>
-          <ul class="defect-list" id="defect-list"></ul>
-        </div>
-      </details>
-
       <!-- company breakdown -->
       <section class="breakdown reveal" aria-labelledby="breakdown-title">
-        <h2 id="breakdown-title" class="section-title">By company</h2>
+        <h2 id="breakdown-title" class="section-title">Company breakdowns</h2>
         <div id="companies"></div>
       </section>
 

@@ -63,6 +63,7 @@ const state = {
   sheet: { side: null, location: null, type: null, severity: null },
   example: false,
   report: null,
+  savedId: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -269,7 +270,7 @@ function centeringFromLines(lines) {
 
 function applyScan(side, scan) {
   const img = canvasFromRGBA(scan.warped);
-  state.scans[side] = { img, lines: scan.lines, width: scan.width, height: scan.height, confidence: scan.confidence.borders };
+  state.scans[side] = { img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin, confidence: scan.confidence.borders };
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
 }
@@ -475,7 +476,8 @@ function renderRatioInputs() {
 }
 
 function renderCentering() {
-  $$("#centering-section .segmented button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
+  $$("#centering-section .segmented button, .viewer-side button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
+  viewer.render();
   guide.show();
   renderRatioInputs();
 }
@@ -549,7 +551,6 @@ function addDefectFromSheet() {
   const note = $("#defect-note").value.trim();
   state.defects.push({ side, location, type, severity, note: note || null });
   closeSheet();
-  renderDefects();
   runGrade();
 }
 
@@ -567,19 +568,22 @@ function renderDefects() {
   const list = $("#defect-list");
   list.innerHTML = "";
   if (!state.defects.length) {
-    list.innerHTML = '<li class="empty">Nothing logged yet, so corners, edges and surface count as flawless.</li>';
+    list.innerHTML = '<li class="empty">No DINGS logged, so corners, edges and surface count as flawless. Tap the card above where you see wear.</li>';
   }
+  const areas = state.report && state.report.grades.TAG.subgrades;
   state.defects.forEach((d, i) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="sev-dot ${d.severity}" aria-hidden="true"></span>
+    li.innerHTML = `<span class="ding-no ${d.severity}" aria-hidden="true">${i + 1}</span>
       <span class="d-text"><span class="d-label"></span><br><span class="where"></span></span>
-      <button type="button" class="remove" aria-label="Remove defect">✕</button>`;
+      <span class="d-impact"></span>
+      <button type="button" class="remove" aria-label="Remove DING ${i + 1}">✕</button>`;
     $(".d-label", li).textContent = CRITERIA.defects.types[d.type].label;
     $(".where", li).textContent = `${cap(d.severity)} · ${whereText(d)}${d.note ? ` · ${d.note}` : ""}`;
+    const area = `${d.side} ${COMPONENT_OF[d.location]}`;
+    if (areas && areas[area] != null) $(".d-impact", li).textContent = `${cap(area)} ${areas[area]}`;
     $(".remove", li).addEventListener("click", () => {
       leaveExample();
       state.defects.splice(i, 1);
-      renderDefects();
       runGrade();
     });
     list.append(li);
@@ -588,6 +592,128 @@ function renderDefects() {
   $("#defect-summary").textContent = n ? `${n} logged` : "None logged";
   paintZones();
 }
+
+/* ---------------------------------------------------------------- card viewer */
+
+// Where each DING marker sits on the card, as fractions of width/height.
+const MARKER_POS = {
+  top_left: [0.08, 0.06], top_right: [0.92, 0.06], bottom_left: [0.08, 0.94], bottom_right: [0.92, 0.94],
+  top: [0.5, 0.035], bottom: [0.5, 0.965], left: [0.045, 0.5], right: [0.955, 0.5], surface: [0.5, 0.5],
+};
+
+function zoneAt(px, py) {
+  const cx = px < 0.16 ? "left" : px > 0.84 ? "right" : null;
+  const cy = py < 0.12 ? "top" : py > 0.88 ? "bottom" : null;
+  if (cx && cy) return `${cy}_${cx}`;
+  if (px < 0.07) return "left";
+  if (px > 0.93) return "right";
+  if (py < 0.05) return "top";
+  if (py > 0.95) return "bottom";
+  return "surface";
+}
+
+const viewer = {
+  W: 750, H: 1048, thumbImgs: { front: null, back: null },
+
+  init() {
+    this.canvas = $("#viewer-canvas");
+    this.canvas.width = this.W;
+    this.canvas.height = this.H;
+    this.ctx = this.canvas.getContext("2d");
+    this.canvas.addEventListener("click", (e) => {
+      const r = this.canvas.getBoundingClientRect();
+      openSheet(state.activeSide, zoneAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height));
+    });
+    $("#overlay").addEventListener("input", () => this.render());
+  },
+
+  thumbImage(side) {
+    const src = state.thumbs[side];
+    if (!src) return null;
+    const cached = this.thumbImgs[side];
+    if (cached && cached.src === src) return cached.complete ? cached : null;
+    const img = new Image();
+    img.onload = () => this.render();
+    img.src = src;
+    this.thumbImgs[side] = img;
+    return null;
+  },
+
+  render() {
+    const { ctx, W, H } = this;
+    const side = state.activeSide;
+    const css = getComputedStyle(document.documentElement);
+    const color = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+    ctx.clearRect(0, 0, W, H);
+    const scan = state.scans[side];
+    let map = null;  // scan pixel -> viewer pixel, for the centering lines
+    if (scan) {
+      const m = scan.margin, sw = scan.width - 2 * m, sh = scan.height - 2 * m;
+      ctx.drawImage(scan.img, m, m, sw, sh, 0, 0, W, H);
+      map = { m, kx: W / sw, ky: H / sh };
+    } else {
+      const img = this.thumbImage(side);
+      if (img) ctx.drawImage(img, 0, 0, W, H);
+      else {
+        ctx.fillStyle = color("--surface-3", "#e4e7ec");
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = color("--muted", "#5d6572");
+        ctx.font = "600 36px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`No ${side} photo`, W / 2, H / 2);
+      }
+    }
+    const alpha = Number($("#overlay").value) / 100;
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "rgba(8, 10, 14, 0.22)";
+    ctx.fillRect(0, 0, W, H);
+    if (map) {
+      const L = scan.lines;
+      const X = (v) => (v - map.m) * map.kx, Y = (v) => (v - map.m) * map.ky;
+      for (const kind of ["outer", "inner"]) {
+        ctx.strokeStyle = kind === "outer" ? color("--outer", "#38bdf8") : color("--inner", "#f472b6");
+        ctx.lineWidth = 3;
+        ctx.setLineDash(kind === "outer" ? [12, 8] : []);
+        ctx.beginPath();
+        ctx.moveTo(X(L[kind].left), 0); ctx.lineTo(X(L[kind].left), H);
+        ctx.moveTo(X(L[kind].right), 0); ctx.lineTo(X(L[kind].right), H);
+        ctx.moveTo(0, Y(L[kind].top)); ctx.lineTo(W, Y(L[kind].top));
+        ctx.moveTo(0, Y(L[kind].bottom)); ctx.lineTo(W, Y(L[kind].bottom));
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    const sevColor = { micro: color("--good", "#178a5d"), minor: color("--warn", "#b26b00"), moderate: color("--bad", "#c2362f"), major: color("--bad", "#c2362f") };
+    const seen = {};
+    state.defects.forEach((d, i) => {
+      if (d.side !== side) return;
+      const k = (seen[d.location] = (seen[d.location] || 0) + 1) - 1;
+      let [fx, fy] = MARKER_POS[d.location];
+      if (d.location === "surface" && k) {
+        fx += 0.2 * Math.cos(k * 2.2);
+        fy += 0.18 * Math.sin(k * 2.2);
+      } else if (k) {
+        fy += (fy > 0.5 ? -1 : 1) * 0.06 * k;
+      }
+      const x = fx * W, y = fy * H, r = 28;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = sevColor[d.severity];
+      ctx.fill();
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+      ctx.fillStyle = d.severity === "minor" ? "#1d1400" : "#ffffff";
+      ctx.font = "700 30px ui-monospace, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i + 1), x, y + 1);
+    });
+    ctx.restore();
+  },
+};
 
 /* ---------------------------------------------------------------- grading + report */
 
@@ -665,42 +791,64 @@ function renderTiles(report) {
     : `Your best shot is ${top.company} ${top.label}. Tap a grade for the breakdown.`;
 }
 
-function renderOverview(report) {
-  const psa = report.grades.PSA;
-  const list = $("#overview");
-  list.innerHTML = "";
-  const rows = [];
-  if (psa.tier >= 99) {
-    rows.push({ name: "Authenticity", detail: "Logged as trimmed, recolored or altered", pill: "Altered", cls: "bad" });
-  } else {
-    const f = state.centering.front, b = state.centering.back;
-    rows.push({
-      name: "Centering",
-      detail: `Front ${splitText(Math.max(f.lr, f.tb))} · Back ${splitText(Math.max(b.lr, b.tb))} (worst axis)`,
-      mono: true, value: psa.subgrades.centering,
-    });
-    for (const comp of ["corners", "edges", "surface"]) {
-      const ds = state.defects.filter((d) => COMPONENT_OF[d.location] === comp);
-      const worst = ds.sort((x, y) => SEV_RANK[y.severity] - SEV_RANK[x.severity])[0];
-      rows.push({
-        name: cap(comp),
-        detail: worst ? `${cap(worst.severity)} ${CRITERIA.defects.types[worst.type].label.toLowerCase()}${ds.length > 1 ? ` +${ds.length - 1} more` : ""}` : "No issues logged",
-        value: psa.subgrades[comp],
-      });
-    }
-  }
-  for (const r of rows) {
-    const li = document.createElement("li");
-    const pill = r.pill || conditionWord(r.value);
-    const cls = r.cls || status(r.value);
-    li.innerHTML = `<span class="ov-name"></span><span class="pill ${cls}"></span><span class="ov-detail${r.mono ? " mono" : ""}"></span>`;
-    $(".ov-name", li).textContent = r.name;
-    $(".pill", li).textContent = pill;
-    $(".ov-detail", li).textContent = r.detail;
-    list.append(li);
-  }
+function renderScore(report) {
+  const g = report.grades.TAG;
+  const altered = g.tier >= 99;
+  $("#score-grade").innerHTML = altered ? "—" : bigGrade(g) + (isPristine(g) ? "<small>P</small>" : "");
+  $("#score-label").textContent = altered ? g.label : g.label.replace(/\s*\d+(\.\d)?$/, "");
+  $("#score-num").textContent = altered ? "—" : g.score;
+  $("#score-bar").style.width = altered ? "0%" : `${Math.max(0, ((g.score - 100) / 900) * 100)}%`;
   const f = state.centering.front, b = state.centering.back;
   $("#centering-summary").textContent = `${splitText(Math.max(f.lr, f.tb))} · ${splitText(Math.max(b.lr, b.tb))}`;
+}
+
+function renderMetrics(report) {
+  const score = report.grades.TAG.score;
+  const others = localStore.cards().filter((c) => c.id !== state.savedId && c.report && c.report.grades.TAG.score != null);
+  const rank = score == null ? null : 1 + others.filter((c) => c.report.grades.TAG.score > score).length;
+  const f = state.centering.front;
+  const items = [
+    [String(state.defects.length), "DINGS"],
+    [rank == null ? "—" : `#${rank}/${others.length + 1}`, "Rank in History"],
+    [splitText(Math.max(f.lr, f.tb)), "Front centering"],
+  ];
+  const box = $("#metrics");
+  box.innerHTML = "";
+  for (const [value, label] of items) {
+    const div = document.createElement("div");
+    div.className = "metric";
+    div.innerHTML = "<b></b><span></span>";
+    $("b", div).textContent = value;
+    $("span", div).textContent = label;
+    box.append(div);
+  }
+}
+
+function renderSubgrades(report) {
+  const box = $("#subgrades");
+  const areas = report.grades.TAG.subgrades;
+  box.innerHTML = "";
+  if (report.grades.TAG.tier >= 99) {
+    box.innerHTML = '<p class="hint" style="grid-column: 1 / -1">No subgrades: the card is logged as altered.</p>';
+    return;
+  }
+  box.insertAdjacentHTML("beforeend", '<span></span><span class="col-head">Front</span><span class="col-head">Back</span>');
+  for (const comp of ["centering", "corners", "edges", "surface"]) {
+    const name = document.createElement("span");
+    name.className = "row-name";
+    name.textContent = cap(comp);
+    box.append(name);
+    for (const side of SIDES) {
+      const v = areas[`${side} ${comp}`];
+      const cell = document.createElement("div");
+      cell.className = `sub-cell ${v >= 950 ? "good" : v >= 850 ? "warn" : "bad"}`;
+      cell.innerHTML = '<b></b><span class="sbar"><span></span></span>';
+      $("b", cell).textContent = v;
+      $(".sbar span", cell).style.width = `${Math.max(2, ((v - 100) / 900) * 100)}%`;
+      cell.setAttribute("aria-label", `${side} ${comp} ${v} out of 1000`);
+      box.append(cell);
+    }
+  }
 }
 
 function subLabel(company, v) {
@@ -755,28 +903,16 @@ function renderCompanies(report) {
   }
 }
 
-function renderThumbs() {
-  const box = $("#thumbs");
-  box.innerHTML = "";
-  for (const side of SIDES) {
-    const src = state.thumbs[side];
-    if (src) {
-      const img = document.createElement("img");
-      img.src = src;
-      img.alt = `${side} of card`;
-      box.append(img);
-    } else {
-      box.insertAdjacentHTML("beforeend", '<span class="ph" aria-hidden="true"></span>');
-    }
-  }
-}
-
 function renderReport() {
   const report = state.report;
   if (!report) return;
+  renderScore(report);
+  renderMetrics(report);
+  renderSubgrades(report);
   renderTiles(report);
-  renderOverview(report);
+  renderDefects();
   renderCompanies(report);
+  viewer.render();
   $("#disclaimer").textContent = report.disclaimer;
 }
 
@@ -817,7 +953,6 @@ function setView(view, { animate = true } = {}) {
     const screen = $("#report-screen");
     screen.classList.remove("enter");
     if (animate) { void screen.offsetWidth; screen.classList.add("enter"); }
-    renderThumbs();
     renderCentering();
     renderDefects();
     runGrade();
@@ -835,6 +970,7 @@ function resetCard() {
   state.activeSide = "front";
   state.example = false;
   state.report = null;
+  state.savedId = null;
   for (const id of ["#card-name", "#card-set", "#card-number"]) $(id).value = "";
   $("#example-note").hidden = true;
 }
@@ -941,16 +1077,20 @@ function openHistory() {
 function saveCard() {
   leaveExample();
   runGrade();
-  const cards = localStore.cards();
+  const cards = localStore.cards().filter((c) => c.id !== state.savedId);  // saving again replaces the earlier save
+  state.savedId = `${Date.now()}`;
   cards.unshift({
-    id: `${Date.now()}`,
+    id: state.savedId,
     created_at: new Date().toISOString(),
     assessment: assessment(),
     report: state.report,
     front_thumb: state.thumbs.front,
     back_thumb: state.thumbs.back,
   });
-  if (localStore.saveCards(cards)) toast(`Saved. ${cards.length} card${cards.length === 1 ? "" : "s"} in History.`);
+  if (localStore.saveCards(cards)) {
+    toast(`Saved. ${cards.length} card${cards.length === 1 ? "" : "s"} in History.`);
+    renderMetrics(state.report);
+  }
   else toast("This browser isn't letting the app save. Copy a backup from History to keep your cards.");
 }
 
@@ -1025,7 +1165,8 @@ function init() {
   $("#scan-own").addEventListener("click", newScan);
   $("#save-card").addEventListener("click", saveCard);
   for (const id of ["#open-history", "#open-history-2"]) $(id).addEventListener("click", openHistory);
-  $$("#centering-section .segmented button").forEach((b) => b.addEventListener("click", () => {
+  viewer.init();
+  $$("#centering-section .segmented button, .viewer-side button").forEach((b) => b.addEventListener("click", () => {
     state.activeSide = b.dataset.side;
     renderCentering();
   }));
