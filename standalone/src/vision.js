@@ -495,7 +495,8 @@
     // Plain, even background: the card is the big region that differs from it (precise and fast).
     // Anything else (a desk, keyboard, sleeve): find the card from its straight edges instead.
     const blob = findCardBlob(img);
-    if (blob && blob.confidence >= 0.8) return blob;
+    // A clean, card-shaped region (within ~12% of 63 x 88, allowing for an off-angle photo) is trusted.
+    if (blob && blob.aspectScore >= 0.5) return blob;
     const edges = findCardEdges(img);
     if (edges) return edges;
     return blob || { corners: fullImage(w, h), confidence: 0.3, method: "full" };
@@ -605,7 +606,7 @@
     const quadAspect = Math.max(width, height) / Math.min(width, height);
     const aspectScore = Math.max(0, 1 - Math.abs(quadAspect - target) / 0.25);
     if (aspectScore < 0.2) return null;
-    return { corners, confidence: Math.min(1, aspectScore * Math.pow(areaRatio, 0.25) + 0.1), method: "blob" };
+    return { corners, confidence: Math.min(1, aspectScore * Math.pow(areaRatio, 0.25) + 0.1), aspectScore, method: "blob" };
   }
 
   /* ---------------------------------------------------------------- flatten */
@@ -697,7 +698,7 @@
       const vertical = side === "left" || side === "right";
       const along = vertical ? H : W;
       const lines = [];
-      for (let i = Math.floor(along * 0.2); i < along * 0.8; i += 4) lines.push(i);
+      for (let i = Math.floor(along * 0.2); i < along * 0.8; i += 8) lines.push(i);
       const maxP = 2 * M;
       const prof = new Float32Array(maxP + 1);
       const vals = new Float32Array(lines.length);
@@ -743,6 +744,142 @@
     }
     const L = bestCombo ? bestCombo.l.p : M, R = bestCombo ? W - 1 - bestCombo.r.p : W - 1 - M;
     const T = bestCombo ? bestCombo.t.p : M, B = bestCombo ? H - 1 - bestCombo.b.p : H - 1 - M;
+    const Hm = warpMatrix(corners, M);
+    return [applyH(Hm, L, T), applyH(Hm, R, T), applyH(Hm, R, B), applyH(Hm, L, B)];
+  }
+
+  /**
+   * Straighten: photos taken slightly off-angle leave each card side a little sloped after flattening.
+   * Trace each side at many points (strongest colour step within a narrow window, measured with wide
+   * median strips so printed lines and sleeve edges don't count), fit a straight line through the points
+   * with outliers dropped, and rebuild the corners from those lines. Two rounds settle the perspective.
+   */
+  function straightenCorners(img, corners, rounds = 2) {
+    const M = MARGIN, WIN = 16, k = 3, STRIP = [1, 2, 3, 4, 5, 6, 7];
+    let cur = corners;
+    for (let round = 0; round < rounds; round++) {
+      const warped = warpCard(img, cur, M);
+      const W = warped.width, H = warped.height;
+      const lab = toLab(blur3(warped));
+      const at = (x, y, c) => lab[(Math.min(H - 1, Math.max(0, Math.round(y))) * W + Math.min(W - 1, Math.max(0, Math.round(x)))) * 3 + c];
+      const fitSide = (side) => {
+        const vertical = side === "left" || side === "right";
+        const along = vertical ? H : W;
+        const pt = (ln, dist) => {
+          if (side === "left") return [dist, ln];
+          if (side === "right") return [W - 1 - dist, ln];
+          if (side === "top") return [ln, dist];
+          return [ln, H - 1 - dist];
+        };
+        const pts = [];
+        for (let ln = Math.round(along * 0.1); ln < along * 0.9; ln += 9) {
+          let bestD = -1, bestV = 0;
+          for (let d = M - WIN; d <= M + WIN; d++) {
+            let dsq = 0;
+            for (let c = 0; c < 3; c++) {
+              const o = STRIP.map((m) => at(...pt(ln, d - m * k), c)).sort((x, y) => x - y)[3];
+              const i2 = STRIP.map((m) => at(...pt(ln, d + m * k), c)).sort((x, y) => x - y)[3];
+              dsq += (i2 - o) * (i2 - o);
+            }
+            if (dsq > bestV) { bestV = dsq; bestD = d; }
+          }
+          if (bestD >= 0 && Math.sqrt(bestV) > 10) pts.push([ln / along - 0.5, bestD]);
+        }
+        if (pts.length < 12) return { a: M, b: 0 };
+        // Robust fit d = a + b * s, dropping points far from the line.
+        let use = pts, a = M, b = 0;
+        for (let it = 0; it < 4; it++) {
+          const n = use.length;
+          const ms = use.reduce((x, y) => x + y[0], 0) / n, md = use.reduce((x, y) => x + y[1], 0) / n;
+          let sss = 0, ssd = 0;
+          for (const [t, d] of use) { sss += (t - ms) ** 2; ssd += (t - ms) * (d - md); }
+          b = sss ? ssd / sss : 0;
+          a = md - b * ms;
+          const res = pts.map(([t, d]) => Math.abs(d - (a + b * t)));
+          const tol = Math.max(1.5, 2.5 * res.slice().sort((x, y) => x - y)[Math.floor(res.length / 2)]);
+          const next = pts.filter((_, j) => res[j] <= tol);
+          if (next.length < 10) break;
+          use = next;
+        }
+        // Don't let a few stray points tilt the side wildly.
+        if (Math.abs(b) > 40) b = 0;
+        return { a, b };
+      };
+      const L = fitSide("left"), R = fitSide("right"), T = fitSide("top"), B = fitSide("bottom");
+      const xL = (y) => L.a + L.b * (y / H - 0.5);
+      const xR = (y) => W - 1 - (R.a + R.b * (y / H - 0.5));
+      const yT = (x) => T.a + T.b * (x / W - 0.5);
+      const yB = (x) => H - 1 - (B.a + B.b * (x / W - 0.5));
+      const meet = (xf, yf) => {
+        let x = xf(H / 2), y = yf(W / 2);
+        for (let i = 0; i < 5; i++) { y = yf(x); x = xf(y); }
+        return [x, y];
+      };
+      const Hm = warpMatrix(cur, M);
+      cur = [meet(xL, yT), meet(xR, yT), meet(xR, yB), meet(xL, yB)].map(([x, y]) => applyH(Hm, x, y));
+    }
+    return cur;
+  }
+
+  /**
+   * Re-check which line is the card's edge on each side, once the card is straight. A real card edge
+   * stops at the card's corners, but a sleeve lip, laptop edge or desk line keeps going past the card's
+   * sides. For the top and bottom, candidates are the peaks of the median colour-step profile; any that continue
+   * beyond the neighbouring edges are rejected, and of the rest the one nearest the current edge wins.
+   */
+  function recheckEdges(img, corners) {
+    const M = 80, k = 3, STRIP = [1, 2, 3, 4, 5, 6, 7];
+    const warped = warpCard(img, corners, M);
+    const W = warped.width, H = warped.height;
+    const lab = toLab(blur3(warped));
+    const at = (x, y, c) => lab[(Math.min(H - 1, Math.max(0, Math.round(y))) * W + Math.min(W - 1, Math.max(0, Math.round(x)))) * 3 + c];
+    // colour step across a side at (line position ln along the side, distance d from the image edge)
+    const stepAt = (side, ln, d, narrow = false) => {
+      const kk = narrow ? 2 : k, strip = narrow ? [1, 2, 3] : STRIP, mid = narrow ? 1 : 3;
+      const pt = (dist) => {
+        if (side === "left") return [dist, ln];
+        if (side === "right") return [W - 1 - dist, ln];
+        if (side === "top") return [ln, dist];
+        return [ln, H - 1 - dist];
+      };
+      let dsq = 0;
+      for (let c = 0; c < 3; c++) {
+        const o = strip.map((m) => at(...pt(d - m * kk), c)).sort((x, y) => x - y)[mid];
+        const i2 = strip.map((m) => at(...pt(d + m * kk), c)).sort((x, y) => x - y)[mid];
+        dsq += (i2 - o) * (i2 - o);
+      }
+      return Math.sqrt(dsq);
+    };
+    const median = (arr) => arr.slice().sort((x, y) => x - y)[Math.floor(arr.length / 2)];
+    const pick = (side) => {
+      const vertical = side === "left" || side === "right";
+      const along = vertical ? H : W;
+      const inLines = [], outLines = [];
+      for (let ln = Math.round(along * 0.25); ln < along * 0.75; ln += 9) inLines.push(ln);
+      // just beyond the card's neighbouring edges (which sit at M from the image edges)
+      for (let o = 10; o <= 34; o += 4) outLines.push(M - o, along - 1 - M + o);
+      const prof = [];
+      for (let d = 22; d <= 2 * M - 22; d++) prof[d] = median(inLines.map((ln) => stepAt(side, ln, d)));
+      let maxV = 0;
+      for (let d = 22; d <= 2 * M - 22; d++) maxV = Math.max(maxV, prof[d]);
+      const cands = [];
+      for (let d = 23; d < 2 * M - 22; d++) {
+        if (!(prof[d] >= prof[d - 1] && prof[d] > prof[d + 1] && prof[d] >= Math.max(10, 0.35 * maxV))) continue;
+        // Does this line carry on past the card's corners?
+        const cont = median(outLines.map((ln) => stepAt(side, ln, d)));
+        cands.push({ d, v: prof[d], cont });
+      }
+      const edges = cands.filter((c) => c.cont < 0.4 * c.v);
+      if (!edges.length) return M;
+      const strongest = Math.max(...edges.map((c) => c.v));
+      const good = edges.filter((c) => c.v >= 0.5 * strongest);
+      good.sort((x, y) => Math.abs(x.d - M) - Math.abs(y.d - M));
+      return good[0].d;
+    };
+    // Only the top and bottom: in an upright photo that's where a sleeve's open end and desk or laptop
+    // edges run. (A sleeve's side edge a few mm outside the card would make the card's own left/right
+    // edges look like they continue.)
+    const L = M, R = W - 1 - M, T = pick("top"), B = H - 1 - pick("bottom");
     const Hm = warpMatrix(corners, M);
     return [applyH(Hm, L, T), applyH(Hm, R, T), applyH(Hm, R, B), applyH(Hm, L, B)];
   }
@@ -852,6 +989,10 @@
       const found = findCard(img, mode);
       ({ corners, confidence: cardConf } = found);
       if (found.method === "edges") corners = refineCorners(img, corners);
+      if (found.method !== "full") {
+        corners = straightenCorners(img, corners);
+        if (found.method === "edges") corners = straightenCorners(img, recheckEdges(img, corners), 1);
+      }
     }
     const warped = warpCard(img, corners, MARGIN);
     const m = measureBorders(warped, MARGIN);
@@ -877,5 +1018,5 @@
     };
   }
 
-  return { scan, findCard, findCardEdges, refineCorners, warpCard, measureBorders, CARD_W, CARD_H, MARGIN };
+  return { scan, findCard, findCardEdges, refineCorners, straightenCorners, recheckEdges, warpCard, warpMatrix, applyH, measureBorders, CARD_W, CARD_H, MARGIN };
 });

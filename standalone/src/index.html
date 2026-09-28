@@ -198,10 +198,20 @@
             <label for="ratio-lr">Left / right<span class="ratio"><input id="ratio-lr" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other" id="lr-other"></span></span></label>
             <label for="ratio-tb">Top / bottom<span class="ratio"><input id="ratio-tb" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other" id="tb-other"></span></span></label>
           </div>
-          <div class="row-actions">
+          <div class="row-actions" id="guide-actions">
             <span class="conf" id="conf"></span>
-            <label class="btn small ghost" for="retake-file">Retake photo</label>
+            <div class="row-buttons">
+              <button type="button" class="btn small ghost" id="adjust-outline">Adjust outline</button>
+              <label class="btn small ghost" for="retake-file">Retake photo</label>
+            </div>
             <input type="file" id="retake-file" accept="image/*" hidden>
+          </div>
+          <div class="outline-bar" id="outline-bar" hidden>
+            <p class="hint">Drag the four yellow corners onto the card's real corners (for rounded corners, where the straight edges would meet). The card is then re-flattened from your photo and re-graded.</p>
+            <div class="row-buttons">
+              <button type="button" class="btn small ghost" id="outline-cancel">Cancel</button>
+              <button type="button" class="btn small primary" id="outline-apply">Apply</button>
+            </div>
           </div>
         </div>
       </details>

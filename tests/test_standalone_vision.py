@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import pytest
 
-from synthetic import make_card, place_in_clutter, place_on_background
+from synthetic import make_card, place_in_clutter, place_on_background, tilt_photo
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -88,6 +88,18 @@ def test_js_card_in_sleeve_on_busy_desk(tmp_path):
     images = [(place_in_clutter(card, angle), "auto") for card, _, angle in cards]
     for (card, borders, _), res in zip(cards, run(images, tmp_path)):
         lr, tb = expected(*borders)
+        assert abs(res["centering"]["lr"] - lr) <= 1.5, (lr, tb, res["centering"])
+        assert abs(res["centering"]["tb"] - tb) <= 1.5, (lr, tb, res["centering"])
+
+
+def test_js_off_angle_photos(tmp_path):
+    """Phone not held square to the card: the card is keystoned in the photo and must come out straight."""
+    cases = [((40, 31, 44, 47), (40, 205, 245), 0.05, 1), ((36, 44, 45, 40), (150, 70, 25), 0.07, 2), ((45, 45, 46, 46), (40, 205, 245), 0.06, 4)]
+    images, truth = [], []
+    for borders, color, amount, seed in cases:
+        images.append((tilt_photo(place_on_background(make_card(*borders, border_bgr=color), 2), amount, seed), "auto"))
+        truth.append(expected(*borders))
+    for (lr, tb), res in zip(truth, run(images, tmp_path)):
         assert abs(res["centering"]["lr"] - lr) <= 1.5, (lr, tb, res["centering"])
         assert abs(res["centering"]["tb"] - tb) <= 1.5, (lr, tb, res["centering"])
 

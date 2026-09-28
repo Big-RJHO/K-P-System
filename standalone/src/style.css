@@ -444,3 +444,7 @@ select {
   padding: 10px 12px; font: inherit; font-size: 16px; color: inherit; outline: none;
 }
 select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+
+.row-buttons { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.outline-bar { display: flex; flex-direction: column; gap: 10px; background: var(--accent-soft); border-radius: 12px; padding: 12px; }
+.outline-bar[hidden] { display: none; }

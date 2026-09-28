@@ -325,10 +325,14 @@ function neutralizeUnreadSides(scan) {
   return unmeasured;
 }
 
-function applyScan(side, scan) {
+function applyScan(side, scan, photo = null) {
   const img = canvasFromRGBA(scan.warped);
   const unmeasured = neutralizeUnreadSides(scan);
-  state.scans[side] = { img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin, confidence: scan.confidence.borders, unmeasured };
+  state.scans[side] = {
+    img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin,
+    confidence: scan.confidence.borders, unmeasured,
+    photo, corners: scan.corners,  // kept for this session so the outline can be adjusted by hand
+  };
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
 }
@@ -341,7 +345,7 @@ async function scanFile(side, file) {
   try {
     const pixels = await readImage(file);
     await new Promise((r) => setTimeout(r, 30));  // let the busy overlay paint
-    applyScan(side, Vision.scan(pixels, "auto"));
+    applyScan(side, Vision.scan(pixels, "auto"), pixels);
     const um = state.scans[side].unmeasured;
     if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In the report, line up the pink guides with the printed frame.`);
     else if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the border was hard to read. Check the guide lines in the report.`);
@@ -381,6 +385,7 @@ function renderSlots() {
 
 const guide = {
   canvas: null, ctx: null, drag: null, pointer: null,
+  outline: null,  // [[x, y] x4] corner handles (TL, TR, BR, BL) while adjusting the outline
 
   init() {
     this.canvas = $("#guide-canvas");
@@ -423,6 +428,14 @@ const guide = {
   hit(p) {
     const s = this.scan();
     const tol = (p.touch ? 22 : 10) * p.k;
+    if (this.outline) {
+      let bestC = null;
+      this.outline.forEach(([x, y], i) => {
+        const d = Math.hypot(p.x - x, p.y - y);
+        if (d <= tol * 1.6 && (!bestC || d < bestC.d)) bestC = { corner: i, d };
+      });
+      return bestC;
+    }
     let best = null;
     for (const kind of ["inner", "outer"]) {
       for (const edge of ["left", "right", "top", "bottom"]) {
@@ -451,7 +464,9 @@ const guide = {
     if (!s) return;
     const p = this.toNative(e);
     this.pointer = p;
-    if (this.drag) {
+    if (this.drag && this.drag.corner != null) {
+      this.outline[this.drag.corner] = [Math.max(0, Math.min(this.canvas.width, p.x)), Math.max(0, Math.min(this.canvas.height, p.y))];
+    } else if (this.drag) {
       const { kind, edge } = this.drag;
       const vertical = edge === "left" || edge === "right";
       const max = vertical ? this.canvas.width : this.canvas.height;
@@ -462,7 +477,7 @@ const guide = {
       scheduleGrade();
     } else {
       const h = this.hit(p);
-      this.canvas.style.cursor = h ? (h.edge === "left" || h.edge === "right" ? "ew-resize" : "ns-resize") : "default";
+      this.canvas.style.cursor = !h ? "default" : h.corner != null ? "move" : h.edge === "left" || h.edge === "right" ? "ew-resize" : "ns-resize";
     }
     this.draw();
   },
@@ -479,7 +494,8 @@ const guide = {
     const { ctx, canvas } = this;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(s.img, 0, 0);
-    this.drawLines(ctx, s.lines, canvas.width, canvas.height, 2.5);
+    if (this.outline) this.drawOutline(ctx, 3);
+    else this.drawLines(ctx, s.lines, canvas.width, canvas.height, 2.5);
     if (this.drag && this.pointer) this.drawLoupe(s);
   },
 
@@ -501,6 +517,36 @@ const guide = {
     ctx.setLineDash([]);
   },
 
+  drawOutline(ctx, width) {
+    const q = this.outline;
+    ctx.strokeStyle = "#f2b53a";
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    q.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.stroke();
+    for (const [x, y] of q) {
+      ctx.beginPath();
+      ctx.arc(x, y, width * 6, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(242, 181, 58, 0.35)";
+      ctx.fill();
+      ctx.stroke();
+    }
+  },
+
+  startOutline() {
+    const s = this.scan();
+    if (!s || !s.photo) return;
+    const o = s.lines.outer;
+    this.outline = [[o.left, o.top], [o.right, o.top], [o.right, o.bottom], [o.left, o.bottom]];
+    this.draw();
+  },
+
+  stopOutline() {
+    this.outline = null;
+    this.draw();
+  },
+
   drawLoupe(s) {
     const { ctx, canvas } = this;
     const zoom = 4, src = 60, size = src * zoom;
@@ -515,13 +561,42 @@ const guide = {
     ctx.translate(dx - (p.x - src / 2) * zoom, dy - (p.y - src / 2) * zoom);
     ctx.scale(zoom, zoom);
     ctx.drawImage(s.img, 0, 0);
-    this.drawLines(ctx, s.lines, canvas.width, canvas.height, 0.6);
+    if (this.outline) this.drawOutline(ctx, 0.8);
+    else this.drawLines(ctx, s.lines, canvas.width, canvas.height, 0.6);
     ctx.restore();
     ctx.strokeStyle = "#f2b53a";
     ctx.lineWidth = 3;
     ctx.strokeRect(dx, dy, size, size);
   },
 };
+
+function setOutlineMode(on) {
+  $("#outline-bar").hidden = !on;
+  $("#guide-actions").hidden = on;
+  if (on) guide.startOutline();
+  else guide.stopOutline();
+}
+
+async function applyOutline() {
+  const side = state.activeSide;
+  const s = state.scans[side];
+  if (!s || !s.photo || !guide.outline) return setOutlineMode(false);
+  const H = Vision.warpMatrix(s.corners, s.margin);
+  const corners = guide.outline.map(([x, y]) => Vision.applyH(H, x, y));
+  $("#guide-wrap").classList.add("busy");
+  await new Promise((r) => setTimeout(r, 30));
+  try {
+    leaveExample();
+    applyScan(side, Vision.scan(s.photo, "auto", corners), s.photo);
+    renderSlots();
+    toast("Outline applied. The card was re-flattened and re-graded.");
+  } finally {
+    $("#guide-wrap").classList.remove("busy");
+    setOutlineMode(false);
+    renderCentering();
+    runGrade();
+  }
+}
 
 function renderRatioInputs() {
   const c = state.centering[state.activeSide];
@@ -541,6 +616,8 @@ function renderRatioInputs() {
 }
 
 function renderCentering() {
+  const s = state.scans[state.activeSide];
+  $("#adjust-outline").hidden = !(s && s.photo);
   $$("#centering-section .segmented button, .viewer-side button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
   viewer.render();
   guide.show();
@@ -1123,7 +1200,10 @@ function newScan() {
 function showExample() {
   resetCard();
   const ex = gameInfo(state.game).example;
-  for (const side of SIDES) applyScan(side, Vision.scan(samplePhoto(side, state.game)));
+  for (const side of SIDES) {
+    const photo = samplePhoto(side, state.game);
+    applyScan(side, Vision.scan(photo), photo);
+  }
   state.defects = ex.defects.map((d) => ({ ...d }));
   $("#card-name").value = ex.name;
   fillDetails({ ...ex.details, set_name: ex.set, number: ex.number });
@@ -1302,6 +1382,7 @@ function init() {
   for (const id of ["#open-history", "#open-history-2"]) $(id).addEventListener("click", openHistory);
   viewer.init();
   $$("#centering-section .segmented button, .viewer-side button").forEach((b) => b.addEventListener("click", () => {
+    if (guide.outline) setOutlineMode(false);
     state.activeSide = b.dataset.side;
     renderCentering();
   }));
@@ -1316,6 +1397,9 @@ function init() {
     });
     $(id).addEventListener("blur", renderRatioInputs);
   }
+  $("#adjust-outline").addEventListener("click", () => setOutlineMode(true));
+  $("#outline-cancel").addEventListener("click", () => setOutlineMode(false));
+  $("#outline-apply").addEventListener("click", applyOutline);
   $("#retake-file").addEventListener("change", (e) => {
     const f = e.target.files[0];
     e.target.value = "";

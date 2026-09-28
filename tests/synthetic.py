@@ -82,3 +82,15 @@ def place_in_clutter(card: np.ndarray, angle: float = 2.0, seed: int = 5) -> np.
     bg[mask > 0] = warped[mask > 0]
     return bg
 
+
+
+def tilt_photo(img: np.ndarray, amount: float = 0.06, seed: int = 3) -> np.ndarray:
+    """Simulate a phone held off-angle: a keystone (perspective) distortion of the whole photo."""
+    rng = np.random.default_rng(seed)
+    h, w = img.shape[:2]
+    src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+    jitter = rng.uniform(-1, 1, (4, 2)) * amount * np.array([w, h]) * 0.5
+    jitter[0] += [amount * w, 0]  # narrower at the top, like tilting the phone back
+    jitter[1] -= [amount * w, 0]
+    dst = (src + jitter).astype(np.float32)
+    return cv2.warpPerspective(img, cv2.getPerspectiveTransform(src, dst), (w, h), borderMode=cv2.BORDER_REPLICATE)

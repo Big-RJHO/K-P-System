@@ -14,6 +14,8 @@ There is also a version that runs entirely on your phone. Pick **Pokémon** or *
   2. Go to **Settings → Pages** and set **Source** to **GitHub Actions**. On a free GitHub plan the repository must be public for Pages to work.
   3. The **Deploy standalone app to GitHub Pages** workflow publishes the site at `https://<your-user>.github.io/<repo>/`. You can re-run it any time from the **Actions** tab.
 
+Photos don't have to be perfectly square to the card: the app finds the card (even in a sleeve on a busy desk), straightens it, and fits it to the judging frame. If the outline is still off, open **Centering measurements → Adjust outline**, drag the four corners onto the card's corners and tap **Apply**; the card is re-flattened from your photo and re-graded. For full-art cards (no plain border), line the pink guides up with the printed frame.
+
 Saved cards live only in the browser that saved them. Use **History → Copy backup** now and then (paste the text into Notes), and **Restore pasted backup** to bring them back or move them to another device.
 
 The standalone app's source is in `standalone/src/`:
