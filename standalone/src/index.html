@@ -88,12 +88,7 @@
         <span class="game-chip" id="game-chip"></span>
         <label class="sr-only" for="card-name">Card name</label>
         <input id="card-name" class="name-input" placeholder="Name this card" autocomplete="off">
-        <div class="meta-inputs">
-          <label class="sr-only" for="card-set">Set</label>
-          <input id="card-set" placeholder="Set" autocomplete="off">
-          <label class="sr-only" for="card-number">Number</label>
-          <input id="card-number" placeholder="No." autocomplete="off">
-        </div>
+        <p class="identity-sub" id="identity-sub"></p>
       </div>
 
       <!-- report header: card viewer + score, laid out like a TAG DIG report -->
@@ -120,6 +115,32 @@
           <div class="score-num"><b id="score-num"></b><span>/ 1000</span></div>
           <div class="meter" aria-hidden="true"><span id="score-bar"></span><i style="left:94.4%"></i><i style="left:98.9%"></i></div>
           <p class="score-caption">Lab score on TAG's 1000-point scale</p>
+        </div>
+      </section>
+
+      <!-- card details, like the card information on a TAG report -->
+      <section class="card-panel details-panel reveal" aria-labelledby="details-title">
+        <div class="panel-head">
+          <h2 id="details-title">Card details</h2>
+          <button type="button" class="link-btn strong" id="edit-details" aria-expanded="false">Edit</button>
+        </div>
+        <dl class="details" id="details-view"></dl>
+        <div class="details-form" id="details-form" hidden>
+          <label for="collector-line">Collector line <span class="hint-inline">(bottom of the card)</span>
+            <input id="collector-line" placeholder="e.g. VEN · SP3/006 · EN" autocomplete="off">
+          </label>
+          <div class="form-grid">
+            <label for="card-subtitle">Subtitle<input id="card-subtitle" placeholder="e.g. Inquisitive" autocomplete="off"></label>
+            <label for="card-type">Card type<input id="card-type" placeholder="e.g. Champion Unit" autocomplete="off"></label>
+            <label for="card-set">Set<input id="card-set" placeholder="Set" autocomplete="off"></label>
+            <label for="card-set-code">Set code<input id="card-set-code" placeholder="e.g. VEN" autocomplete="off"></label>
+            <label for="card-number">Number<input id="card-number" placeholder="No." autocomplete="off"></label>
+            <label for="card-rarity">Rarity<select id="card-rarity"></select></label>
+            <label for="card-finish">Finish<select id="card-finish"></select></label>
+            <label for="card-language">Language<select id="card-language"></select></label>
+            <label for="card-year">Year<input id="card-year" inputmode="numeric" placeholder="e.g. 2026" autocomplete="off"></label>
+          </div>
+          <button type="button" class="btn small" id="done-details">Done</button>
         </div>
       </section>
 

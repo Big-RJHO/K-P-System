@@ -100,8 +100,15 @@ class Defect(BaseModel):
 class CardInfo(BaseModel):
     game: str = Field(default="pokemon", description="Card game, e.g. 'pokemon' or 'riftbound'")
     name: str = ""
+    subtitle: str = ""
     set_name: str = ""
+    set_code: str = ""
     number: str = ""
+    rarity: str = ""
+    card_type: str = ""
+    finish: str = ""
+    language: str = ""
+    year: str = ""
     holo: bool = False
     notes: str = ""
 

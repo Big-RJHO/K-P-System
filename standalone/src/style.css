@@ -231,7 +231,7 @@ details.section > summary h2 { flex: 1; }
 .segmented button[aria-selected="true"], .segmented button.active { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12); }
 
 .guide-wrap {
-  position: relative; aspect-ratio: 798 / 1096; max-width: 100%; width: min(100%, 420px); margin: 0 auto;
+  position: relative; aspect-ratio: 846 / 1144; max-width: 100%; width: min(100%, 420px); margin: 0 auto;
   border-radius: 12px; overflow: hidden; background: var(--surface-2);
 }
 .guide-wrap canvas { width: 100%; height: 100%; display: block; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
@@ -426,3 +426,21 @@ details.section > summary h2 { flex: 1; }
 .defect-list .d-impact { font: 12px var(--font-mono); color: var(--muted); white-space: nowrap; }
 .map-picker > summary { cursor: pointer; font-size: 13.5px; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
 .map-picker[open] > summary { margin-bottom: 12px; }
+
+/* ---------- card details ---------- */
+.identity-sub { color: var(--muted); font-size: 14px; margin-top: -2px; }
+.identity-sub:empty { display: none; }
+.details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 0; }
+.details div { min-width: 0; }
+.details dt { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; }
+.details dd { margin: 2px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+.details dd.empty { color: var(--faint); font-weight: 500; }
+.details-form { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.details-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.hint-inline { font-weight: 400; color: var(--faint); }
+select {
+  width: 100%; background: var(--surface-2); border: 1px solid transparent; border-radius: 12px;
+  padding: 10px 12px; font: inherit; font-size: 16px; color: inherit; outline: none;
+}
+select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }

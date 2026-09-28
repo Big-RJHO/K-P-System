@@ -28,8 +28,10 @@ const GAMES = {
     tips: ["Dark, plain background", "Phone parallel to the card", "No glare on holo"],
     placeholders: { name: "Name this card", set: "Set", number: "No." },
     hint: "Tap where you see wear. Check under a bright light, tilting the card. Whitening shows most on the blue back border.",
+    rarities: ["Common", "Uncommon", "Rare", "Holo Rare", "Double Rare", "Ultra Rare", "Illustration Rare", "Special Illustration Rare", "Hyper Rare", "Promo"],
     example: {
       name: "Charizard ex", set: "Obsidian Flames", number: "223/197",
+      details: { subtitle: "", card_type: "Pokémon ex", set_code: "OBF", rarity: "Special Illustration Rare", finish: "Holo", language: "EN", year: "2023" },
       defects: [
         { side: "back", location: "top_right", type: "corner_whitening", severity: "minor", note: null },
         { side: "front", location: "surface", type: "holo_scratch", severity: "micro", note: "Only under a lamp" },
@@ -41,8 +43,10 @@ const GAMES = {
     tips: ["Light, plain background for black borders and black backs", "Dark background for white Rune backs", "Phone parallel, no glare on foils"],
     placeholders: { name: "Name this card", set: "Set, e.g. Origins", number: "No." },
     hint: "Tap where you see wear. Many Origins cards left the factory with burred edges: log those as Rough factory cut / burred edge, not chipping. Whitening shows most on black borders and black backs.",
+    rarities: ["Common", "Uncommon", "Rare", "Epic", "Showcase / Alt Art", "Overnumbered", "Signature", "Metal", "Ultimate", "Promo"],
     example: {
-      name: "Example Riftbound card", set: "Origins", number: "",
+      name: "Example Riftbound card", set: "Origins", number: "001/298",
+      details: { subtitle: "", card_type: "Champion Unit", set_code: "OGN", rarity: "Showcase / Alt Art", finish: "Foil", language: "EN", year: "2025" },
       defects: [
         { side: "front", location: "top", type: "rough_cut", severity: "minor", note: "Factory burr" },
         { side: "back", location: "bottom_left", type: "corner_whitening", severity: "micro", note: null },
@@ -51,6 +55,36 @@ const GAMES = {
   },
 };
 const gameInfo = (g) => GAMES[g] || GAMES.pokemon;
+
+const FINISHES = ["", "Non-foil", "Holo", "Reverse holo", "Foil", "Etched / textured", "Metal"];
+const LANGUAGES = { EN: "English", JP: "Japanese", ZH: "Chinese", KO: "Korean", FR: "French", DE: "German", IT: "Italian", ES: "Spanish", PT: "Portuguese" };
+// Input id -> key on assessment.card
+const DETAIL_FIELDS = {
+  "card-subtitle": "subtitle", "card-type": "card_type", "card-set": "set_name", "card-set-code": "set_code",
+  "card-number": "number", "card-rarity": "rarity", "card-finish": "finish", "card-language": "language", "card-year": "year",
+};
+
+/** Read the collector line printed on the card, e.g. "VEN · SP3/006 · EN" or "OGN-001/298 EN". */
+function parseCollectorLine(text) {
+  const out = {};
+  const tokens = text.toUpperCase().replace(/[•·|,]/g, " ").split(/\s+/).filter(Boolean);
+  const slashed = tokens.find((t) => t.includes("/"));  // "223/197" beats "SV3" for the number
+  if (slashed) {
+    const dash = slashed.match(/^([A-Z]{2,5})-(\S+)$/);
+    out.number = dash ? dash[2] : slashed;
+    if (dash) out.set_code = dash[1];
+  }
+  for (let tok of tokens) {
+    if (tok === slashed) continue;
+    const lang = { JA: "JP", CN: "ZH", KR: "KO" }[tok] || tok;
+    if (!out.language && LANGUAGES[lang] && tok.length === 2) { out.language = lang; continue; }
+    const dash = tok.match(/^([A-Z]{2,5})-(\S+)$/);
+    if (dash) { out.set_code = out.set_code || dash[1]; tok = dash[2]; }
+    if (!out.number && (/\//.test(tok) || /^[A-Z]{0,3}\d{1,4}[A-Z]?$/.test(tok))) { out.number = tok; continue; }
+    if (!out.set_code && /^[A-Z][A-Z0-9]{1,4}$/.test(tok)) out.set_code = tok;
+  }
+  return out;
+}
 
 const state = {
   game: "pokemon",
@@ -268,9 +302,33 @@ function centeringFromLines(lines) {
   };
 }
 
+/**
+ * Where a border couldn't be read (full-art card, glare), don't trust the guessed frame line: put that
+ * guide at the same inset as the opposite side (or both at 5% if neither side reads), so the axis starts
+ * neutral (50/50) and is flagged for the user to line up by hand.
+ */
+function neutralizeUnreadSides(scan) {
+  const per = scan.confidence.per_side;
+  const { outer, inner } = scan.lines;
+  const ok = (sd) => per[sd] >= 0.3;
+  const unmeasured = { lr: false, tb: false };
+  const axes = [["left", "right", "lr", scan.width - 2 * scan.margin], ["top", "bottom", "tb", scan.height - 2 * scan.margin]];
+  for (const [a, b, axis, extent] of axes) {
+    const inset = (sd) => (sd === "left" || sd === "top" ? inner[sd] - outer[sd] : outer[sd] - inner[sd]);
+    const setInset = (sd, v) => { inner[sd] = sd === "left" || sd === "top" ? outer[sd] + v : outer[sd] - v; };
+    if (ok(a) && ok(b)) continue;
+    unmeasured[axis] = true;
+    const v = ok(a) ? inset(a) : ok(b) ? inset(b) : extent * 0.05;
+    setInset(a, v);
+    setInset(b, v);
+  }
+  return unmeasured;
+}
+
 function applyScan(side, scan) {
   const img = canvasFromRGBA(scan.warped);
-  state.scans[side] = { img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin, confidence: scan.confidence.borders };
+  const unmeasured = neutralizeUnreadSides(scan);
+  state.scans[side] = { img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin, confidence: scan.confidence.borders, unmeasured };
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
 }
@@ -284,7 +342,9 @@ async function scanFile(side, file) {
     const pixels = await readImage(file);
     await new Promise((r) => setTimeout(r, 30));  // let the busy overlay paint
     applyScan(side, Vision.scan(pixels, "auto"));
-    if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the edges were hard to find. Check the guide lines in the report.`);
+    const um = state.scans[side].unmeasured;
+    if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In the report, line up the pink guides with the printed frame.`);
+    else if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the border was hard to read. Check the guide lines in the report.`);
   } catch (err) {
     toast(err.message || "Couldn't measure this photo.");
   } finally {
@@ -396,6 +456,7 @@ const guide = {
       const vertical = edge === "left" || edge === "right";
       const max = vertical ? this.canvas.width : this.canvas.height;
       s.lines[kind][edge] = Math.max(0, Math.min(max, vertical ? p.x : p.y));
+      if (s.unmeasured) s.unmeasured[vertical ? "lr" : "tb"] = false;
       state.centering[state.activeSide] = centeringFromLines(s.lines);
       renderRatioInputs();
       scheduleGrade();
@@ -471,7 +532,11 @@ function renderRatioInputs() {
   $("#tb-other").textContent = fmtShare(100 - c.tb);
   const s = state.scans[state.activeSide];
   const conf = $("#conf");
-  conf.textContent = s ? `Edge detection ${Math.round(s.confidence * 100)}%` : "Typed in";
+  const um = s && s.unmeasured && (s.unmeasured.lr || s.unmeasured.tb)
+    ? [s.unmeasured.lr && "left/right", s.unmeasured.tb && "top/bottom"].filter(Boolean).join(" and ") : "";
+  conf.textContent = !s ? "Typed in"
+    : um ? `Couldn't read the ${um} border: drag the pink guides onto the printed frame`
+    : `Border detection ${Math.round(s.confidence * 100)}%`;
   conf.classList.toggle("low", !!s && s.confidence < 0.6);
 }
 
@@ -722,9 +787,8 @@ function assessment() {
     card: {
       game: state.game,
       name: $("#card-name").value.trim(),
-      set_name: $("#card-set").value.trim(),
-      number: $("#card-number").value.trim(),
-      holo: false,
+      ...Object.fromEntries(Object.entries(DETAIL_FIELDS).map(([id, key]) => [key, $(`#${id}`).value.trim()])),
+      holo: ["Holo", "Reverse holo", "Foil", "Etched / textured", "Metal"].includes($("#card-finish").value),
       notes: "",
     },
     centering: state.centering,
@@ -810,7 +874,8 @@ function renderMetrics(report) {
   const items = [
     [String(state.defects.length), "DINGS"],
     [rank == null ? "—" : `#${rank}/${others.length + 1}`, "Rank in History"],
-    [splitText(Math.max(f.lr, f.tb)), "Front centering"],
+    [state.scans.front && state.scans.front.unmeasured && (state.scans.front.unmeasured.lr || state.scans.front.unmeasured.tb)
+      ? "Check guides" : splitText(Math.max(f.lr, f.tb)), "Front centering"],
   ];
   const box = $("#metrics");
   box.innerHTML = "";
@@ -907,6 +972,7 @@ function renderReport() {
   const report = state.report;
   if (!report) return;
   renderScore(report);
+  renderDetails();
   renderMetrics(report);
   renderSubgrades(report);
   renderTiles(report);
@@ -914,6 +980,74 @@ function renderReport() {
   renderCompanies(report);
   viewer.render();
   $("#disclaimer").textContent = report.disclaimer;
+}
+
+/* ---------------------------------------------------------------- card details */
+
+function fillSelect(sel, options, labels = null) {
+  const current = sel.value;
+  sel.innerHTML = "";
+  for (const v of options) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v === "" ? "—" : labels ? labels[v] : v;
+    sel.append(o);
+  }
+  if (options.includes(current)) sel.value = current;
+}
+
+function renderDetails() {
+  const c = assessment().card;
+  const rows = [
+    ["Game", gameInfo(state.game).label],
+    ["Set", [c.set_name, c.set_code && `(${c.set_code})`].filter(Boolean).join(" ")],
+    ["Number", c.number],
+    ["Rarity", c.rarity],
+    ["Finish", c.finish],
+    ["Card type", c.card_type],
+    ["Language", c.language ? LANGUAGES[c.language] || c.language : ""],
+    ["Year", c.year],
+  ];
+  const dl = $("#details-view");
+  dl.innerHTML = "";
+  for (const [k, v] of rows) {
+    const div = document.createElement("div");
+    div.innerHTML = "<dt></dt><dd></dd>";
+    $("dt", div).textContent = k;
+    const dd = $("dd", div);
+    dd.textContent = v || "Not set";
+    dd.classList.toggle("empty", !v);
+    dl.append(div);
+  }
+  $("#identity-sub").textContent = [c.subtitle, c.card_type].filter(Boolean).join(" · ");
+}
+
+function setDetailsEditing(on) {
+  $("#details-form").hidden = !on;
+  $("#details-view").hidden = on;
+  $("#edit-details").textContent = on ? "Close" : "Edit";
+  $("#edit-details").setAttribute("aria-expanded", String(on));
+}
+
+function clearDetails() {
+  for (const id of Object.keys(DETAIL_FIELDS)) $(`#${id}`).value = "";
+  $("#card-language").value = "EN";
+  $("#collector-line").value = "";
+}
+
+function fillDetails(card) {
+  for (const [id, key] of Object.entries(DETAIL_FIELDS)) {
+    const el = $(`#${id}`);
+    const v = card[key] == null ? "" : String(card[key]);
+    if (el.tagName === "SELECT" && v && ![...el.options].some((o) => o.value === v)) {
+      const o = document.createElement("option");  // keep values from older saves or other games
+      o.value = v;
+      o.textContent = v;
+      el.append(o);
+    }
+    el.value = v;
+  }
+  if (!card.language) $("#card-language").value = "EN";
 }
 
 /* ---------------------------------------------------------------- game */
@@ -931,6 +1065,7 @@ function renderGame() {
   $("#card-name").placeholder = g.placeholders.name;
   $("#card-set").placeholder = g.placeholders.set;
   $("#card-number").placeholder = g.placeholders.number;
+  fillSelect($("#card-rarity"), ["", ...g.rarities]);
   $("#condition-hint").textContent = g.hint;
   $("#game-chip").textContent = g.label;
 }
@@ -971,7 +1106,9 @@ function resetCard() {
   state.example = false;
   state.report = null;
   state.savedId = null;
-  for (const id of ["#card-name", "#card-set", "#card-number"]) $(id).value = "";
+  $("#card-name").value = "";
+  clearDetails();
+  setDetailsEditing(false);
   $("#example-note").hidden = true;
 }
 
@@ -989,8 +1126,7 @@ function showExample() {
   for (const side of SIDES) applyScan(side, Vision.scan(samplePhoto(side, state.game)));
   state.defects = ex.defects.map((d) => ({ ...d }));
   $("#card-name").value = ex.name;
-  $("#card-set").value = ex.set;
-  $("#card-number").value = ex.number;
+  fillDetails({ ...ex.details, set_name: ex.set, number: ex.number });
   state.example = true;
   $("#example-note").hidden = false;
   setView("report");
@@ -1018,8 +1154,7 @@ function loadAssessment(a, thumbs) {
   resetCard();
   setGame((a.card && a.card.game) || "pokemon", { remember: false });
   $("#card-name").value = a.card.name || "";
-  $("#card-set").value = a.card.set_name || "";
-  $("#card-number").value = a.card.number || "";
+  fillDetails(a.card);
   state.centering = { front: { ...a.centering.front }, back: { ...a.centering.back } };
   state.defects = (a.defects || []).map((d) => ({ ...d }));
   state.thumbs = { front: (thumbs && thumbs.front) || null, back: (thumbs && thumbs.back) || null };
@@ -1044,7 +1179,7 @@ function renderHistory() {
     if (c.front_thumb) $("img", li).src = c.front_thumb;
     const card = c.assessment.card;
     $(".h-name", li).textContent = card.name || "Unnamed card";
-    $(".h-meta", li).textContent = [gameInfo(card.game).label, card.set_name, card.number, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
+    $(".h-meta", li).textContent = [gameInfo(card.game).label, card.set_name, card.number, card.rarity, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
     $(".h-grades", li).textContent = Object.values(c.report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ");
     li.addEventListener("click", () => {
       $("#history").hidden = true;
@@ -1186,9 +1321,24 @@ function init() {
     e.target.value = "";
     if (f) scanFile(state.activeSide, f);
   });
-  for (const id of ["#card-name", "#card-set", "#card-number"]) {
-    $(id).addEventListener("input", () => { leaveExample(); saveDraft(); });
+  fillSelect($("#card-finish"), FINISHES);
+  fillSelect($("#card-language"), ["", ...Object.keys(LANGUAGES)], { "": "—", ...LANGUAGES });
+  $("#card-language").value = "EN";
+  for (const id of ["card-name", ...Object.keys(DETAIL_FIELDS)]) {
+    $(`#${id}`).addEventListener("input", () => { leaveExample(); renderDetails(); saveDraft(); });
+    $(`#${id}`).addEventListener("change", () => { leaveExample(); renderDetails(); saveDraft(); });
   }
+  $("#collector-line").addEventListener("input", (e) => {
+    const parsed = parseCollectorLine(e.target.value);
+    if (parsed.set_code) $("#card-set-code").value = parsed.set_code;
+    if (parsed.number) $("#card-number").value = parsed.number;
+    if (parsed.language) $("#card-language").value = parsed.language;
+    leaveExample();
+    renderDetails();
+    saveDraft();
+  });
+  $("#edit-details").addEventListener("click", () => setDetailsEditing($("#details-form").hidden));
+  $("#done-details").addEventListener("click", () => setDetailsEditing(false));
 
   // Defect sheet
   $$("#sev-seg button").forEach((b) => b.addEventListener("click", () => { state.sheet.severity = b.dataset.sev; updateSheet(); }));
