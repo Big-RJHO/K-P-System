@@ -15,9 +15,9 @@
  *
  * Access (checked 2026-09-29, see docs/pricing.md): POST
  * https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent, key in the
- * x-goog-api-key header (CORS allowed from the app's origin). Search grounding is free on
- * gemini-2.5-flash (500 requests/day, for accounts Google still serves 2.5 to); Gemini 3.x models need
- * billing (5,000 searches/month free, then $14 per 1,000).
+ * x-goog-api-key header (CORS allowed from the app's origin). Search grounding on Gemini 3.x needs billing
+ * on the key (5,000 searches/month free, then $14 per 1,000); gemini-2.5-flash (free search) is refused to
+ * new users.
  *
  * Works in browsers and in Node (tests inject `fetch`).
  */
@@ -28,9 +28,11 @@
   "use strict";
 
   const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
+  // Google search needs billing on the key for the 3.x models (tested 2026-09-29 with a new free key: plain
+  // requests work, search answers 429 "check your plan and billing"); 2.5 is refused to new users (404).
   const MODELS = [
-    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash: search is free (up to 500 a day), if Google still offers 2.5 to your account" },
-    { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite: needs billing on your key (5,000 searches a month free, then $14 per 1,000)" },
+    { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite (needs billing on your key: 5,000 searches a month free, then $14 per 1,000)" },
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash (older accounts only: free search, up to 500 a day)" },
   ];
   const BLOCKED_SOURCES = ["pricecharting.com"];   // its terms don't allow its prices in apps without permission
   const MAX_PRICE = 10000000;
@@ -161,8 +163,11 @@ Reply with only this JSON, no other text:
     if (status === 401 || status === 403) return /billing|paid|free tier/i.test(msg)
       ? "This model's web search needs billing on your Gemini key. Turn on billing in Google AI Studio, or choose Gemini 2.5 Flash."
       : "Google refused the request with this key (permission denied). Check the key's restrictions in Google AI Studio.";
-    if (status === 404 || /not found|not available|no longer available|limit(ed|ing) access/i.test(msg)) return "This Gemini model isn't available to your key. Choose the other model in Prices → Web search.";
-    if (status === 429) return "Your Gemini key has hit its limit for now (free search allowance or rate limit). Try again later.";
+    if (/new users/i.test(msg)) return "Google no longer offers this model to new keys. Choose Gemini 3.5 Flash-Lite in Web search access.";
+    if (status === 404 || /not found|not available|no longer available|limit(ed|ing) access/i.test(msg)) return "This Gemini model isn't available to your key. Choose the other model in Web search access.";
+    if (status === 429 && /billing|plan/i.test(msg)) return "Google's web search isn't included in the Gemini free tier for your key. Turn on billing for the key's project in Google AI Studio (5,000 searches a month are then free, then $14 per 1,000), or you've used this month's allowance.";
+    if (status === 429) return "Your Gemini key has hit its rate limit. Try again in a minute.";
+    if (status === 503) return "Gemini is busy right now. Try again in a minute.";
     return `Gemini answered with an error${msg ? `: ${msg.slice(0, 200)}` : ` (HTTP ${status})`}.`;
   }
 
@@ -184,14 +189,18 @@ Reply with only this JSON, no other text:
       generationConfig: { temperature: 0.1 },
     };
     let res;
-    try {
-      res = await F(`${ENDPOINT}/${model}:generateContent`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": opts.apiKey },
-        body: JSON.stringify(req),
-      });
-    } catch (err) {
-      throw new Error("Gemini couldn't be reached (offline, or this page isn't allowed to contact it).");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        res = await F(`${ENDPOINT}/${model}:generateContent`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": opts.apiKey },
+          body: JSON.stringify(req),
+        });
+      } catch (err) {
+        throw new Error("Gemini couldn't be reached (offline, or this page isn't allowed to contact it).");
+      }
+      if (res.status !== 503 || attempt) break;
+      await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? 2000));   // "high demand": one retry
     }
     let body = null;
     try { body = await res.json(); } catch (err) { body = null; }
@@ -212,7 +221,8 @@ Reply with only this JSON, no other text:
     return `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:0">${String(html || "")}</body></html>`;
   }
 
-  const validKey = (k) => /^[A-Za-z0-9_-]{30,60}$/.test(String(k || "").trim());
+  // Older keys look like "AIza…" (39 characters); newer ones like "AQ.Ab8…" (with a dot).
+  const validKey = (k) => /^[A-Za-z0-9_.-]{30,120}$/.test(String(k || "").trim());
 
   return { search, wantedGrades, buildPrompt, extractJSON, readResponse, checkPrices, suggestionsDoc, domainOf, validKey, MODELS, BLOCKED_SOURCES };
 });

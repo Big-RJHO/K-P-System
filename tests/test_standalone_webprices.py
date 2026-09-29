@@ -78,7 +78,7 @@ def test_search_request_and_checked_prices():
       const c = calls[0];
       const sent = JSON.parse(c.init.body);
       console.log(JSON.stringify({ url: c.url, keyInUrl: c.url.includes(KEY), tools: sent.tools, res }));""")
-    assert r["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    assert r["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent"
     assert r["keyInUrl"] is False and r["tools"] == [{"google_search": {}}]
     res = r["res"]
     assert res["grounded"] and res["parsed"] and res["card_found"].startswith("Charizard")
@@ -105,9 +105,9 @@ def test_errors_are_explained_and_nothing_is_sent_without_a_key():
     r = run("""
       const msgs = [];
       for (const [key, f] of [["", fakeFetch], ["AIzaWRONG", fakeFetch],
-          [KEY, async () => ({ ok: false, status: 429, json: async () => ({ error: { message: "Resource has been exhausted" } }) })],
+          [KEY, async () => ({ ok: false, status: 429, json: async () => ({ error: { message: "You exceeded your current quota, please check your plan and billing details." } }) })],
           [KEY, async () => ({ ok: false, status: 403, json: async () => ({ error: { message: "Grounding with Google Search requires billing (paid tier)" } }) })],
-          [KEY, async () => ({ ok: false, status: 404, json: async () => ({ error: { message: "models/gemini-2.5-flash is not found for API version v1beta" } }) })],
+          [KEY, async () => ({ ok: false, status: 404, json: async () => ({ error: { message: "This model models/gemini-2.5-flash is no longer available to new users." } }) })],
           [KEY, async () => { throw new TypeError("Failed to fetch"); }]]) {
         try { await W.search(card, { apiKey: key, fetch: f }); msgs.push("ok"); } catch (e) { msgs.push(e.message); }
       }
@@ -115,7 +115,7 @@ def test_errors_are_explained_and_nothing_is_sent_without_a_key():
     m = r["msgs"]
     assert "Add your Gemini API key" in m[0] and r["calls"] == 1
     assert "didn't accept the Gemini API key" in m[1]
-    assert "hit its limit" in m[2] and "needs billing" in m[3] and "isn't available to your key" in m[4] and "couldn't be reached" in m[5]
+    assert "free tier" in m[2] and "needs billing" in m[3] and "no longer offers this model" in m[4] and "couldn't be reached" in m[5]
 
 
 def test_helpers():
@@ -123,8 +123,19 @@ def test_helpers():
       j: [W.extractJSON('x {"a": "}{", "b": [1]} y'), W.extractJSON("none"), W.extractJSON("```json\\n{\\"a\\":1}\\n```")],
       d: ["https://www.ebay.com/itm/1", "eBay.com", "shop.tcgplayer.com"].map(W.domainOf),
       doc: W.suggestionsDoc("<a href=https://www.google.com/search?q=x>x</a>").includes('<base target="_blank">'),
-      k: [W.validKey("AIzaSyTESTKEY0000000000000000000000000"), W.validKey("short"), W.validKey("bad key with spaces 000000000000000")],
+      k: [W.validKey("AIzaSyTESTKEY0000000000000000000000000"), W.validKey("short"), W.validKey("bad key with spaces 000000000000000"), W.validKey("AQ.Ab8TESTkeyTESTkeyTESTkeyTESTkeyTESTkey01")],
     }));""")
     assert r["j"] == [{"a": "}{", "b": [1]}, None, {"a": 1}]
     assert r["d"] == ["ebay.com", "ebay.com", "shop.tcgplayer.com"]
-    assert r["doc"] is True and r["k"] == [True, False, False]
+    assert r["doc"] is True and r["k"] == [True, False, False, True]
+
+
+def test_busy_model_is_retried_once():
+    r = run("""
+      let n = 0;
+      const f = async () => (++n === 1 ? { ok: false, status: 503, json: async () => ({ error: { message: "high demand" } }) } : { ok: true, status: 200, json: async () => body });
+      const res = await W.search(card, { apiKey: KEY, fetch: f, retryDelayMs: 1 });
+      let msg = "";
+      try { await W.search(card, { apiKey: KEY, retryDelayMs: 1, fetch: async () => ({ ok: false, status: 503, json: async () => ({ error: { message: "high demand" } }) }) }); } catch (e) { msg = e.message; }
+      console.log(JSON.stringify({ n, ok: res.prices.length > 0, msg }));""")
+    assert r["n"] == 2 and r["ok"] and "busy" in r["msg"]

@@ -80,7 +80,7 @@ def _parts(env: str) -> tuple[str, str, str]:
     css = (SRC / "style.css").read_text(encoding="utf-8")
     criteria = json.dumps(criteria_json(), separators=(",", ":"), ensure_ascii=False)
     scripts = [f"window.GRADING_LAB_ENV={json.dumps(env)};window.GRADING_CRITERIA={criteria};"]
-    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("grading.js", "vision.js", "inspect.js", "identify.js", "ocr.js", "prices.js", "webprices.js", "cardsight.js", "app.js")]
+    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("grading.js", "vision.js", "inspect.js", "identify.js", "ocr.js", "prices.js", "webprices.js", "cardsight.js", "geminiid.js", "rbprices.js", "app.js")]
     script_tags = "\n".join(f"<script>{_inline_script(code)}</script>" for code in scripts)
     return body, css, script_tags
 
@@ -145,6 +145,14 @@ self.addEventListener("fetch", (e) => {
   // Card lookups, prices and the text reader go straight to the network: never cached here (price
   // requests carry the user's PriceCharting token).
   if (url.origin !== location.origin && !fonts) return;
+  // The daily Riftbound price file: always try the network first, fall back to the cached copy offline.
+  if (url.pathname.endsWith("/riftbound-prices.json")) {
+    e.respondWith(fetch(e.request).then((res) => {
+      if (res.ok) { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); }
+      return res;
+    }).catch(() => caches.match(e.request, { ignoreSearch: true })));
+    return;
+  }
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((hit) =>
       hit || fetch(e.request).then((res) => {

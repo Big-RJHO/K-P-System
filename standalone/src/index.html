@@ -137,7 +137,7 @@
           <div class="id-find">
             <button type="button" class="btn small" id="read-card">Read from photo</button>
             <button type="button" class="btn small" id="find-card">Find this card online</button>
-            <span class="hint-inline" id="id-status">Reads the name and number from your front photo on this phone, then looks the card up. Only the text is sent, never your photos.</span>
+            <span class="hint-inline" id="id-status">Reads the name and number from your front photo, then looks the card up. With a Gemini key saved (Prices → Web search access), Gemini reads it and the front photo is sent to Google; without one, it's read on this phone and only the text is sent.</span>
           </div>
           <div id="id-results" class="id-results" hidden></div>
           <div class="form-grid">
@@ -181,6 +181,10 @@
           <h3 class="sc-sub">Recent sales (CardSight)</h3>
           <div id="cs-body"></div>
         </div>
+        <div class="cs-prices" id="rb-prices" hidden>
+          <h3 class="sc-sub">TCGplayer prices (Riftbound)</h3>
+          <div id="rb-body"></div>
+        </div>
         <div id="prices-body"></div>
         <div class="web-prices" id="web-prices">
           <h3 class="sc-sub">Web search (Gemini)</h3>
@@ -201,9 +205,9 @@
           </div>
         </details>
         <details class="pc-settings" id="gm-settings">
-          <summary>Web search access (Gemini)</summary>
-          <p class="hint">Web search asks Google's Gemini to search the web for what this card recently sold for, and shows the sources. It uses your own Gemini API key: get one free at aistudio.google.com (Get API key). The key stays on this phone only and is only sent to Google. Results aren't saved, as Google's terms require.</p>
-          <label for="gm-key" class="note-label">Gemini API key<input id="gm-key" type="password" autocomplete="off" spellcheck="false" placeholder="AIza…"></label>
+          <summary>Gemini key: card reading and web search</summary>
+          <p class="hint">With this key, Gemini reads your card from the front photo (free; the photo is sent to Google, and on Google's free tier it may be used to improve their products). Web search asks Gemini to search the web for what this card recently sold for, and shows the sources. It uses your own Gemini API key from aistudio.google.com (Get API key). Google only allows web search on keys with billing turned on (5,000 searches a month are then free; each card search uses a few, plus a fraction of a cent). The key stays on this phone only and is only sent to Google. Results aren't saved, as Google's terms require.</p>
+          <label for="gm-key" class="note-label">Gemini API key<input id="gm-key" type="password" autocomplete="off" spellcheck="false" placeholder="AQ.… or AIza…"></label>
           <label for="gm-model" class="note-label">Model<select id="gm-model"></select></label>
           <div class="row-actions">
             <button type="button" class="btn small" id="gm-save">Save key</button>

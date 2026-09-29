@@ -110,6 +110,7 @@ const state = {
   price: { key: "", status: "idle" },  // PriceCharting lookup for the current card: see loadPrices()
   web: { key: "", status: "idle" },    // Gemini web price search for the current card (on screen only, never stored)
   cs: { key: "", status: "idle" },     // CardSight sales for the current card (Pokemon): see loadCardSight()
+  rb: { key: "", status: "idle" },     // TCGplayer prices for the current card (Riftbound): see loadRiftPrices()
   autoRead: false,  // the card has been read from the photo once already (automatic runs only)
   showSuspects: true,
   sheet: { side: null, location: null, type: null, severity: null },
@@ -1172,6 +1173,7 @@ function confirmCandidate(c) {
   state.tcgplayerId = c.tcgplayer_id || "";
   loadPrices({ force: true });
   loadCardSight({ force: true });
+  loadRiftPrices();
 }
 
 function idNote(box, text) {
@@ -1203,7 +1205,7 @@ function renderCandidates(res, reading = null) {
   const box = $("#id-results");
   box.innerHTML = "";
   box.hidden = false;
-  if (reading) idNote(box, `Read from your photo: ${[reading.name && `"${reading.name}"`, reading.number, reading.set_code].filter(Boolean).join(" · ")}. Text recognition can misread a letter or digit, so compare the pictures before you pick.`);
+  if (reading) idNote(box, `Read from your photo${reading.source === "gemini" ? " by Gemini" : ""}: ${[reading.name && `"${reading.name}"`, reading.number, reading.set_code, reading.set_name].filter(Boolean).join(" · ")}. ${reading.source === "gemini" ? "AI reading" : "Text recognition"} can misread a letter or digit, so compare the pictures before you pick.`);
   if (res.error || !res.candidates.length) {
     idNote(box, res.error || "No matching card found.");
     idNote(box, "Nothing is being used as a reference. You can fill in the details by hand, or supply a reference image yourself.");
@@ -1266,23 +1268,50 @@ function ocrSource() {
   return s.result ? CardOCR.fromWarped(s.result.warped, s.margin) : null;
 }
 
+/** The flattened front of the card as a JPEG (base64, no prefix), about 1000 px tall, for Gemini. */
+function frontJpegBase64() {
+  const s = state.scans.front;
+  if (!s || !s.img) return "";
+  const m = s.margin, w = s.width - 2 * m, h = s.height - 2 * m, k = Math.min(1, 1000 / h);
+  const c = document.createElement("canvas");
+  c.width = Math.round(w * k);
+  c.height = Math.round(h * k);
+  c.getContext("2d").drawImage(s.img, m, m, w, h, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.85).split(",")[1] || "";
+}
+
 async function readFromPhoto({ auto = false } = {}) {
   const src = ocrSource();
   if (!src) { if (!auto) setStatus("Add a front photo first."); return; }
   const btn = $("#read-card");
   btn.disabled = true;
   setDetailsEditing(true);
-  if (!recognizer) recognizer = CardOCR.browserRecognizer(setStatus);
-  setStatus("Reading the card…");
-  let reading;
-  try {
-    reading = await CardOCR.read(src, state.game, recognizer);
-  } catch (err) {
-    btn.disabled = false;
-    setStatus(`${(err && err.message) || "Couldn't read the card."} Type the name and number, then tap Find this card online.`);
-    return;
+  let reading = null, note = "";
+  if (gmKey()) {
+    // With a Gemini key the card is read by Gemini (the front photo goes to Google); far more accurate
+    // than the on-phone reader. If it fails, fall back to the on-phone reader.
+    setStatus("Reading the card with Gemini (sends the front photo to Google)…");
+    try {
+      reading = await GeminiID.identify(frontJpegBase64(), { apiKey: gmKey(), fetch: (...a) => window.fetch(...a) });
+      if (!reading.found) reading = null;
+    } catch (err) {
+      note = `${(err && err.message) || "Gemini couldn't read the card."} Using the on-phone reader instead. `;
+      reading = null;
+    }
+  }
+  if (!reading) {
+    if (!recognizer) recognizer = CardOCR.browserRecognizer(setStatus);
+    setStatus(`${note}Reading the card…`);
+    try {
+      reading = await CardOCR.read(src, state.game, recognizer);
+    } catch (err) {
+      btn.disabled = false;
+      setStatus(`${note}${(err && err.message) || "Couldn't read the card."} Type the name and number, then tap Find this card online.`);
+      return;
+    }
   }
   btn.disabled = false;
+  if (reading.game && reading.game !== state.game) toast(`This looks like a ${gameInfo(reading.game).label} card. Switch the game on the scan screen if it is.`);
   if (!reading.found) {
     setStatus("Couldn't read the name or number from this photo (glare, a holo pattern, or a non-English card). Type them, then tap Find this card online.");
     return;
@@ -1401,6 +1430,7 @@ function renderPrices() {
   const box = $("#prices-body");
   if (!box) return;
   renderCardSight();
+  renderRiftPrices();
   box.innerHTML = "";
   const card = priceCard();
   const has = !!(card.name && card.number);
@@ -1416,7 +1446,8 @@ function renderPrices() {
   if (stale && p.status !== "idle") priceNote(box, "The card details changed. Tap Update for this card's prices.");
   if (!stale && p.status === "loading") priceNote(box, "Looking up prices…");
   if (!stale && p.status === "error") priceNote(box, p.error, "warn");
-  if ((p.status === "no-token" || !pcToken()) && !(state.game === "pokemon" && csKey())) priceNote(box, state.game === "pokemon" ? "For graded prices, add a CardSight key (Sales data access, below), or open the card on PriceCharting to see every grade." : "For graded prices, use Web search below, or open the card on PriceCharting to see every grade.");
+  // Riftbound: the TCGplayer section above already says where graded prices come from.
+  if ((p.status === "no-token" || !pcToken()) && state.game === "pokemon" && !csKey()) priceNote(box, "For graded prices, add a CardSight key (Sales data access, below), or open the card on PriceCharting to see every grade.");
   if (!stale && p.status === "ok" && p.product) {
     const prod = p.product;
     const head = document.createElement("div");
@@ -1482,7 +1513,7 @@ function renderPrices() {
   links.className = "pr-links";
   if (!stale && p.status === "ok" && p.product) priceLink(links, Prices.productUrl(p.product), "Open on PriceCharting");
   else priceLink(links, Prices.searchUrl(card), "See prices on PriceCharting");
-  if (state.tcgplayerId && /^\d+$/.test(state.tcgplayerId)) priceLink(links, `https://www.tcgplayer.com/product/${state.tcgplayerId}`, "TCGplayer");
+  if (state.game !== "riftbound" && state.tcgplayerId && /^\d+$/.test(state.tcgplayerId)) priceLink(links, `https://www.tcgplayer.com/product/${state.tcgplayerId}`, "TCGplayer");
   box.append(links);
   renderWebPrices();
 }
@@ -1642,6 +1673,71 @@ function removeCardSightKey() {
   $("#cs-key").value = "";
   state.cs = { key: "", status: "no-key" };
   renderPrices();
+}
+
+/* ---------------------------------------------------------------- Riftbound prices (TCGplayer, daily file) */
+
+async function loadRiftPrices() {
+  const card = { ...priceCard(), set_code: $("#card-set-code").value.trim(), tcgplayer_id: state.tcgplayerId };
+  const key = priceKey(card);
+  if (state.game !== "riftbound" || !card.number) { state.rb = { key, status: "idle" }; renderRiftPrices(); return; }
+  state.rb = { key, status: "loading" };
+  renderRiftPrices();
+  try {
+    const data = await RiftPrices.load({ fetch: (...a) => window.fetch(...a), url: ENV === "site" ? "riftbound-prices.json" : RiftPrices.SITE_URL });
+    if (state.rb.key !== key) return;
+    const match = RiftPrices.find(data, card);
+    state.rb = { key, status: match ? "ok" : "none", match, updated: data.updated_at };
+  } catch (err) {
+    if (state.rb.key === key) state.rb = { key, status: "error", error: (err && err.message) || "The price list couldn't be loaded." };
+  }
+  renderRiftPrices();
+}
+
+function renderRiftPrices() {
+  const wrap = $("#rb-prices"), box = $("#rb-body");
+  if (!box) return;
+  wrap.hidden = state.game !== "riftbound";
+  if (wrap.hidden) return;
+  box.innerHTML = "";
+  const r = state.rb;
+  const stale = r.key && r.key !== priceKey(priceCard());
+  if (!priceCard().number) { priceNote(box, "Confirm which card this is first."); return; }
+  if (stale) { priceNote(box, "The card details changed. Tap Update for this card's prices."); return; }
+  if (r.status === "loading") { priceNote(box, "Loading today's prices…"); return; }
+  if (r.status === "error") { priceNote(box, r.error, "warn"); return; }
+  if (r.status === "none") { priceNote(box, "This card isn't in TCGplayer's Riftbound list yet (new cards can take a few days)."); return; }
+  if (r.status !== "ok") return;
+  const c = r.match.card;
+  const head = document.createElement("div");
+  head.className = "pr-product";
+  head.innerHTML = "<b></b><span></span>";
+  $("b", head).textContent = c.name;
+  $("span", head).textContent = [c.set_name, c.number, c.rarity].filter(Boolean).join(" · ");
+  box.append(head);
+  if (!r.match.name_matches) priceNote(box, "Matched by set and number, but the name differs: check it's your card.", "warn");
+  const list = RiftPrices.rows(c);
+  if (!list.length) priceNote(box, "No current TCGplayer price for this card.");
+  else {
+    const table = document.createElement("table");
+    table.className = "pr-table";
+    for (const x of list) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = `Ungraded · ${x.printing}`;
+      const sm = document.createElement("small");
+      sm.textContent = [x.market == null && "No recent sales (market price)", x.low != null && `lowest listing ${money2(x.low)}`, x.mid != null && `mid ${money2(x.mid)}`].filter(Boolean).join(" · ");
+      $("th", tr).append(sm);
+      $("td", tr).textContent = money2(x.market ?? x.mid);
+      table.append(tr);
+    }
+    box.append(table);
+  }
+  priceNote(box, `TCGplayer market prices (recent sales, ungraded) via tcgcsv.com, updated ${String(r.updated || "").slice(0, 10)}. Graded Riftbound prices aren't listed on TCGplayer: use Web search below.`);
+  const links = document.createElement("div");
+  links.className = "pr-links";
+  priceLink(links, c.url, "Open on TCGplayer");
+  box.append(links);
 }
 
 /* ---------------------------------------------------------------- web price search (Gemini) */
@@ -2118,6 +2214,7 @@ function setView(view, { animate = true } = {}) {
     } else if (!state.example) {
       loadPrices();
       loadCardSight();
+      loadRiftPrices();
     }
   } else {
     renderSlots();
@@ -2143,6 +2240,7 @@ function resetCard() {
   state.price = { key: "", status: "idle" };
   state.web = { key: "", status: "idle" };
   state.cs = { key: "", status: "idle" };
+  state.rb = { key: "", status: "idle" };
   state.autoRead = false;
   clearReference();
   $("#id-results").hidden = true;
@@ -2417,7 +2515,7 @@ function init() {
   });
   $("#find-card").addEventListener("click", findCard);
   $("#read-card").addEventListener("click", () => readFromPhoto());
-  $("#refresh-prices").addEventListener("click", () => { loadPrices({ force: true }); loadCardSight({ force: true }); });
+  $("#refresh-prices").addEventListener("click", () => { loadPrices({ force: true }); loadCardSight({ force: true }); loadRiftPrices(); });
   $("#cs-save").addEventListener("click", saveCardSightKey);
   $("#cs-remove").addEventListener("click", removeCardSightKey);
   $("#pc-save").addEventListener("click", savePriceToken);
