@@ -83,10 +83,17 @@ def test_js_riftbound_style_cards(tmp_path):
 def test_js_card_in_sleeve_on_busy_desk(tmp_path):
     """Photos like real phone shots: a sleeved card on a laptop, with keys, a laptop edge and wood grain around it."""
     cards = [
-        (make_card(40, 31, 44, 47, border_bgr=(40, 205, 245), frame_bgr=(60, 150, 190)), (40, 31, 44, 47), 2),  # Pokemon-style front
+        # Pokemon-style front in a snug sleeve
+        (make_card(40, 31, 44, 47, border_bgr=(40, 205, 245), frame_bgr=(60, 150, 190)), (40, 31, 44, 47), 2, {}),
+        # Riftbound-style back (navy border, thin yellow frame) in a roomy sleeve that catches the light:
+        # the sleeve's edge is a stronger line than the card's own edge
+        (make_card(33, 36, 30, 31, border_bgr=(90, 45, 20), frame_bgr=(40, 220, 240)), (33, 36, 30, 31), 1,
+         {"sleeve_pad": (70, 80), "sleeve_light": 45}),
+        (make_card(36, 33, 32, 30, border_bgr=(90, 45, 20), frame_bgr=(40, 220, 240)), (36, 33, 32, 30), -2,
+         {"sleeve_pad": (64, 90), "sleeve_light": 35, "seed": 8}),
     ]
-    images = [(place_in_clutter(card, angle), "auto") for card, _, angle in cards]
-    for (card, borders, _), res in zip(cards, run(images, tmp_path)):
+    images = [(place_in_clutter(card, angle, **kw), "auto") for card, _, angle, kw in cards]
+    for (card, borders, _, _), res in zip(cards, run(images, tmp_path)):
         lr, tb = expected(*borders)
         assert abs(res["centering"]["lr"] - lr) <= 1.5, (lr, tb, res["centering"])
         assert abs(res["centering"]["tb"] - tb) <= 1.5, (lr, tb, res["centering"])

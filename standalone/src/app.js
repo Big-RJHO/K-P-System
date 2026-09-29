@@ -859,6 +859,26 @@ const viewer = {
 
 /* ---------------------------------------------------------------- grading + report */
 
+// A border the photo couldn't show (full-art card, glare) can't earn a Pristine or Black Label grade:
+// until the guides are lined up by hand it counts as just making Gem Mint (55/45).
+const UNREAD_SHARE = 55;
+
+function unreadAxes() {
+  const out = [];
+  for (const side of ["front", "back"]) {
+    const um = state.scans[side] && state.scans[side].unmeasured;
+    if (um && um.lr) out.push([side, "lr"]);
+    if (um && um.tb) out.push([side, "tb"]);
+  }
+  return out;
+}
+
+function gradedCentering() {
+  const c = { front: { ...state.centering.front }, back: { ...state.centering.back } };
+  for (const [side, axis] of unreadAxes()) c[side][axis] = Math.max(c[side][axis], UNREAD_SHARE);
+  return c;
+}
+
 function assessment() {
   return {
     card: {
@@ -868,7 +888,7 @@ function assessment() {
       holo: ["Holo", "Reverse holo", "Foil", "Etched / textured", "Metal"].includes($("#card-finish").value),
       notes: "",
     },
-    centering: state.centering,
+    centering: gradedCentering(),
     defects: state.defects,
   };
 }
@@ -886,6 +906,12 @@ function runGrade() {
   } catch (err) {
     toast(`Grading failed: ${err.message}`);
     return;
+  }
+  const unread = unreadAxes();
+  if (unread.length) {
+    const what = unread.map(([side, axis]) => `${side} ${axis === "lr" ? "left/right" : "top/bottom"}`).join(", ");
+    const note = `Centering not read from the photo (${what}: full-art card or glare), so it counts as ${UNREAD_SHARE}/${100 - UNREAD_SHARE}. Line up the pink guides with the printed frame to measure it.`;
+    for (const g of Object.values(state.report.grades)) g.notes.unshift(note);
   }
   renderReport();
   saveDraft();
@@ -1392,6 +1418,8 @@ function init() {
       if (isNaN(v)) return;
       leaveExample();
       state.centering[state.activeSide][key] = Math.min(100, Math.max(50, v));
+      const sc = state.scans[state.activeSide];
+      if (sc && sc.unmeasured) sc.unmeasured[key] = false;  // typed in by hand: now it's a measurement
       renderRatioInputs();
       scheduleGrade();
     });

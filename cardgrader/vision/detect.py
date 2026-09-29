@@ -27,6 +27,39 @@ def _order_corners(pts: np.ndarray) -> np.ndarray:
     )
 
 
+def _fit_sides(points: np.ndarray, quad: np.ndarray) -> np.ndarray:
+    """Straight-line fit of each side through the outline's points, away from the corners.
+
+    Cards have rounded corners, so the polygon's own vertices sit inside the card's true corners;
+    intersecting the fitted sides puts them back where the straight edges meet.
+    """
+    lines = []
+    for i in range(4):
+        a, b = quad[i], quad[(i + 1) % 4]
+        d = b - a
+        length = float(np.hypot(*d))
+        if length < 1:
+            return quad.reshape(4, 1, 2)
+        u = d / length
+        rel = points - a
+        t = rel @ u
+        off = np.abs(rel[:, 0] * u[1] - rel[:, 1] * u[0])
+        sel = points[(t > 0.15 * length) & (t < 0.85 * length) & (off < max(3.0, 0.03 * length))]
+        if len(sel) < 10:
+            return quad.reshape(4, 1, 2)
+        vx, vy, x0, y0 = cv2.fitLine(sel, cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+        lines.append((np.array([x0, y0]), np.array([vx, vy])))
+    out = []
+    for i in range(4):
+        (p1, d1), (p2, d2) = lines[i - 1], lines[i]
+        den = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(den) < 1e-6:
+            return quad.reshape(4, 1, 2)
+        t = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / den
+        out.append(p1 + d1 * t)
+    return np.array(out, np.float32).reshape(4, 1, 2)
+
+
 def _quad_candidates(gray: np.ndarray) -> list[np.ndarray]:
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     masks = []
@@ -37,13 +70,13 @@ def _quad_candidates(gray: np.ndarray) -> list[np.ndarray]:
 
     quads = []
     for mask in masks:
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         for c in sorted(contours, key=cv2.contourArea, reverse=True)[:5]:
             hull = cv2.convexHull(c)
             peri = cv2.arcLength(hull, True)
             approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
             if len(approx) == 4:
-                quads.append(approx)
+                quads.append(_fit_sides(c.reshape(-1, 2).astype(np.float32), approx.reshape(4, 2).astype(np.float32)))
             else:
                 # Fall back to the minimum-area rectangle of the blob.
                 quads.append(cv2.boxPoints(cv2.minAreaRect(hull)).astype(np.int32).reshape(4, 1, 2))

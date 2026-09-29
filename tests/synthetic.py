@@ -27,6 +27,16 @@ def make_card(
     return card
 
 
+def card_mask(radius: int = 36) -> np.ndarray:
+    """Card shape with rounded corners (real cards have a ~3 mm corner radius, 36 px at this scale)."""
+    mask = np.zeros((H, W), np.uint8)
+    cv2.rectangle(mask, (radius, 0), (W - 1 - radius, H - 1), 255, -1)
+    cv2.rectangle(mask, (0, radius), (W - 1, H - 1 - radius), 255, -1)
+    for cx, cy in ((radius, radius), (W - 1 - radius, radius), (radius, H - 1 - radius), (W - 1 - radius, H - 1 - radius)):
+        cv2.circle(mask, (cx, cy), radius, 255, -1)
+    return mask
+
+
 def place_on_background(card: np.ndarray, angle: float = 3.0, seed: int = 1, bg: int = 35) -> np.ndarray:
     """Rotate the card and paste it onto a larger, noisy dark background, like a photo."""
     rng = np.random.default_rng(seed)
@@ -37,7 +47,7 @@ def place_on_background(card: np.ndarray, angle: float = 3.0, seed: int = 1, bg:
     matrix[0, 2] += center[0] - W / 2
     matrix[1, 2] += center[1] - H / 2
     warped = cv2.warpAffine(card, matrix, (bw, bh), flags=cv2.INTER_CUBIC, borderValue=(0, 0, 0))
-    mask = cv2.warpAffine(np.full((H, W), 255, np.uint8), matrix, (bw, bh), flags=cv2.INTER_NEAREST)
+    mask = cv2.warpAffine(card_mask(), matrix, (bw, bh), flags=cv2.INTER_NEAREST)
     bg[mask > 0] = warped[mask > 0]
     return bg
 
@@ -48,7 +58,9 @@ def encode_png(img: np.ndarray) -> bytes:
     return buf.tobytes()
 
 
-def place_in_clutter(card: np.ndarray, angle: float = 2.0, seed: int = 5) -> np.ndarray:
+def place_in_clutter(
+    card: np.ndarray, angle: float = 2.0, seed: int = 5, sleeve_pad: tuple[int, int] = (50, 60), sleeve_light: int = 12
+) -> np.ndarray:
     """Card inside a clear sleeve on a busy desk: dark laptop-like area with keys, a wood-grain strip,
     long straight lines that run past the card, and a slightly lighter sleeve outline around the card."""
     rng = np.random.default_rng(seed)
@@ -66,22 +78,22 @@ def place_in_clutter(card: np.ndarray, angle: float = 2.0, seed: int = 5) -> np.
     bg = np.clip(bg.astype(np.int16) + rng.normal(0, 4, bg.shape), 0, 255).astype(np.uint8)
     center = (bw / 2, bh / 2)
     # sleeve: slightly larger, faintly lighter rectangle with a thin bright edge
-    sleeve = np.zeros((H + 60, W + 50, 3), np.uint8)
-    matrix_s = cv2.getRotationMatrix2D(((W + 50) / 2, (H + 60) / 2), angle, 1.0)
-    matrix_s[0, 2] += center[0] - (W + 50) / 2
-    matrix_s[1, 2] += center[1] - (H + 60) / 2 - 15
+    pw, ph = sleeve_pad
+    sleeve = np.zeros((H + ph, W + pw, 3), np.uint8)
+    matrix_s = cv2.getRotationMatrix2D(((W + pw) / 2, (H + ph) / 2), angle, 1.0)
+    matrix_s[0, 2] += center[0] - (W + pw) / 2
+    matrix_s[1, 2] += center[1] - (H + ph) / 2 - 15
     smask = cv2.warpAffine(np.full(sleeve.shape[:2], 255, np.uint8), matrix_s, (bw, bh))
-    bg[smask > 0] = np.clip(bg[smask > 0].astype(np.int16) + 12, 0, 255).astype(np.uint8)
+    bg[smask > 0] = np.clip(bg[smask > 0].astype(np.int16) + sleeve_light, 0, 255).astype(np.uint8)
     edge = cv2.morphologyEx(smask, cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8))
     bg[edge > 0] = (200, 200, 200)
     matrix = cv2.getRotationMatrix2D((W / 2, H / 2), angle, 1.0)
     matrix[0, 2] += center[0] - W / 2
     matrix[1, 2] += center[1] - H / 2
     warped = cv2.warpAffine(card, matrix, (bw, bh), flags=cv2.INTER_CUBIC)
-    mask = cv2.warpAffine(np.full((H, W), 255, np.uint8), matrix, (bw, bh), flags=cv2.INTER_NEAREST)
+    mask = cv2.warpAffine(card_mask(), matrix, (bw, bh), flags=cv2.INTER_NEAREST)
     bg[mask > 0] = warped[mask > 0]
     return bg
-
 
 
 def tilt_photo(img: np.ndarray, amount: float = 0.06, seed: int = 3) -> np.ndarray:
