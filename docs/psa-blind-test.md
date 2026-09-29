@@ -45,12 +45,12 @@ Complete (not "up to") reports: 14/30. Rank correlation between system grade and
 - **The system orders cards correctly** (0.83) and separates badly damaged cards (PSA 1, 2-3) from clean ones.
 - **It is too generous by about 2.4 grades.** Real PSA 2-3 cards came out as 7.5-8, and PSA 4, 6, 8 and 9 all came out as 9. The agents could not see the fine wear of PSA 4-8 cards at this resolution and through the slab, so they logged little or nothing, and a card with nothing logged goes to the top of its range.
 - **It agrees with itself.** Different agents gave the same or nearly the same grade on the same card in most cases. The errors are systematic (missed wear), not random.
-- **"Complete" can rest on weak evidence.** In 14 of 30 runs the agent ticked corners/edges as inspected although the system said no edge or corner could be assessed from the photo, and the report came back complete with a firm grade (for example PSA 10 and PSA 9). Agents pointed this out repeatedly.
+- **"Complete" can rest on weak evidence.** In 26 of 30 runs the agent ticked corners and edges on both sides as inspected although the system said it could not assess them from the photo; 14 of those 26 still came back as complete reports with a firm grade (for example PSA 10 and PSA 9). Agents pointed this out repeatedly.
 
 ## Failures and gaps observed
 1. Photo-quality blocks don't limit the grade when the user says an area was inspected.
-2. On the plain blue Pokemon back the left/right border was reported as *unread* in about half of the runs, which alone
-   made the report incomplete.
+2. On the plain blue Pokemon back the left/right border was reported as *unread* in 12 of 30 runs (all 12 incomplete
+   reports with an unread border), and that alone made the report incomplete.
 3. The grade output printed the ceiling as a plain number ("[9.0]") with no reminder in the output of what wasn't assessed.
 4. `photo_grade.py grade` accepted a surface defect logged at an edge location (`print_spot` at `top`); defects are not checked against the areas their type allows.
 5. Creases and tears that are obvious by eye are only found if the human/agent logs them; nothing detects them automatically.
