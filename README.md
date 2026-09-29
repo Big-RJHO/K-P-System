@@ -1,18 +1,20 @@
 # Card Grading Lab
 
-An in-house pre-grading tool for Pokémon / TCG cards. You scan a card and log what you see. It then estimates the grade the card would receive from **PSA, Beckett (BGS), CGC and TAG**, based on each company's published grading standards. It also explains what is holding the card back at each company.
+An in-house pre-grading tool for Pokémon and Riftbound (League of Legends TCG) cards, and other standard 63 × 88 mm TCG cards. You scan a card and log what you see. It then estimates the grade the card would receive from **PSA, Beckett (BGS), CGC and TAG**, based on each company's published grading standards. It also explains what is holding the card back at each company.
 
 > These are theoretical estimates. The tool is not affiliated with or endorsed by PSA, Beckett, CGC or TAG, and real grades depend on each company's own inspection.
 
 ## Standalone app (no computer needed)
 
-There is also a version that runs entirely on your phone. Grading, centering measurement and your saved cards all stay in the browser, with no server.
+There is also a version that runs entirely on your phone. Pick **Pokémon** or **Riftbound** on the scan screen. The grading rules are the same, because PSA, BGS, CGC and TAG apply the same standards to all TCG cards. The photo tips, hints and example card change with the game. For Riftbound's black-bordered fronts and black Legend/Battlefield backs, photograph on a light, plain surface so the card edge stands out. Grading, centering measurement and your saved cards all stay in the browser, with no server.
 
 - **Claude link:** a private page on your claude.ai account. Open it in Safari on the iPhone while signed in to claude.ai.
 - **GitHub Pages:** a normal web address that also works offline. In Safari, tap **Share → Add to Home Screen** to open it full-screen like an app. One-time setup, which you can do from the GitHub app or github.com on your phone:
   1. Merge this branch into `main`.
   2. Go to **Settings → Pages** and set **Source** to **GitHub Actions**. On a free GitHub plan the repository must be public for Pages to work.
   3. The **Deploy standalone app to GitHub Pages** workflow publishes the site at `https://<your-user>.github.io/<repo>/`. You can re-run it any time from the **Actions** tab.
+
+Photos don't have to be perfectly square to the card: the app finds the card (even in a sleeve on a busy desk), straightens it, and fits it to the judging frame. If the outline is still off, open **Centering measurements → Adjust outline**, drag the four corners onto the card's corners and tap **Apply**; the card is re-flattened from your photo and re-graded. The card's own edge is told apart from a sleeve's edge (a few mm further out) and from a printed frame line (a few mm in) by its rounded corners. For full-art cards (no plain border), line the pink guides up with the printed frame; until you do, that border counts as 55/45 (just Gem Mint), so a card can't reach Pristine or Black Label on a centering the photo never showed.
 
 Saved cards live only in the browser that saved them. Use **History → Copy backup** now and then (paste the text into Notes), and **Restore pasted backup** to bring them back or move them to another device.
 
@@ -31,6 +33,20 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 python -m cardgrader.web          # opens on http://127.0.0.1:8000
 ```
+
+## Evidence, scan checks and card identification (standalone app)
+
+A grade is only as good as what was actually looked at, so the app keeps the categories apart:
+
+- **Nothing is assumed flawless.** Corners, edges and surface start as *not checked*. Tick **Corners/Edges/Surface checked** per side once you have looked (or log a DING there). Until every area is checked, and centering is measured or typed in, each company grade is shown as a best-case ceiling (`≤ 10`, "Up to Gem Mint · incomplete") and there is no Best shot badge. Good centering alone can never give a definitive 10, Pristine or Black Label. "Incomplete" and the 55/45 count for an unread border are this project's conventions, not company rules. **The photo check wins over a tick:** where the scan check says the photo can't show an area (too low resolution, glare, blur, a sleeve or slab, an unclear outline), that area stays unassessed even if ticked or if DINGS are logged there (they still lower the ceiling). The box then reads **checked in hand**: tick it only after examining the physical card under good light (`inspected_in_hand` in the API and in `scripts/photo_grade.py` observations). A flat photo never shows the surface (scratches, print lines, dents, creases, gloss loss), so on a scanned side **Surface** only counts once checked in hand, with the card tilted under a light; `scripts/photo_grade.py scan` does the same unless run with `--angled-light` (the surface was also examined or photographed under raking light).
+- **Scan check** (report screen). Each photo is checked for blur, glare per edge and corner, resolution, cut-off edges, tilt, a sleeve, and how clearly the card was found; the app says what to redo (better light, take a raw card out of its sleeve, fill the frame) and which edges and corners the photo can't show. The result never means "no defects": it lists what was and wasn't assessable.
+- **Suspected edge and corner damage.** Whitening runs and rounded/frayed corners are marked on the card (yellow = glare, grey = weak signal, colour = a candidate) with a confidence that is separate from the severity. Candidates are only suggestions: **Add to DINGS** puts one in your list after you've looked. Scratches, print lines, stains and creases need angled light and are not assessed. White or light borders and glare at an edge are reported as *not assessable*.
+- **Find this card online** (Card details → Edit). Looks up the set code and number on TCGdex (Pokémon) or Riftcodex (Riftbound); nothing about your photos is sent. You choose the exact card and variant; nothing is used until you confirm. The reference is shown next to your scan, and when its pixels can be read (or you add an image file) printed white/light areas near the edges are ignored when looking for whitening. A reference is supporting evidence only: it may have its own wear and its grade is never applied to your card. See `docs/identification.md` for the sources checked and what does not work.
+
+- **Read from photo** (runs by itself once when a new scan's report opens, and from Card details → Edit). Reads the name and collector number from the front photo on the phone (tesseract.js, about 7 MB downloaded the first time), then runs the card lookup with that text; you still confirm the card. On 31 real slab photos it read the number on 15, the name on 21 of 27 English cards, and the lookup showed the right card first on 16.
+- **Prices.** After you confirm the card, the Prices panel shows PriceCharting's ungraded price and the price at each company's grade from this report (labelled "up to …" while the grade is a ceiling), with a picker for versions such as 1st Edition or Shadowless. Graded prices need your own paid PriceCharting API token (Prices → PriceCharting access); it stays on the phone and is never in backups. Without one, the panel links to the card on PriceCharting and, for Pokémon, shows TCGdex's free TCGplayer/Cardmarket ungraded prices. See `docs/pricing.md`.
+
+Not built (yet): colour/fading/ink-loss checks, multi-reference comparison, and the Python server app's own UI still uses the older flow (it shows incomplete grades until areas are marked inspected through the API).
 
 ## Using it on an iPhone
 

@@ -1,127 +1,361 @@
-<header class="topbar">
-  <div class="brand">
-    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l10 10-10 10L2 12z"/><path class="logo-cut" d="M12 7.5l4.5 4.5-4.5 4.5L7.5 12z"/></svg>
-    <div>
-      <h1>Card Grading Lab</h1>
-      <p>PSA · BGS · CGC · TAG estimates<span class="wide-only"> for Pokémon / TCG cards</span></p>
+<div class="app" id="app" data-view="scan">
+
+  <!-- ============ SCAN SCREEN ============ -->
+  <section class="screen scan-screen" id="scan-screen" aria-labelledby="scan-title">
+    <header class="bar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l10 10-10 10L2 12z"/><path class="logo-cut" d="M12 7.5l4.5 4.5-4.5 4.5L7.5 12z"/></svg>
+        <span>Grading Lab</span>
+      </div>
+      <button type="button" class="icon-btn" id="open-history" aria-label="History">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2"/><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4h4"/></svg>
+      </button>
+    </header>
+
+    <div class="scan-body">
+      <div class="scan-intro">
+        <h1 id="scan-title">Scan your card</h1>
+        <p>Pick the game, then photograph the front and back. You'll get estimated PSA, BGS, CGC and TAG grades.</p>
+      </div>
+
+      <div class="segmented game-seg" id="game-seg" role="radiogroup" aria-label="Card game">
+        <button type="button" role="radio" data-game="pokemon" aria-checked="true">Pokémon</button>
+        <button type="button" role="radio" data-game="riftbound" aria-checked="false">Riftbound</button>
+      </div>
+
+      <div class="slots">
+        <label class="slot" data-side="front" for="file-front">
+          <input type="file" id="file-front" accept="image/*" hidden>
+          <span class="slot-frame">
+            <img class="slot-img" alt="" hidden>
+            <span class="slot-empty">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            </span>
+            <span class="slot-busy">Measuring…</span>
+            <span class="slot-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+          </span>
+          <span class="slot-label">Front</span>
+          <span class="slot-meta">Tap to add photo</span>
+        </label>
+        <label class="slot" data-side="back" for="file-back">
+          <input type="file" id="file-back" accept="image/*" hidden>
+          <span class="slot-frame">
+            <img class="slot-img" alt="" hidden>
+            <span class="slot-empty">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            </span>
+            <span class="slot-busy">Measuring…</span>
+            <span class="slot-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
+          </span>
+          <span class="slot-label">Back</span>
+          <span class="slot-meta">Tap to add photo</span>
+        </label>
+      </div>
+
+      <ul class="tips" id="tips" aria-label="Photo tips"></ul>
     </div>
-  </div>
-  <div class="topbar-actions">
-    <button id="new-card" type="button" class="ghost">New card</button>
-    <button id="open-history" type="button" class="ghost">History</button>
-  </div>
-</header>
 
-<div id="example-banner" class="example-banner" hidden>
-  <span><b>Example card.</b> This is a sample scan with two logged defects, so you can see how grading works.</span>
-  <button id="start-own" type="button" class="primary">Grade my card</button>
-</div>
-
-<main class="layout">
-  <section class="workflow">
-    <article class="panel">
-      <h2><span class="step">1</span>Card</h2>
-      <div class="grid-4">
-        <label for="card-name">Name<input id="card-name" placeholder="Charizard ex" autocomplete="off"></label>
-        <label for="card-set">Set<input id="card-set" placeholder="Obsidian Flames" autocomplete="off"></label>
-        <label for="card-number">Number<input id="card-number" placeholder="223/197" autocomplete="off"></label>
-        <label class="check" for="card-holo"><input type="checkbox" id="card-holo"> Holo / foil</label>
+    <div class="scan-actions">
+      <button type="button" class="btn primary big" id="get-report" disabled>Get report</button>
+      <button type="button" class="link-btn" id="front-only" hidden>No back photo? Continue with the front only</button>
+      <div class="scan-links">
+        <button type="button" class="link-btn" id="resume" hidden></button>
+        <button type="button" class="link-btn" id="try-example">See an example</button>
       </div>
-    </article>
-
-    <article class="panel">
-      <h2><span class="step">2</span>Centering</h2>
-      <p class="hint">Photograph each side straight on, with the card on a dark, plain background. The app finds the card, flattens it and measures the borders.
-        Drag the <span class="swatch outer"></span> card-edge and <span class="swatch inner"></span> frame guides to fine-tune them.
-        For full-art cards, line the frame guides up with the printed frame or type the ratios.</p>
-      <div class="sides">
-        <div class="side" data-side="front"></div>
-        <div class="side" data-side="back"></div>
-      </div>
-    </article>
-
-    <article class="panel">
-      <h2><span class="step">3</span>Corners, edges &amp; surface</h2>
-      <p class="hint">Tap a corner, edge or the middle of the card to log a defect there. Look under a bright light, tilt the card, and use a loupe if you have one.</p>
-      <div class="defect-editor">
-        <div class="maps">
-          <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
-          <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
-        </div>
-        <div class="defect-form">
-          <div class="picked" id="picked">Select a spot on the card map</div>
-          <label for="defect-type">Defect<select id="defect-type" disabled></select></label>
-          <div class="severity" id="severity" role="group" aria-label="Severity">
-            <button type="button" data-sev="micro">Micro</button>
-            <button type="button" data-sev="minor">Minor</button>
-            <button type="button" data-sev="moderate">Moderate</button>
-            <button type="button" data-sev="major">Major</button>
-          </div>
-          <p class="sev-hint" id="sev-hint">Micro: only under magnification · Minor: close look · Moderate: arm's length · Major: heavy damage</p>
-          <label for="defect-note">Note<input id="defect-note" placeholder="optional" autocomplete="off"></label>
-          <button id="add-defect" type="button" class="primary" disabled>Add defect</button>
-        </div>
-      </div>
-      <ul class="defect-list" id="defect-list"></ul>
-    </article>
+    </div>
   </section>
 
-  <aside class="results" id="results">
-    <div class="results-inner">
-      <div class="results-head">
-        <h2>Estimated grades</h2>
-        <button id="save-card" type="button" class="primary">Save card</button>
+  <!-- ============ REPORT SCREEN ============ -->
+  <section class="screen report-screen" id="report-screen" aria-labelledby="report-title" hidden>
+    <header class="bar sticky">
+      <button type="button" class="icon-btn" id="back-to-scan" aria-label="New scan">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+      <h1 id="report-title" class="bar-title">Card report</h1>
+      <button type="button" class="icon-btn" id="open-history-2" aria-label="History">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2"/><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4h4"/></svg>
+      </button>
+    </header>
+
+    <div class="report-body">
+      <div class="example-note" id="example-note" hidden>
+        <span>You're looking at an example card.</span>
+        <button type="button" class="link-btn strong" id="scan-own">Scan my card</button>
       </div>
-      <div id="best-fit" class="best-fit"></div>
-      <div id="grades" class="grades"></div>
-      <p id="disclaimer" class="disclaimer"></p>
+
+      <!-- identity -->
+      <div class="identity reveal">
+        <span class="game-chip" id="game-chip"></span>
+        <label class="sr-only" for="card-name">Card name</label>
+        <input id="card-name" class="name-input" placeholder="Name this card" autocomplete="off">
+        <p class="identity-sub" id="identity-sub"></p>
+      </div>
+
+      <!-- report header: card viewer + score, laid out like a TAG DIG report -->
+      <section class="report-hero reveal" aria-label="Your card's results">
+        <div class="viewer">
+          <div class="segmented viewer-side" role="tablist" aria-label="Card side">
+            <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
+            <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
+          </div>
+          <div class="viewer-frame">
+            <canvas id="viewer-canvas" aria-label="Your card with centering lines and numbered defect markers. Tap the card to log a defect."></canvas>
+          </div>
+          <label class="overlay-slider" for="overlay">
+            <span>Photo</span>
+            <input id="overlay" type="range" min="0" max="100" value="100">
+            <span>Overlay</span>
+          </label>
+        </div>
+        <div class="score-block">
+          <span class="incomplete-badge" id="score-incomplete" hidden>Incomplete</span>
+          <div class="score-top">
+            <span class="score-grade" id="score-grade"></span>
+            <span class="score-label" id="score-label"></span>
+          </div>
+          <div class="score-num"><b id="score-num"></b><span>/ 1000</span></div>
+          <div class="meter" aria-hidden="true"><span id="score-bar"></span><i style="left:94.4%"></i><i style="left:98.9%"></i></div>
+          <p class="score-caption">Lab score on TAG's 1000-point scale</p>
+          <div class="score-missing" id="score-missing" hidden>
+            <p><b>Best case, not a grade.</b> Not checked yet: <span id="score-missing-list"></span>.</p>
+            <button type="button" class="link-btn strong" id="go-checklist">Open the checklist</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- card details, like the card information on a TAG report -->
+      <section class="card-panel details-panel reveal" aria-labelledby="details-title">
+        <div class="panel-head">
+          <h2 id="details-title">Card details</h2>
+          <button type="button" class="link-btn strong" id="edit-details" aria-expanded="false">Edit</button>
+        </div>
+        <dl class="details" id="details-view"></dl>
+        <div class="details-form" id="details-form" hidden>
+          <label for="collector-line">Collector line <span class="hint-inline">(bottom of the card)</span>
+            <input id="collector-line" placeholder="e.g. VEN · SP3/006 · EN" autocomplete="off">
+          </label>
+          <div class="id-find">
+            <button type="button" class="btn small" id="read-card">Read from photo</button>
+            <button type="button" class="btn small" id="find-card">Find this card online</button>
+            <span class="hint-inline" id="id-status">Reads the name and number from your front photo on this phone, then looks the card up. Only the text is sent, never your photos.</span>
+          </div>
+          <div id="id-results" class="id-results" hidden></div>
+          <div class="form-grid">
+            <label for="card-subtitle">Subtitle<input id="card-subtitle" placeholder="e.g. Inquisitive" autocomplete="off"></label>
+            <label for="card-type">Card type<input id="card-type" placeholder="e.g. Champion Unit" autocomplete="off"></label>
+            <label for="card-set">Set<input id="card-set" placeholder="Set" autocomplete="off"></label>
+            <label for="card-set-code">Set code<input id="card-set-code" placeholder="e.g. VEN" autocomplete="off"></label>
+            <label for="card-number">Number<input id="card-number" placeholder="No." autocomplete="off"></label>
+            <label for="card-rarity">Rarity<select id="card-rarity"></select></label>
+            <label for="card-finish">Finish<select id="card-finish"></select></label>
+            <label for="card-language">Language<select id="card-language"></select></label>
+            <label for="card-year">Year<input id="card-year" inputmode="numeric" placeholder="e.g. 2026" autocomplete="off"></label>
+          </div>
+          <button type="button" class="btn small" id="done-details">Done</button>
+        </div>
+      </section>
+
+      <!-- reference image of the confirmed card -->
+      <section class="card-panel reference-panel reveal" id="reference-panel" aria-labelledby="reference-title" hidden>
+        <div class="panel-head">
+          <h2 id="reference-title">Reference</h2>
+          <button type="button" class="link-btn" id="clear-reference">Remove</button>
+        </div>
+        <div class="reference-body">
+          <img id="reference-img" alt="Reference image of the identified card">
+          <div class="reference-text">
+            <p id="reference-name" class="reference-name"></p>
+            <p id="reference-source" class="hint"></p>
+            <p id="reference-checks" class="hint"></p>
+            <p class="hint">Support evidence only. A reference card can have its own wear, and its grade is never applied to yours.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card-panel prices-panel reveal" id="prices-panel" aria-labelledby="prices-title">
+        <div class="panel-head">
+          <h2 id="prices-title">Prices</h2>
+          <button type="button" class="link-btn strong" id="refresh-prices">Update</button>
+        </div>
+        <div id="prices-body"></div>
+        <details class="pc-settings" id="pc-settings">
+          <summary>PriceCharting access</summary>
+          <p class="hint">Graded prices come from PriceCharting's API, which needs your own paid PriceCharting subscription. Paste the 40-character token from its Subscription page (API/Download). It stays on this phone only: it's never saved in backups, History or drafts, and it's only sent to pricecharting.com. PriceCharting licenses this data for your own use.</p>
+          <label for="pc-token" class="note-label">API token<input id="pc-token" type="password" autocomplete="off" spellcheck="false" placeholder="40 letters and digits"></label>
+          <div class="row-actions">
+            <button type="button" class="btn small" id="pc-save">Save token</button>
+            <button type="button" class="btn small ghost" id="pc-remove">Remove</button>
+            <span class="hint-inline" id="pc-status"></span>
+          </div>
+        </details>
+      </section>
+
+      <div class="metrics reveal" id="metrics"></div>
+
+      <!-- eight subgrades -->
+      <section class="card-panel reveal" aria-labelledby="subgrades-title">
+        <div class="panel-head">
+          <h2 id="subgrades-title">Subgrades</h2>
+          <span class="panel-note">Scores out of 1000</span>
+        </div>
+        <div class="subgrades" id="subgrades"></div>
+      </section>
+
+      <!-- every company -->
+      <section class="reveal" aria-labelledby="tiles-title">
+        <h2 id="tiles-title" class="section-title">Estimated grade by company</h2>
+        <div class="tiles" id="tiles"></div>
+        <p class="best-line" id="best-line"></p>
+      </section>
+
+      <!-- photo quality and suspected edge/corner damage -->
+      <details class="card-panel section reveal" id="scancheck-section" open>
+        <summary><h2>Scan check</h2><span class="summary-value" id="scancheck-summary"></span></summary>
+        <div class="section-body">
+          <p class="hint">Automatic checks on your photos. "Nothing found" never means the card is perfect: it only covers what this photo can show.</p>
+          <div class="segmented" role="tablist" aria-label="Side">
+            <button type="button" data-side="front" aria-selected="true">Front</button>
+            <button type="button" data-side="back" aria-selected="false">Back</button>
+          </div>
+          <div id="scancheck-body"></div>
+        </div>
+      </details>
+
+      <!-- defects -->
+      <details class="card-panel section reveal" id="condition-section" open>
+        <summary><h2>DINGS</h2><span class="summary-value" id="defect-summary"></span></summary>
+        <div class="section-body">
+          <p class="hint" id="condition-hint">Tap where you see wear. Check under a bright light, tilting the card.</p>
+          <div class="inspect" id="inspect">
+            <p class="inspect-hint">Checked means you looked under good light and listed everything you found in DINGS. Unchecked areas aren't assumed flawless. Where the photo can't show an area, only a check on the card in hand counts.</p>
+            <div class="inspect-grid">
+              <fieldset class="inspect-side" data-side="front">
+                <legend>Front</legend>
+                <label class="check"><input type="checkbox" data-side="front" data-comp="corners"><span>Corners checked</span></label>
+                <label class="check"><input type="checkbox" data-side="front" data-comp="edges"><span>Edges checked</span></label>
+                <label class="check"><input type="checkbox" data-side="front" data-comp="surface"><span>Surface checked</span></label>
+              </fieldset>
+              <fieldset class="inspect-side" data-side="back">
+                <legend>Back</legend>
+                <label class="check"><input type="checkbox" data-side="back" data-comp="corners"><span>Corners checked</span></label>
+                <label class="check"><input type="checkbox" data-side="back" data-comp="edges"><span>Edges checked</span></label>
+                <label class="check"><input type="checkbox" data-side="back" data-comp="surface"><span>Surface checked</span></label>
+              </fieldset>
+            </div>
+          </div>
+          <ol class="defect-list" id="defect-list"></ol>
+          <details class="map-picker">
+            <summary>Pick a spot on a card map instead</summary>
+            <div class="maps">
+              <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
+              <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <!-- centering -->
+      <details class="card-panel section reveal" id="centering-section">
+        <summary><h2>Centering measurements</h2><span class="summary-value" id="centering-summary"></span></summary>
+        <div class="section-body">
+          <div class="segmented" role="tablist" aria-label="Side">
+            <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
+            <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
+          </div>
+          <div class="guide-wrap" id="guide-wrap">
+            <canvas id="guide-canvas" aria-label="Scan with centering guides"></canvas>
+            <div class="guide-empty" id="guide-empty">
+              <p id="guide-empty-text">No photo for this side.</p>
+              <label class="btn small" for="retake-file">Add photo</label>
+            </div>
+          </div>
+          <p class="hint">Drag the <span class="swatch outer"></span> card-edge and <span class="swatch inner"></span> frame lines if they're off.</p>
+          <div class="ratio-row">
+            <label for="ratio-lr">Left / right<span class="ratio"><input id="ratio-lr" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other" id="lr-other"></span></span></label>
+            <label for="ratio-tb">Top / bottom<span class="ratio"><input id="ratio-tb" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other" id="tb-other"></span></span></label>
+          </div>
+          <div class="row-actions" id="guide-actions">
+            <span class="conf" id="conf"></span>
+            <div class="row-buttons">
+              <button type="button" class="btn small ghost" id="adjust-outline">Adjust outline</button>
+              <label class="btn small ghost" for="retake-file">Retake photo</label>
+            </div>
+            <input type="file" id="retake-file" accept="image/*" hidden>
+          </div>
+          <div class="outline-bar" id="outline-bar" hidden>
+            <p class="hint">Drag the four yellow corners onto the card's real corners (for rounded corners, where the straight edges would meet). The card is then re-flattened from your photo and re-graded.</p>
+            <div class="row-buttons">
+              <button type="button" class="btn small ghost" id="outline-cancel">Cancel</button>
+              <button type="button" class="btn small primary" id="outline-apply">Apply</button>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <!-- company breakdown -->
+      <section class="breakdown reveal" aria-labelledby="breakdown-title">
+        <h2 id="breakdown-title" class="section-title">Company breakdowns</h2>
+        <div id="companies"></div>
+      </section>
+
+      <p class="disclaimer" id="disclaimer"></p>
     </div>
-  </aside>
-</main>
 
-<nav id="grade-bar" class="grade-bar" aria-label="Estimated grades">
-  <button type="button" id="grade-bar-btn"></button>
-</nav>
+    <div class="action-bar">
+      <button type="button" class="btn ghost" id="new-scan">New scan</button>
+      <button type="button" class="btn primary" id="save-card">Save to History</button>
+    </div>
+  </section>
+</div>
 
-<div id="history" class="drawer" hidden>
-  <div class="drawer-panel" role="dialog" aria-labelledby="history-title">
-    <div class="drawer-head">
-      <h2 id="history-title">Graded cards</h2>
-      <button id="close-history" type="button" class="ghost">Close</button>
+<!-- Defect sheet -->
+<div class="sheet-backdrop" id="defect-sheet" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-grip" aria-hidden="true"></div>
+    <h2 id="sheet-title">Add defect</h2>
+    <p class="sheet-sub" id="sheet-where"></p>
+    <fieldset class="chips-field">
+      <legend>What do you see?</legend>
+      <div class="choice-chips" id="type-chips"></div>
+    </fieldset>
+    <fieldset class="chips-field">
+      <legend>How bad?</legend>
+      <div class="segmented sev" id="sev-seg">
+        <button type="button" data-sev="micro">Micro</button>
+        <button type="button" data-sev="minor">Minor</button>
+        <button type="button" data-sev="moderate">Moderate</button>
+        <button type="button" data-sev="major">Major</button>
+      </div>
+      <p class="sheet-hint" id="sev-hint">Micro: only under magnification · Minor: close look · Moderate: arm's length · Major: heavy damage</p>
+    </fieldset>
+    <label for="defect-note" class="note-label">Note<input id="defect-note" placeholder="Optional" autocomplete="off"></label>
+    <div class="sheet-actions">
+      <button type="button" class="btn ghost" id="sheet-cancel">Cancel</button>
+      <button type="button" class="btn primary" id="sheet-add" disabled>Add defect</button>
+    </div>
+  </div>
+</div>
+
+<!-- History sheet -->
+<div class="sheet-backdrop" id="history" hidden>
+  <div class="sheet tall" role="dialog" aria-modal="true" aria-labelledby="history-title">
+    <div class="sheet-head">
+      <h2 id="history-title">History</h2>
+      <button type="button" class="btn small ghost" id="close-history">Done</button>
     </div>
     <ul id="history-list" class="history-list"></ul>
-    <section class="backup">
-      <h3>Backup &amp; restore</h3>
+    <details class="backup">
+      <summary>Backup &amp; restore</summary>
       <p class="hint">Saved cards live only in this browser. Copy a backup now and then, and paste it back here to restore it on this or another device.</p>
       <div class="backup-actions">
-        <button id="copy-backup" type="button">Copy backup</button>
-        <!--SITE_ONLY_START--><button id="download-backup" type="button" hidden>Download backup</button><!--SITE_ONLY_END-->
-        <label class="file-btn alt" for="restore-file">Restore from file<input id="restore-file" type="file" accept="application/json,.json,text/plain" hidden></label>
+        <button id="copy-backup" type="button" class="btn small">Copy backup</button>
+        <!--SITE_ONLY_START--><button id="download-backup" type="button" class="btn small" hidden>Download backup</button><!--SITE_ONLY_END-->
+        <label class="btn small ghost" for="restore-file">Restore from file<input id="restore-file" type="file" accept="application/json,.json,text/plain" hidden></label>
       </div>
-      <label for="backup-text">Backup text<textarea id="backup-text" rows="4" placeholder="Paste a backup here, then tap Restore pasted backup" spellcheck="false"></textarea></label>
-      <button id="restore-text" type="button">Restore pasted backup</button>
-    </section>
+      <label for="backup-text" class="note-label">Backup text<textarea id="backup-text" rows="4" placeholder="Paste a backup here, then tap Restore pasted backup" spellcheck="false"></textarea></label>
+      <button id="restore-text" type="button" class="btn small">Restore pasted backup</button>
+    </details>
   </div>
 </div>
 
 <div id="toast" class="toast" role="status" hidden></div>
-
-<template id="side-template">
-  <div class="side-head">
-    <h3></h3>
-    <div class="side-tools">
-      <label class="mini"><input type="checkbox" class="cropped"> Already cropped</label>
-      <label class="file-btn camera">Camera<input type="file" accept="image/*" capture="environment" hidden></label>
-      <label class="file-btn alt"><span class="touch-only">Photos</span><span class="desktop-only">Upload</span><input type="file" accept="image/*" hidden></label>
-    </div>
-  </div>
-  <div class="dropzone">
-    <canvas></canvas>
-    <div class="drop-msg">Take a photo or drop an image here<small>Fill the frame, hold the phone parallel to the card, and avoid glare</small></div>
-  </div>
-  <div class="readout">
-    <label>L/R <input type="number" inputmode="decimal" class="lr" min="50" max="100" step="0.1" value="50"><span class="pct">/ <b class="lr-other">50</b></span></label>
-    <label>T/B <input type="number" inputmode="decimal" class="tb" min="50" max="100" step="0.1" value="50"><span class="pct">/ <b class="tb-other">50</b></span></label>
-    <span class="conf"></span>
-  </div>
-</template>

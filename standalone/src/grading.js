@@ -3,6 +3,20 @@
  * (condition.py, centering.py, graders/*.py, engine.py).
  * tests/test_standalone_parity.py checks that both give identical results.
  * All rules come from the criteria object built from cardgrader/criteria/*.yaml.
+ *
+ * Assessment evidence (same shape and meaning as cardgrader/models.py; this project's convention,
+ * not a grading company's rule):
+ *   inspected:          {front: ["corners", ...], back: [...]}  components looked at; defects found are listed
+ *   centering_evidence: {front: {lr, tb}, back: {lr, tb}}       "measured" | "typed" | "unread"
+ *   photo_limits:       {front: ["edges:top", "corners", ...]}   what the photo can't show (the scan's
+ *                       quality.blocked items, or whole components); "centering" entries are ignored
+ *   inspected_in_hand:  {front: ["corners", ...], back: [...]}  checked on the physical card, not the photo
+ * The photo check wins over a claim: a photo-limited component is unassessed even if it is listed in
+ * `inspected` or has defects listed (those still set its ceiling). Only `inspected_in_hand` overrides it.
+ * A component with no defects that wasn't inspected is unassessed (never assumed flawless); an unread
+ * centering axis counts as at least 55/45 and is unassessed too. Then every company grade has
+ * complete: false, unassessed: [...], tier: null and a ceiling grade/score labelled
+ * "Up to <label> · incomplete"; the report has complete: false and best_fit: null.
  */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) module.exports = factory();
@@ -15,6 +29,13 @@
   const SIDES = ["front", "back"];
   const CORNERS = ["top_left", "top_right", "bottom_left", "bottom_right"];
   const EDGES = ["top", "right", "bottom", "left"];
+  const AXES = ["lr", "tb"];
+  const EVIDENCE = ["measured", "typed", "unread"];
+  // This project's convention: a centering axis nobody measured counts as just making Gem Mint (55/45).
+  const UNREAD_SHARE = 55;
+  const INCOMPLETE_NOTE =
+    "\"Up to ... · incomplete\" is this lab's own convention for a card that hasn't been fully checked, " +
+    "not a label any grading company uses.";
   const DISCLAIMER =
     "Theoretical estimate built from each company's published grading standards. " +
     "Not affiliated with or endorsed by PSA, Beckett, CGC or TAG. Real grades depend on " +
@@ -57,6 +78,34 @@
     if (EDGES.includes(location)) return "edges";
     if (location === "surface") return "surface";
     throw new Error(`unknown location ${location}`);
+  }
+
+  const axisName = (axis) => (axis === "lr" ? "left/right" : "top/bottom");
+
+  // CardAssessment.is_inspected: a listed defect counts as having looked.
+  const isInspected = (a, side, comp) =>
+    (a.inspected[side] || []).includes(comp) ||
+    a.defects.some((d) => d.side === side && locationComponent(d.location) === comp);
+
+  // CardAssessment.is_photo_limited / is_assessed: the photo check wins unless checked in hand.
+  const inHand = (a, side, comp) => (a.inspected_in_hand[side] || []).includes(comp);
+  const isPhotoLimited = (a, side, comp) => (a.photo_limits[side] || []).includes(comp) && !inHand(a, side, comp);
+  const isAssessed = (a, side, comp) => inHand(a, side, comp) || (!isPhotoLimited(a, side, comp) && isInspected(a, side, comp));
+
+  // models.photo_limit_components: "edges:top" -> edges, "corners:x" -> corners, whole components as they
+  // are, "centering" dropped. Returned in component order.
+  function photoLimitComponents(items) {
+    const found = new Set();
+    for (const item of items || []) {
+      if (typeof item !== "string") throw new Error(`photo limit must be a string, got ${item}`);
+      const i = item.indexOf(":");
+      const comp = i < 0 ? item : item.slice(0, i), where = i < 0 ? "" : item.slice(i + 1);
+      if (comp === "centering" && i < 0) continue;
+      const allowed = { corners: CORNERS, edges: EDGES, surface: [] }[comp];
+      if (!allowed || (i >= 0 && !allowed.includes(where))) throw new Error(`unknown photo limit '${item}'`);
+      found.add(comp);
+    }
+    return COMPONENTS.filter((c) => found.has(c));
   }
 
   const worst = (s) => Math.max(s.lr, s.tb);
@@ -110,6 +159,18 @@
     return { grade: Number(rows[rows.length - 1].grade), limiting: previousFail };
   }
 
+  function gradedCentering(a) {
+    const out = {};
+    for (const side of SIDES) {
+      out[side] = {};
+      for (const axis of AXES) {
+        const v = a.centering[side][axis];
+        out[side][axis] = a.centering_evidence[side][axis] === "unread" ? Math.max(v, UNREAD_SHARE) : v;
+      }
+    }
+    return out;
+  }
+
   function interpolate(points, x) {
     if (x <= points[0][0]) return points[0][1];
     for (let i = 0; i < points.length - 1; i++) {
@@ -139,8 +200,11 @@
     return `${d.severity} ${spec.label.toLowerCase()} (${where})`;
   }
 
-  function condition(criteria, defects, company) {
-    if (!defects.length) return { grade: FLAWLESS, reasons: [] };
+  // grade null = unassessed: nothing listed and nobody looked.
+  const ceiling = (cc) => (cc.grade == null ? FLAWLESS : cc.grade);
+
+  function condition(criteria, defects, company, inspected) {
+    if (!defects.length) return { grade: inspected ? FLAWLESS : null, reasons: [] };
     const rules = criteria.defects.component_rules;
     const capped = defects.map((d) => [defectCap(criteria, d, company), d]).sort((a, b) => a[0] - b[0]);
     const [worstCap, worstDefect] = capped[0];
@@ -163,7 +227,10 @@
   function componentConditions(criteria, a, company) {
     const out = {};
     for (const comp of COMPONENTS) {
-      out[comp] = condition(criteria, a.defects.filter((d) => locationComponent(d.location) === comp), company);
+      out[comp] = condition(
+        criteria, a.defects.filter((d) => locationComponent(d.location) === comp), company,
+        SIDES.every((side) => isAssessed(a, side, comp)),
+      );
     }
     return out;
   }
@@ -176,10 +243,32 @@
           criteria,
           a.defects.filter((d) => d.side === side && locationComponent(d.location) === comp),
           company,
+          isAssessed(a, side, comp),
         );
       }
     }
     return out;
+  }
+
+  // condition.area_name
+  const areaName = (a, side, comp) =>
+    isPhotoLimited(a, side, comp) ? `${side} ${comp} (photo can't show ${comp === "surface" ? "it" : "them"})` : `${side} ${comp}`;
+
+  function unassessedAreas(a) {
+    const out = [];
+    for (const side of SIDES) {
+      for (const axis of AXES) if (a.centering_evidence[side][axis] === "unread") out.push(`${side} centering (${axisName(axis)})`);
+      for (const comp of COMPONENTS) if (!isAssessed(a, side, comp)) out.push(areaName(a, side, comp));
+    }
+    return out;
+  }
+
+  function unreadCenteringNote(a) {
+    const unread = [];
+    for (const side of SIDES) for (const axis of AXES) if (a.centering_evidence[side][axis] === "unread") unread.push(`${side} ${axisName(axis)}`);
+    if (!unread.length) return null;
+    return `Centering wasn't measured (${unread.join(", ")}), so it counts as ${g(UNREAD_SHARE)}/${g(100 - UNREAD_SHARE)}, ` +
+      "just making Gem Mint. That's this lab's convention, not a grading company's rule.";
   }
 
   const fatalDefects = (criteria, a) => a.defects.filter((d) => defectType(criteria, d.type).fatal);
@@ -199,7 +288,7 @@
 
   function companyGrade(fields) {
     return Object.assign(
-      { subgrades: {}, score: null, qualifiers: [], alternatives: [], limiting_factors: [], notes: [] },
+      { complete: true, unassessed: [], subgrades: {}, score: null, qualifiers: [], alternatives: [], limiting_factors: [], notes: [] },
       fields,
     );
   }
@@ -211,6 +300,28 @@
       company, grade: 0, label: ALTERED_LABELS[company], tier: 99,
       limiting_factors: fatal.map((d) => `${describe(criteria, d)}: altered cards get no numeric grade`),
     });
+  }
+
+  // Subgrades to report: null for a component that wasn't assessed (its value is only a ceiling).
+  function shownSubgrades(parts, conditions) {
+    const out = {};
+    for (const [k, v] of Object.entries(parts)) out[k] = k in conditions && conditions[k].grade == null ? null : v;
+    return out;
+  }
+
+  // graders/base.py finish(): an incomplete grade becomes a ceiling (this project's convention).
+  function finish(gr, a) {
+    const note = unreadCenteringNote(a);
+    if (note) gr.notes.unshift(note);
+    const missing = unassessedAreas(a);
+    if (!missing.length) return gr;
+    gr.complete = false;
+    gr.unassessed = missing;
+    gr.label = `Up to ${gr.label} · incomplete`;
+    gr.tier = null;
+    gr.limiting_factors.unshift(`Not assessed yet: ${missing.join(", ")}. Until then this is the best case, not a grade.`);
+    gr.notes.push(INCOMPLETE_NOTE);
+    return gr;
   }
 
   const fmtGrade = (v) => (v >= FLAWLESS ? "10 (Pristine)" : g(v));
@@ -238,7 +349,8 @@
   function psaBody(criteria, a, grades) {
     const cond = componentConditions(criteria, a, "PSA");
     const parts = {};
-    for (const [c, cc] of Object.entries(cond)) parts[c] = floorTo(grades, Math.min(10, cc.grade));
+    // An unassessed component counts at its best case, so the overall grade is a ceiling.
+    for (const [c, cc] of Object.entries(cond)) parts[c] = floorTo(grades, Math.min(10, ceiling(cc)));
     return { body: Math.min(...Object.values(parts)), parts, cond };
   }
 
@@ -269,12 +381,12 @@
     if (overall === 10 && Object.values(parts).some((v) => v < 10)) {
       notes.push("PSA 10 still allows slight printing imperfections visible under magnification.");
     }
-    return companyGrade({
+    return finish(companyGrade({
       company: "PSA", grade: overall, label: label(crit, overall), tier: grades.indexOf(overall),
-      subgrades: parts, qualifiers, alternatives,
+      subgrades: shownSubgrades(parts, cond), qualifiers, alternatives,
       limiting_factors: overall === 10 ? [] : bindingFactors(overall, parts, cent.limiting, cond),
       notes: [...notes, "PSA doesn't print subgrades. The component values shown are estimates."],
-    });
+    }), a);
   }
 
   /* ---------- graders/bgs.py ---------- */
@@ -304,7 +416,7 @@
     const cent = centeringGrade(a.centering, crit);
     const cond = componentConditions(criteria, a, "BGS");
     const subs = { centering: cent.grade };
-    for (const [c, cc] of Object.entries(cond)) subs[c] = bgsSubgrade(cc.grade, grades);
+    for (const [c, cc] of Object.entries(cond)) subs[c] = bgsSubgrade(ceiling(cc), grades);  // best case if unassessed
     const values = Object.values(subs);
     const overall = bgsOverall(values, crit.overall_rules, grades);
     const black = values.every((v) => v === 10);
@@ -313,11 +425,11 @@
       limiting = bindingFactors(Math.min(...values), subs, cent.limiting, cond);
       if (overall === 10) limiting.unshift("A Black Label needs all four subgrades at 10");
     }
-    return companyGrade({
+    return finish(companyGrade({
       company: "BGS", grade: overall, label: black ? crit.black_label : label(crit, overall),
-      tier: black ? 0 : grades.indexOf(overall) + 1, subgrades: subs, limiting_factors: limiting,
+      tier: black ? 0 : grades.indexOf(overall) + 1, subgrades: shownSubgrades(subs, cond), limiting_factors: limiting,
       notes: ["Beckett's real overall-grade formula is proprietary. This model follows its published rules."],
-    });
+    }), a);
   }
 
   /* ---------- graders/cgc.py ---------- */
@@ -339,15 +451,15 @@
     const cent = centeringGrade(a.centering, crit);
     const cond = componentConditions(criteria, a, "CGC");
     const subs = { centering: cent.grade };
-    for (const [c, cc] of Object.entries(cond)) subs[c] = floorTo(grades, cc.grade);
+    for (const [c, cc] of Object.entries(cond)) subs[c] = floorTo(grades, ceiling(cc));  // best case if unassessed
     const values = Object.values(subs);
     const overall = cgcOverall(values, crit.overall_rules, grades);
-    return companyGrade({
+    return finish(companyGrade({
       company: "CGC", grade: Math.min(overall, 10), label: label(crit, overall), tier: grades.indexOf(overall),
-      subgrades: subs,
+      subgrades: shownSubgrades(subs, cond),
       limiting_factors: overall === 10.5 ? [] : bindingFactors(Math.min(...values), subs, cent.limiting, cond),
       notes: ["CGC subgrades are optional, and a 10.5 subgrade here means Pristine."],
-    });
+    }), a);
   }
 
   /* ---------- graders/tag.py ---------- */
@@ -373,7 +485,8 @@
     const areas = {};
     for (const side of SIDES) areas[`${side} centering`] = interpolate(crit.centering_points[side], worst(a.centering[side]));
     const cond = componentConditionsPerSide(criteria, a, "TAG");
-    for (const [key, cc] of Object.entries(cond)) areas[key] = conditionPoints(cc.grade, crit.condition_points);
+    // An unassessed area counts at its best case (1000), so the score is a ceiling.
+    for (const [key, cc] of Object.entries(cond)) areas[key] = conditionPoints(ceiling(cc), crit.condition_points);
 
     let mean = 0;
     for (const side of SIDES) {
@@ -404,21 +517,47 @@
     }
     const subgrades = {};
     for (const [k, v] of Object.entries(areas)) subgrades[k] = pyRound(v);
-    return companyGrade({
+    for (const [k, cc] of Object.entries(cond)) if (cc.grade == null) subgrades[k] = null;  // only a ceiling
+    return finish(companyGrade({
       company: "TAG", grade: Math.min(gradeValue, 10), label: bandLabel, tier, score, subgrades,
       limiting_factors: limiting,
       notes: ["TAG's real score comes from its own imaging. This estimate combines the eight area scores."],
-    });
+    }), a);
   }
 
   /* ---------- engine.py ---------- */
 
   function validate(criteria, a) {
     for (const d of a.defects) {
-      locationComponent(d.location);
-      defectType(criteria, d.type);
-      if (!(d.severity in defectType(criteria, d.type).caps)) throw new Error(`unknown severity '${d.severity}'`);
+      const comp = locationComponent(d.location);
+      const spec = defectType(criteria, d.type);
+      if (!(d.severity in spec.caps)) throw new Error(`unknown severity '${d.severity}'`);
+      // models.Defect: each type only occurs in the areas defects.yaml allows.
+      if (!spec.applies_to.includes(comp)) {
+        throw new Error(`'${d.type}' can't be at '${d.location}' (${comp}); it applies to: ${spec.applies_to.join(", ")}`);
+      }
     }
+    for (const field of ["inspected", "inspected_in_hand", "photo_limits"]) {
+      for (const [side, comps] of Object.entries(a[field])) {
+        if (!SIDES.includes(side)) throw new Error(`unknown side '${side}'`);
+        for (const c of comps) if (!COMPONENTS.includes(c)) throw new Error(`unknown component '${c}'`);
+      }
+    }
+    for (const side of SIDES) {
+      for (const axis of AXES) if (!EVIDENCE.includes(a.centering_evidence[side][axis])) throw new Error("unknown centering evidence");
+    }
+  }
+
+  // CardAssessment._fill_evidence: missing evidence is "typed" if centering was given, else "unread".
+  function fillEvidence(assessment) {
+    const given = assessment.centering_evidence || {};
+    const fallback = assessment.centering != null ? "typed" : "unread";
+    const out = {};
+    for (const side of SIDES) {
+      out[side] = {};
+      for (const axis of AXES) out[side][axis] = (given[side] || {})[axis] || fallback;
+    }
+    return out;
   }
 
   function gradeAll(assessment, criteria) {
@@ -426,16 +565,32 @@
       card: assessment.card || {},
       centering: assessment.centering || { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } },
       defects: assessment.defects || [],
+      inspected: assessment.inspected || {},
+      inspected_in_hand: assessment.inspected_in_hand || {},
+      photo_limits: {},
+      centering_evidence: fillEvidence(assessment),
     };
+    for (const [side, items] of Object.entries(assessment.photo_limits || {})) a.photo_limits[side] = photoLimitComponents(items);
     validate(criteria, a);
+    a.centering = gradedCentering(a);  // graders/base.py prepare(): unread axes count as 55/45
     const grades = { PSA: gradePSA(criteria, a), BGS: gradeBGS(criteria, a), CGC: gradeCGC(criteria, a), TAG: gradeTAG(criteria, a) };
-    let bestFit = null;
-    for (const gr of Object.values(grades)) if (!bestFit || gr.tier < bestFit.tier) bestFit = gr;
-    const summary = bestFit.tier >= 99
-      ? "The card appears altered, so no company will give it a numeric grade."
-      : `Best fit: ${bestFit.company} ${bestFit.label}. ` + Object.values(grades).map((x) => `${x.company} ${x.label}`).join(", ");
-    return { grades, best_fit: bestFit.company, summary, disclaimer: DISCLAIMER };
+    const complete = Object.values(grades).every((x) => x.complete);
+    const missing = complete ? [] : unassessedAreas(a);
+    let bestFit = null, summary;
+    if (!complete) {
+      // An incomplete grade is only a ceiling, so no company is named as the best fit.
+      summary = `Incomplete: not assessed yet: ${missing.join(", ")}. Best case: ` +
+        Object.values(grades).map((x) => `${x.company} ${x.label}`).join(", ");
+    } else {
+      let best = null;
+      for (const gr of Object.values(grades)) if (!best || gr.tier < best.tier) best = gr;
+      bestFit = best.company;
+      summary = best.tier >= 99
+        ? "The card appears altered, so no company will give it a numeric grade."
+        : `Best fit: ${best.company} ${best.label}. ` + Object.values(grades).map((x) => `${x.company} ${x.label}`).join(", ");
+    }
+    return { grades, complete, unassessed: missing, best_fit: bestFit, summary, disclaimer: DISCLAIMER };
   }
 
-  return { gradeAll, centeringGrade, interpolate, pyRound, pyFixed, FLAWLESS };
+  return { gradeAll, photoLimitComponents, centeringGrade, interpolate, pyRound, pyFixed, FLAWLESS, UNREAD_SHARE };
 });

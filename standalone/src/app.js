@@ -1,9 +1,10 @@
-/* Card Grading Lab: standalone app. Everything runs in the browser, and history is kept in localStorage. */
+/* Card Grading Lab: standalone app. Two screens: scan, then report. Everything runs in the browser. */
 "use strict";
 
 const CRITERIA = window.GRADING_CRITERIA;
 const ENV = window.GRADING_LAB_ENV || "file";  // "artifact" | "site" | "file"
 const SIDES = ["front", "back"];
+const COMPONENTS = ["corners", "edges", "surface"];
 const COMPONENT_OF = {
   top_left: "corners", top_right: "corners", bottom_left: "corners", bottom_right: "corners",
   top: "edges", right: "edges", bottom: "edges", left: "edges", surface: "surface",
@@ -15,23 +16,115 @@ const SEV_TEXT = {
   moderate: "Obvious at arm's length",
   major: "Heavy damage",
 };
+const CONDITION_WORDS = [
+  [10.5, "Pristine"], [10, "Gem Mint"], [9, "Mint"], [8, "NM-MT"], [7, "Near Mint"],
+  [6, "Excellent-MT"], [5, "Excellent"], [4, "VG-EX"], [3, "Very Good"], [2, "Good"], [0, "Poor"],
+];
+
+// Per-game photo tips, placeholders, hints and example card. Grading rules are the same:
+// PSA, BGS, CGC and TAG grade all 63 x 88 mm TCG cards against the same standards.
+const GAMES = {
+  pokemon: {
+    label: "Pokémon",
+    tips: ["Dark, plain background", "Phone parallel to the card", "No glare on holo"],
+    placeholders: { name: "Name this card", set: "Set", number: "No." },
+    hint: "Tap where you see wear. Check under a bright light, tilting the card. Whitening shows most on the blue back border.",
+    rarities: ["Common", "Uncommon", "Rare", "Holo Rare", "Double Rare", "Ultra Rare", "Illustration Rare", "Special Illustration Rare", "Hyper Rare", "Promo"],
+    example: {
+      name: "Charizard ex", set: "Obsidian Flames", number: "223/197",
+      details: { subtitle: "", card_type: "Pokémon ex", set_code: "OBF", rarity: "Special Illustration Rare", finish: "Holo", language: "EN", year: "2023" },
+      defects: [
+        { side: "back", location: "top_right", type: "corner_whitening", severity: "minor", note: null },
+        { side: "front", location: "surface", type: "holo_scratch", severity: "micro", note: "Only under a lamp" },
+      ],
+    },
+  },
+  riftbound: {
+    label: "Riftbound",
+    tips: ["Light, plain background for black borders and black backs", "Dark background for white Rune backs", "Phone parallel, no glare on foils"],
+    placeholders: { name: "Name this card", set: "Set, e.g. Origins", number: "No." },
+    hint: "Tap where you see wear. Many Origins cards left the factory with burred edges: log those as Rough factory cut / burred edge, not chipping. Whitening shows most on black borders and black backs.",
+    rarities: ["Common", "Uncommon", "Rare", "Epic", "Showcase / Alt Art", "Overnumbered", "Signature", "Metal", "Ultimate", "Promo"],
+    example: {
+      name: "Example Riftbound card", set: "Origins", number: "001/298",
+      details: { subtitle: "", card_type: "Champion Unit", set_code: "OGN", rarity: "Showcase / Alt Art", finish: "Foil", language: "EN", year: "2025" },
+      defects: [
+        { side: "front", location: "top", type: "rough_cut", severity: "minor", note: "Factory burr" },
+        { side: "back", location: "bottom_left", type: "corner_whitening", severity: "micro", note: null },
+      ],
+    },
+  },
+};
+const gameInfo = (g) => GAMES[g] || GAMES.pokemon;
+
+const FINISHES = ["", "Non-foil", "Holo", "Reverse holo", "Foil", "Etched / textured", "Metal"];
+const LANGUAGES = { EN: "English", JP: "Japanese", ZH: "Chinese", KO: "Korean", FR: "French", DE: "German", IT: "Italian", ES: "Spanish", PT: "Portuguese" };
+// Input id -> key on assessment.card
+const DETAIL_FIELDS = {
+  "card-subtitle": "subtitle", "card-type": "card_type", "card-set": "set_name", "card-set-code": "set_code",
+  "card-number": "number", "card-rarity": "rarity", "card-finish": "finish", "card-language": "language", "card-year": "year",
+};
+
+/** Read the collector line printed on the card, e.g. "VEN · SP3/006 · EN" or "OGN-001/298 EN". */
+function parseCollectorLine(text) {
+  const out = {};
+  const tokens = text.toUpperCase().replace(/[•·|,]/g, " ").split(/\s+/).filter(Boolean);
+  const slashed = tokens.find((t) => t.includes("/"));  // "223/197" beats "SV3" for the number
+  if (slashed) {
+    const dash = slashed.match(/^([A-Z]{2,5})-(\S+)$/);
+    out.number = dash ? dash[2] : slashed;
+    if (dash) out.set_code = dash[1];
+  }
+  for (let tok of tokens) {
+    if (tok === slashed) continue;
+    const lang = { JA: "JP", CN: "ZH", KR: "KO" }[tok] || tok;
+    if (!out.language && LANGUAGES[lang] && tok.length === 2) { out.language = lang; continue; }
+    const dash = tok.match(/^([A-Z]{2,5})-(\S+)$/);
+    if (dash) { out.set_code = out.set_code || dash[1]; tok = dash[2]; }
+    if (!out.number && (/\//.test(tok) || /^[A-Z]{0,3}\d{1,4}[A-Z]?$/.test(tok))) { out.number = tok; continue; }
+    if (!out.set_code && /^[A-Z][A-Z0-9]{1,4}$/.test(tok)) out.set_code = tok;
+  }
+  return out;
+}
 
 const state = {
+  game: "pokemon",
+  view: "scan",
+  scans: { front: null, back: null },  // {img: canvas, lines, width, height, confidence}
+  thumbs: { front: null, back: null },
   centering: { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } },
   defects: [],
-  thumbs: { front: null, back: null },
-  pick: { side: null, location: null, severity: null },
+  // Assessment evidence (see grading.js): which components were looked at, and where each centering
+  // share came from. Nothing counts as flawless or centered until there's evidence for it.
+  inspected: { front: [], back: [] },
+  // What each side's photo can't show (from the scan's quality check, plus the surface: a flat photo can't
+  // show scratches, dents or print lines). The photo check wins over a tick in `inspected`; only a check on
+  // the card in hand (`inHand`) counts for those areas.
+  photoLimits: { front: [], back: [] },
+  inHand: { front: [], back: [] },
+  evidence: { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } },
+  activeSide: "front",
+  reference: null,  // {image_url|image, source, source_url, name, rgba, mask}: only set once the user confirms the card
+  market: null,     // ungraded market prices TCGdex returned for the confirmed card (Pokemon only)
+  tcgplayerId: "",  // TCGplayer product id Riftcodex returned for the confirmed card
+  price: { key: "", status: "idle" },  // PriceCharting lookup for the current card: see loadPrices()
+  autoRead: false,  // the card has been read from the photo once already (automatic runs only)
+  showSuspects: true,
+  sheet: { side: null, location: null, type: null, severity: null },
   example: false,
   report: null,
+  savedId: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const pretty = (s) => s.replace(/_/g, " ");
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const fmtShare = (v) => {
   const r = Math.round(v * 10) / 10;
   return Number.isInteger(r) ? String(r) : r.toFixed(1);
 };
+const splitText = (v) => `${fmtShare(v)}/${fmtShare(100 - v)}`;
 const whereText = (d) => {
   const comp = COMPONENT_OF[d.location];
   return d.location === "surface" ? `${d.side} surface` : `${d.side} ${pretty(d.location)} ${comp === "corners" ? "corner" : "edge"}`;
@@ -47,7 +140,9 @@ function toast(msg) {
 
 /* ---------------------------------------------------------------- storage */
 
-const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v1" };
+// Drafts v3 add the inspection record (inspected, centering_evidence). A v2 draft still resumes, but under
+// the current rules its uninspected areas leave the grade incomplete.
+const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v3", draftV2: "cardGradingLab.draft.v2", game: "cardGradingLab.game" };
 
 const localStore = {
   read(key, fallback) {
@@ -66,7 +161,11 @@ const localStore = {
       return false;
     }
   },
+  remove(key) {
+    try { localStorage.removeItem(key); } catch (_) { /* ignore */ }
+  },
   cards() { return this.read(KEYS.cards, []); },
+  draft() { return this.read(KEYS.draft, null) || this.read(KEYS.draftV2, null); },
   saveCards(cards) { return this.write(KEYS.cards, cards); },
 };
 
@@ -80,10 +179,7 @@ function canvasFromRGBA(rgba) {
   return c;
 }
 
-/**
- * Decode a photo, apply its EXIF rotation, downscale it, and return RGBA pixels.
- * Safari decodes iPhone HEIC photos here too.
- */
+/** Decode a photo (EXIF rotation applied, HEIC decoded by Safari), downscale it, return RGBA pixels. */
 function readImage(file, maxSide = 2400) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -107,18 +203,19 @@ function readImage(file, maxSide = 2400) {
   });
 }
 
-function thumbnail(warped, margin) {
-  const w = warped.width - 2 * margin, h = warped.height - 2 * margin;
-  const tw = 160, th = Math.round((h * tw) / w);
+function thumbnail(warpedCanvas, margin, width = 200) {
+  const w = warpedCanvas.width - 2 * margin, h = warpedCanvas.height - 2 * margin;
+  const th = Math.round((h * width) / w);
   const c = document.createElement("canvas");
-  c.width = tw;
+  c.width = width;
   c.height = th;
-  c.getContext("2d").drawImage(canvasFromRGBA(warped), margin, margin, w, h, 0, 0, tw, th);
-  return c.toDataURL("image/jpeg", 0.75);
+  c.getContext("2d").drawImage(warpedCanvas, margin, margin, w, h, 0, 0, width, th);
+  return c.toDataURL("image/jpeg", 0.8);
 }
 
-/** A sample "photo" of a slightly off-center card on a dark mat, used for the example. */
-function samplePhoto(side) {
+/** A sample "photo" of a slightly off-center card, used for the example. */
+function samplePhoto(side, game = "pokemon") {
+  if (game === "riftbound") return riftboundSample(side);
   const W = 1200, H = 1500;
   const c = document.createElement("canvas");
   c.width = W;
@@ -133,7 +230,8 @@ function samplePhoto(side) {
   const border = side === "front" ? { l: 44, r: 33, t: 44, b: 46 } : { l: 40, r: 44, t: 41, b: 47 };
   ctx.fillStyle = side === "front" ? "#f4cf2e" : "#1d58b0";
   ctx.beginPath();
-  ctx.roundRect ? ctx.roundRect(0, 0, cw, ch, 26) : ctx.rect(0, 0, cw, ch);
+  if (ctx.roundRect) ctx.roundRect(0, 0, cw, ch, 26);
+  else ctx.rect(0, 0, cw, ch);
   ctx.fill();
   const iw = cw - border.l - border.r, ih = ch - border.t - border.b;
   const grad = ctx.createLinearGradient(0, 0, iw, ih);
@@ -166,146 +264,218 @@ function samplePhoto(side) {
   return { width: W, height: H, data: data.data };
 }
 
-/* ---------------------------------------------------------------- centering */
+/** Riftbound-style sample: black-bordered front and blue back, photographed on a light mat. */
+function riftboundSample(side) {
+  const W = 1200, H = 1500;
+  const c = document.createElement("canvas");
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#d7dadf";
+  ctx.fillRect(0, 0, W, H);
+  ctx.translate(W / 2, H / 2);
+  ctx.rotate(((side === "front" ? -2.2 : 1.6) * Math.PI) / 180);
+  const cw = 750, ch = 1048;
+  ctx.translate(-cw / 2, -ch / 2);
+  const border = side === "front" ? { l: 38, r: 30, t: 36, b: 37 } : { l: 39, r: 37, t: 40, b: 42 };
+  ctx.fillStyle = side === "front" ? "#141417" : "#1b3f86";
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(0, 0, cw, ch, 26);
+  else ctx.rect(0, 0, cw, ch);
+  ctx.fill();
+  const iw = cw - border.l - border.r, ih = ch - border.t - border.b;
+  const grad = ctx.createLinearGradient(0, 0, 0, ih);
+  if (side === "front") {
+    grad.addColorStop(0, "#5b3fb8");
+    grad.addColorStop(0.55, "#2b8fb0");
+    grad.addColorStop(1, "#e2c46a");
+  } else {
+    grad.addColorStop(0, "#3a6fd8");
+    grad.addColorStop(1, "#122a66");
+  }
+  ctx.fillStyle = grad;
+  ctx.fillRect(border.l, border.t, iw, ih);
+  if (side === "front") {
+    ctx.fillStyle = "rgba(245,240,228,.9)";
+    ctx.fillRect(border.l + 24, border.t + ih * 0.62, iw - 48, ih * 0.3);
+  } else {
+    ctx.strokeStyle = "#e8c35a";
+    ctx.lineWidth = 18;
+    ctx.beginPath();
+    ctx.arc(cw / 2, ch / 2, 190, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  const data = c.getContext("2d").getImageData(0, 0, W, H);
+  return { width: W, height: H, data: data.data };
+}
 
-class SideScanner {
-  constructor(root, side) {
-    this.side = side;
-    root.append($("#side-template").content.cloneNode(true));
-    $("h3", root).textContent = side === "front" ? "Front" : "Back";
-    this.zone = $(".dropzone", root);
-    this.canvas = $("canvas", root);
+/* ---------------------------------------------------------------- scanning */
+
+const shareOf = (a, b) => (a + b <= 0 ? 50 : (Math.max(a, b) / (a + b)) * 100);
+
+function centeringFromLines(lines) {
+  const { outer, inner } = lines;
+  return {
+    lr: shareOf(Math.max(0, inner.left - outer.left), Math.max(0, outer.right - inner.right)),
+    tb: shareOf(Math.max(0, inner.top - outer.top), Math.max(0, outer.bottom - inner.bottom)),
+  };
+}
+
+/**
+ * Where a border couldn't be read (full-art card, glare), don't trust the guessed frame line: put that
+ * guide at the same inset as the opposite side (or both at 5% if neither side reads), so the axis starts
+ * neutral (50/50) and is flagged for the user to line up by hand.
+ */
+function neutralizeUnreadSides(scan) {
+  const per = scan.confidence.per_side;
+  const { outer, inner } = scan.lines;
+  const ok = (sd) => per[sd] >= 0.3;
+  const unmeasured = { lr: false, tb: false };
+  const axes = [["left", "right", "lr", scan.width - 2 * scan.margin], ["top", "bottom", "tb", scan.height - 2 * scan.margin]];
+  for (const [a, b, axis, extent] of axes) {
+    const inset = (sd) => (sd === "left" || sd === "top" ? inner[sd] - outer[sd] : outer[sd] - inner[sd]);
+    const setInset = (sd, v) => { inner[sd] = sd === "left" || sd === "top" ? outer[sd] + v : outer[sd] - v; };
+    if (ok(a) && ok(b)) continue;
+    unmeasured[axis] = true;
+    const v = ok(a) ? inset(a) : ok(b) ? inset(b) : extent * 0.05;
+    setInset(a, v);
+    setInset(b, v);
+  }
+  return unmeasured;
+}
+
+function applyScan(side, scan, photo = null) {
+  const img = canvasFromRGBA(scan.warped);
+  const unmeasured = neutralizeUnreadSides(scan);
+  state.scans[side] = {
+    img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin,
+    confidence: scan.confidence.borders,
+    photo, corners: scan.corners,  // kept for this session so the outline can be adjusted by hand
+    result: scan, quality: null, check: null,  // full scan, photo-quality gate, edge/corner candidates
+  };
+  state.evidence[side] = { lr: unmeasured.lr ? "unread" : "measured", tb: unmeasured.tb ? "unread" : "measured" };
+  state.photoLimits[side] = [...FLAT_PHOTO_LIMITS];  // the quality check below adds what else this photo can't show
+  state.thumbs[side] = thumbnail(img, scan.margin);
+  state.centering[side] = centeringFromLines(scan.lines);
+  runInspection(side);
+}
+
+async function scanFile(side, file) {
+  leaveExample();
+  const slot = $(`.slot[data-side="${side}"]`);
+  slot.classList.add("busy");
+  $("#guide-wrap").classList.toggle("busy", state.view === "report");
+  try {
+    const pixels = await readImage(file);
+    await new Promise((r) => setTimeout(r, 30));  // let the busy overlay paint
+    applyScan(side, Vision.scan(pixels, "auto"), pixels);
+    const ev = state.evidence[side];
+    const um = { lr: ev.lr === "unread", tb: ev.tb === "unread" };
+    const q = state.scans[side].quality;
+    const failed = q && q.verdict === "rescan" ? Object.values(q.checks).find((c) => c.status === "fail") : null;
+    if (failed) toast(`${cap(side)}: this photo can't support a reliable check. ${failed.note}`);
+    else if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In the report, line up the pink guides with the printed frame.`);
+    else if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the border was hard to read. Check the guide lines in the report.`);
+  } catch (err) {
+    toast(err.message || "Couldn't measure this photo.");
+  } finally {
+    slot.classList.remove("busy");
+    $("#guide-wrap").classList.remove("busy");
+  }
+  renderSlots();
+  if (state.view === "report") {
+    state.activeSide = side;
+    renderCentering();
+    runGrade();
+  }
+}
+
+function renderSlots() {
+  for (const side of SIDES) {
+    const slot = $(`.slot[data-side="${side}"]`);
+    const img = $(".slot-img", slot);
+    const thumb = state.thumbs[side];
+    const done = !!state.scans[side];
+    slot.classList.toggle("done", done);
+    img.hidden = !done;
+    if (done) img.src = thumb;
+    $(".slot-meta", slot).textContent = done
+      ? `${splitText(state.centering[side].lr)} · ${splitText(state.centering[side].tb)}`
+      : "Tap to add photo";
+  }
+  const front = !!state.scans.front, back = !!state.scans.back;
+  $("#get-report").disabled = !(front && back);
+  $("#front-only").hidden = !(front && !back);
+}
+
+/* ---------------------------------------------------------------- centering editor */
+
+const guide = {
+  canvas: null, ctx: null, drag: null, pointer: null,
+  outline: null,  // [[x, y] x4] corner handles (TL, TR, BR, BL) while adjusting the outline
+
+  init() {
+    this.canvas = $("#guide-canvas");
     this.ctx = this.canvas.getContext("2d");
-    this.lrInput = $(".lr", root);
-    this.tbInput = $(".tb", root);
-    this.lrInput.id = `${side}-lr`;
-    this.tbInput.id = `${side}-tb`;
-    this.lrOther = $(".lr-other", root);
-    this.tbOther = $(".tb-other", root);
-    this.confEl = $(".conf", root);
-    this.cropped = $(".cropped", root);
-    this.cropped.id = `${side}-cropped`;
-    $$("input[type=file]", root).forEach((input, i) => (input.id = `${side}-file-${i}`));
-    this.canvas.setAttribute("aria-label", `${side} scan with centering guides`);
-    this.img = null;
-    this.lines = null;
-    this.drag = null;
-    this.pointer = null;
-
-    for (const input of $$("input[type=file]", root)) {
-      input.addEventListener("change", (e) => {
-        if (e.target.files[0]) this.upload(e.target.files[0]);
-        e.target.value = "";
-      });
-    }
-    this.zone.addEventListener("dragover", (e) => { e.preventDefault(); this.zone.classList.add("drag"); });
-    this.zone.addEventListener("dragleave", () => this.zone.classList.remove("drag"));
-    this.zone.addEventListener("drop", (e) => {
-      e.preventDefault();
-      this.zone.classList.remove("drag");
-      if (e.dataTransfer.files[0]) this.upload(e.dataTransfer.files[0]);
-    });
-    for (const input of [this.lrInput, this.tbInput]) input.addEventListener("input", () => this.manualChange());
-    this.canvas.addEventListener("pointerdown", (e) => this.onDown(e));
-    this.canvas.addEventListener("pointermove", (e) => this.onMove(e));
-    this.canvas.addEventListener("pointerup", (e) => this.onUp(e));
-    this.canvas.addEventListener("pointercancel", (e) => this.onUp(e));
-    this.canvas.addEventListener("pointerleave", () => { if (!this.drag) { this.pointer = null; this.draw(); } });
-    // On touch screens, block page scrolling only when the finger lands on a guide.
-    this.canvas.addEventListener("touchstart", (e) => {
-      if (!this.lines || e.touches.length !== 1) return;
-      if (this.hit(this.toNative(e.touches[0], "touch"))) e.preventDefault();
+    const c = this.canvas;
+    c.addEventListener("pointerdown", (e) => this.onDown(e));
+    c.addEventListener("pointermove", (e) => this.onMove(e));
+    c.addEventListener("pointerup", (e) => this.onUp(e));
+    c.addEventListener("pointercancel", (e) => this.onUp(e));
+    c.addEventListener("pointerleave", () => { if (!this.drag) { this.pointer = null; this.draw(); } });
+    // On touch screens, block page scrolling only when the finger lands on a guide line.
+    c.addEventListener("touchstart", (e) => {
+      if (e.touches.length === 1 && this.scan() && this.hit(this.toNative(e.touches[0], "touch"))) e.preventDefault();
     }, { passive: false });
-    this.canvas.addEventListener("touchmove", (e) => { if (this.drag) e.preventDefault(); }, { passive: false });
-  }
+    c.addEventListener("touchmove", (e) => { if (this.drag) e.preventDefault(); }, { passive: false });
+  },
 
-  async upload(file) {
-    leaveExample();
-    this.zone.classList.add("busy");
-    try {
-      const pixels = await readImage(file);
-      await new Promise((r) => setTimeout(r, 30));  // let the "Measuring…" overlay paint
-      this.loadScan(Vision.scan(pixels, this.cropped.checked ? "cropped" : "auto"));
-    } catch (err) {
-      toast(err.message || "Couldn't measure this photo.");
-    } finally {
-      this.zone.classList.remove("busy");
+  scan() { return state.scans[state.activeSide]; },
+
+  show() {
+    const s = this.scan();
+    $("#guide-wrap").classList.toggle("empty", !s);
+    if (!s) {
+      $("#guide-empty-text").textContent = state.thumbs[state.activeSide]
+        ? "The photo isn't kept after saving. Retake it to adjust the guides, or type the ratios below."
+        : `No ${state.activeSide} photo. Add one, or type the ratios below.`;
+      return;
     }
-  }
-
-  loadScan(scan, { quiet = false } = {}) {
-    this.img = canvasFromRGBA(scan.warped);
-    this.canvas.width = scan.width;
-    this.canvas.height = scan.height;
-    this.lines = scan.lines;
-    state.thumbs[this.side] = thumbnail(scan.warped, scan.margin);
-    this.zone.classList.add("has-image");
-    const conf = scan.confidence.borders;
-    this.confEl.textContent = `Auto-detect confidence ${Math.round(conf * 100)}%`;
-    this.confEl.classList.toggle("low", conf < 0.6);
-    if (conf < 0.6 && !quiet) toast(`${this.side === "front" ? "Front" : "Back"}: low confidence. Check the guides.`);
-    this.fromLines();
-  }
-
-  clear() {
-    this.img = null;
-    this.lines = null;
-    this.zone.classList.remove("has-image");
-    this.confEl.textContent = "";
-    this.confEl.classList.remove("low");
-    this.setValues(50, 50);
-  }
-
-  setValues(lr, tb) {
-    this.lrInput.value = fmtShare(lr);
-    this.tbInput.value = fmtShare(tb);
-    this.lrOther.textContent = fmtShare(100 - lr);
-    this.tbOther.textContent = fmtShare(100 - tb);
-    state.centering[this.side] = { lr: +lr.toFixed(2), tb: +tb.toFixed(2) };
-  }
-
-  manualChange() {
-    leaveExample();
-    const clamp = (v) => Math.min(100, Math.max(50, isNaN(v) ? 50 : v));
-    const lr = clamp(parseFloat(this.lrInput.value));
-    const tb = clamp(parseFloat(this.tbInput.value));
-    this.lrOther.textContent = fmtShare(100 - lr);
-    this.tbOther.textContent = fmtShare(100 - tb);
-    state.centering[this.side] = { lr, tb };
-    scheduleGrade();
-  }
-
-  fromLines() {
-    const { outer, inner } = this.lines;
-    const share = (a, b) => (a + b <= 0 ? 50 : (Math.max(a, b) / (a + b)) * 100);
-    const L = inner.left - outer.left, R = outer.right - inner.right;
-    const T = inner.top - outer.top, B = outer.bottom - inner.bottom;
-    this.setValues(share(Math.max(0, L), Math.max(0, R)), share(Math.max(0, T), Math.max(0, B)));
+    this.canvas.width = s.width;
+    this.canvas.height = s.height;
     this.draw();
-    scheduleGrade();
-  }
+  },
 
   toNative(e, pointerType = e.pointerType) {
     const r = this.canvas.getBoundingClientRect();
     const k = this.canvas.width / r.width;
     return { x: (e.clientX - r.left) * k, y: (e.clientY - r.top) * k, k, touch: pointerType === "touch" || pointerType === "pen" };
-  }
+  },
 
   hit(p) {
-    const tol = (p.touch ? 22 : 10) * p.k;  // fingers need a bigger target
+    const s = this.scan();
+    const tol = (p.touch ? 22 : 10) * p.k;
+    if (this.outline) {
+      let bestC = null;
+      this.outline.forEach(([x, y], i) => {
+        const d = Math.hypot(p.x - x, p.y - y);
+        if (d <= tol * 1.6 && (!bestC || d < bestC.d)) bestC = { corner: i, d };
+      });
+      return bestC;
+    }
     let best = null;
     for (const kind of ["inner", "outer"]) {
       for (const edge of ["left", "right", "top", "bottom"]) {
-        const v = this.lines[kind][edge];
+        const v = s.lines[kind][edge];
         const d = edge === "left" || edge === "right" ? Math.abs(p.x - v) : Math.abs(p.y - v);
         if (d <= tol && (!best || d < best.d)) best = { kind, edge, d };
       }
     }
     return best;
-  }
+  },
 
   onDown(e) {
-    if (!this.lines) return;
+    if (!this.scan()) return;
     const p = this.toNative(e);
     const h = this.hit(p);
     if (!h) return;
@@ -314,41 +484,49 @@ class SideScanner {
     this.pointer = p;
     try { this.canvas.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
     this.draw();
-  }
+  },
 
   onMove(e) {
-    if (!this.lines) return;
+    const s = this.scan();
+    if (!s) return;
     const p = this.toNative(e);
     this.pointer = p;
-    if (this.drag) {
+    if (this.drag && this.drag.corner != null) {
+      this.outline[this.drag.corner] = [Math.max(0, Math.min(this.canvas.width, p.x)), Math.max(0, Math.min(this.canvas.height, p.y))];
+    } else if (this.drag) {
       const { kind, edge } = this.drag;
       const vertical = edge === "left" || edge === "right";
       const max = vertical ? this.canvas.width : this.canvas.height;
-      this.lines[kind][edge] = Math.max(0, Math.min(max, vertical ? p.x : p.y));
-      this.fromLines();
+      s.lines[kind][edge] = Math.max(0, Math.min(max, vertical ? p.x : p.y));
+      state.evidence[state.activeSide][vertical ? "lr" : "tb"] = "measured";  // lined up by hand
+      state.centering[state.activeSide] = centeringFromLines(s.lines);
+      renderRatioInputs();
+      scheduleGrade();
     } else {
       const h = this.hit(p);
-      this.canvas.style.cursor = h ? (h.edge === "left" || h.edge === "right" ? "ew-resize" : "ns-resize") : "crosshair";
-      this.draw();
+      this.canvas.style.cursor = !h ? "default" : h.corner != null ? "move" : h.edge === "left" || h.edge === "right" ? "ew-resize" : "ns-resize";
     }
-  }
+    this.draw();
+  },
 
   onUp(e) {
     this.drag = null;
     try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) { /* ignore */ }
     this.draw();
-  }
+  },
 
   draw() {
-    if (!this.img) return;
+    const s = this.scan();
+    if (!s) return;
     const { ctx, canvas } = this;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(this.img, 0, 0);
-    this.drawLines(ctx, canvas.width, canvas.height, 2);
-    if (this.drag && this.pointer) this.drawLoupe();
-  }
+    ctx.drawImage(s.img, 0, 0);
+    if (this.outline) this.drawOutline(ctx, 3);
+    else this.drawLines(ctx, s.lines, canvas.width, canvas.height, 2.5);
+    if (this.drag && this.pointer) this.drawLoupe(s);
+  },
 
-  drawLines(ctx, W, H, width) {
+  drawLines(ctx, lines, W, H, width) {
     const css = getComputedStyle(document.documentElement);
     const color = { outer: css.getPropertyValue("--outer").trim() || "#38bdf8", inner: css.getPropertyValue("--inner").trim() || "#f472b6" };
     for (const kind of ["outer", "inner"]) {
@@ -356,7 +534,7 @@ class SideScanner {
       ctx.lineWidth = width;
       ctx.setLineDash(kind === "outer" ? [10, 6] : []);
       for (const edge of ["left", "right", "top", "bottom"]) {
-        const v = this.lines[kind][edge];
+        const v = lines[kind][edge];
         ctx.beginPath();
         if (edge === "left" || edge === "right") { ctx.moveTo(v, 0); ctx.lineTo(v, H); }
         else { ctx.moveTo(0, v); ctx.lineTo(W, v); }
@@ -364,9 +542,39 @@ class SideScanner {
       }
     }
     ctx.setLineDash([]);
-  }
+  },
 
-  drawLoupe() {
+  drawOutline(ctx, width) {
+    const q = this.outline;
+    ctx.strokeStyle = "#f2b53a";
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    q.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.closePath();
+    ctx.stroke();
+    for (const [x, y] of q) {
+      ctx.beginPath();
+      ctx.arc(x, y, width * 6, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(242, 181, 58, 0.35)";
+      ctx.fill();
+      ctx.stroke();
+    }
+  },
+
+  startOutline() {
+    const s = this.scan();
+    if (!s || !s.photo) return;
+    const o = s.lines.outer;
+    this.outline = [[o.left, o.top], [o.right, o.top], [o.right, o.bottom], [o.left, o.bottom]];
+    this.draw();
+  },
+
+  stopOutline() {
+    this.outline = null;
+    this.draw();
+  },
+
+  drawLoupe(s) {
     const { ctx, canvas } = this;
     const zoom = 4, src = 60, size = src * zoom;
     const p = this.pointer;
@@ -379,18 +587,74 @@ class SideScanner {
     ctx.imageSmoothingEnabled = false;
     ctx.translate(dx - (p.x - src / 2) * zoom, dy - (p.y - src / 2) * zoom);
     ctx.scale(zoom, zoom);
-    ctx.drawImage(this.img, 0, 0);
-    this.drawLines(ctx, canvas.width, canvas.height, 0.6);
+    ctx.drawImage(s.img, 0, 0);
+    if (this.outline) this.drawOutline(ctx, 0.8);
+    else this.drawLines(ctx, s.lines, canvas.width, canvas.height, 0.6);
     ctx.restore();
     ctx.strokeStyle = "#f2b53a";
     ctx.lineWidth = 3;
     ctx.strokeRect(dx, dy, size, size);
+  },
+};
+
+function setOutlineMode(on) {
+  $("#outline-bar").hidden = !on;
+  $("#guide-actions").hidden = on;
+  if (on) guide.startOutline();
+  else guide.stopOutline();
+}
+
+async function applyOutline() {
+  const side = state.activeSide;
+  const s = state.scans[side];
+  if (!s || !s.photo || !guide.outline) return setOutlineMode(false);
+  const H = Vision.warpMatrix(s.corners, s.margin);
+  const corners = guide.outline.map(([x, y]) => Vision.applyH(H, x, y));
+  $("#guide-wrap").classList.add("busy");
+  await new Promise((r) => setTimeout(r, 30));
+  try {
+    leaveExample();
+    applyScan(side, Vision.scan(s.photo, "auto", corners), s.photo);
+    renderSlots();
+    toast("Outline applied. The card was re-flattened and re-graded.");
+  } finally {
+    $("#guide-wrap").classList.remove("busy");
+    setOutlineMode(false);
+    renderCentering();
+    runGrade();
   }
 }
 
-const scanners = {};
+function renderRatioInputs() {
+  const c = state.centering[state.activeSide];
+  const lr = $("#ratio-lr"), tb = $("#ratio-tb");
+  if (document.activeElement !== lr) lr.value = fmtShare(c.lr);
+  if (document.activeElement !== tb) tb.value = fmtShare(c.tb);
+  $("#lr-other").textContent = fmtShare(100 - c.lr);
+  $("#tb-other").textContent = fmtShare(100 - c.tb);
+  const s = state.scans[state.activeSide];
+  const ev = state.evidence[state.activeSide];
+  const conf = $("#conf");
+  const um = [ev.lr === "unread" && "left/right", ev.tb === "unread" && "top/bottom"].filter(Boolean).join(" and ");
+  const share = `${Grading.UNREAD_SHARE}/${100 - Grading.UNREAD_SHARE}`;
+  conf.textContent = !s
+    ? (um ? `Not measured, so it counts as ${share}. Add a photo or type the ratios.` : ev.lr === "typed" || ev.tb === "typed" ? "Typed in" : "Measured from the photo")
+    : um ? `Couldn't read the ${um} border: drag the pink guides onto the printed frame`
+    : `Border detection ${Math.round(s.confidence * 100)}%`;
+  conf.classList.toggle("low", !!um || (!!s && s.confidence < 0.6));
+}
 
-/* ---------------------------------------------------------------- defect map */
+function renderCentering() {
+  const s = state.scans[state.activeSide];
+  $("#adjust-outline").hidden = !(s && s.photo);
+  $$("#centering-section .segmented button, #scancheck-section .segmented button, .viewer-side button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
+  viewer.render();
+  guide.show();
+  renderRatioInputs();
+  renderScanCheck();
+}
+
+/* ---------------------------------------------------------------- defects */
 
 function buildMap(fig, side) {
   const ns = "http://www.w3.org/2000/svg";
@@ -401,65 +665,75 @@ function buildMap(fig, side) {
     for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
     return n;
   };
-  svg.append(el("rect", { x: 1, y: 1, width: 148, height: 208, rx: 9, class: "card-body" }));
+  svg.append(el("rect", { x: 1, y: 1, width: 148, height: 208, rx: 10, class: "card-body" }));
   const zones = {
-    top_left: [0, 0, 30, 30], top_right: [120, 0, 30, 30],
-    bottom_left: [0, 180, 30, 30], bottom_right: [120, 180, 30, 30],
-    top: [32, 0, 86, 20], bottom: [32, 190, 86, 20], left: [0, 32, 20, 146], right: [130, 32, 20, 146],
-    surface: [26, 26, 98, 158],
+    top_left: [3, 3, 28, 28], top_right: [119, 3, 28, 28],
+    bottom_left: [3, 179, 28, 28], bottom_right: [119, 179, 28, 28],
+    top: [34, 3, 82, 18], bottom: [34, 189, 82, 18], left: [3, 34, 18, 142], right: [129, 34, 18, 142],
+    surface: [27, 27, 96, 156],
   };
   for (const [loc, [x, y, w, h]] of Object.entries(zones)) {
-    const r = el("rect", { x, y, width: w, height: h, rx: 4, class: "zone", "data-loc": loc, "data-side": side, tabindex: 0, role: "button" });
-    const title = el("title", {});
-    title.textContent = `${side} ${pretty(loc)}`;
-    r.append(title);
-    r.addEventListener("click", () => pickZone(side, loc));
-    r.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickZone(side, loc); } });
+    const r = el("rect", { x, y, width: w, height: h, rx: 5, class: "zone", "data-loc": loc, "data-side": side, tabindex: 0, role: "button", "aria-label": `${side} ${pretty(loc)}` });
+    r.addEventListener("click", () => openSheet(side, loc));
+    r.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSheet(side, loc); } });
     svg.append(r);
   }
   fig.append(svg);
 }
 
-function pickZone(side, location) {
-  state.pick = { side, location, severity: state.pick.severity };
+function openSheet(side, location) {
   const comp = COMPONENT_OF[location];
-  const where = whereText({ side, location });
-  $("#picked").textContent = where.charAt(0).toUpperCase() + where.slice(1);
-  const select = $("#defect-type");
-  select.innerHTML = "";
+  state.sheet = { side, location, type: null, severity: null };
+  $("#sheet-where").textContent = cap(whereText({ side, location }));
+  const chips = $("#type-chips");
+  chips.innerHTML = "";
   for (const [key, spec] of Object.entries(CRITERIA.defects.types)) {
     if (!spec.applies_to.includes(comp)) continue;
-    const o = document.createElement("option");
-    o.value = key;
-    o.textContent = spec.label;
-    select.append(o);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.type = key;
+    b.textContent = spec.label;
+    b.addEventListener("click", () => { state.sheet.type = key; updateSheet(); });
+    chips.append(b);
   }
-  select.disabled = false;
-  updateAddButton();
-  paintZones();
+  $("#defect-note").value = "";
+  updateSheet();
+  $("#defect-sheet").hidden = false;
 }
 
-function updateAddButton() {
-  $("#add-defect").disabled = !(state.pick.location && state.pick.severity);
-  $$("#severity button").forEach((b) => b.classList.toggle("active", b.dataset.sev === state.pick.severity));
-  const spec = CRITERIA.defects.types[$("#defect-type").value];
-  const sev = state.pick.severity;
-  if (sev) {
-    const cap = spec ? spec.caps[sev] : null;
-    const shown = cap == null ? "" : cap >= 10 ? " · still allows Gem Mint" : ` · caps this area at ${cap}`;
-    $("#sev-hint").textContent = SEV_TEXT[sev] + shown;
+function closeSheet() {
+  $("#defect-sheet").hidden = true;
+}
+
+function updateSheet() {
+  const { type, severity } = state.sheet;
+  $$("#type-chips button").forEach((b) => b.classList.toggle("active", b.dataset.type === type));
+  $$("#sev-seg button").forEach((b) => b.classList.toggle("active", b.dataset.sev === severity));
+  $("#sheet-add").disabled = !(type && severity);
+  if (severity) {
+    const capValue = type ? CRITERIA.defects.types[type].caps[severity] : null;
+    const effect = capValue == null ? "" : capValue >= 10 ? " · still allows Gem Mint" : ` · limits this area to ${capValue}`;
+    $("#sev-hint").textContent = SEV_TEXT[severity] + effect;
   }
+}
+
+function addDefectFromSheet() {
+  leaveExample();
+  const { side, location, type, severity } = state.sheet;
+  const note = $("#defect-note").value.trim();
+  state.defects.push({ side, location, type, severity, note: note || null });
+  markInspected(side, COMPONENT_OF[location]);  // logging a DING there means you looked there
+  closeSheet();
+  runGrade();
 }
 
 function paintZones() {
   $$(".zone").forEach((z) => {
-    z.classList.remove("selected", "sev-micro", "sev-minor", "sev-moderate", "sev-major");
-    const { side, loc } = z.dataset;
+    z.classList.remove("sev-micro", "sev-minor", "sev-moderate", "sev-major");
     const worst = state.defects
-      .filter((d) => d.side === side && d.location === loc)
+      .filter((d) => d.side === z.dataset.side && d.location === z.dataset.loc)
       .sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity])[0];
     if (worst) z.classList.add(`sev-${worst.severity}`);
-    if (state.pick.side === side && state.pick.location === loc) z.classList.add("selected");
   });
 }
 
@@ -467,40 +741,781 @@ function renderDefects() {
   const list = $("#defect-list");
   list.innerHTML = "";
   if (!state.defects.length) {
-    list.innerHTML = '<li class="empty">No defects logged, so the card is treated as flawless.</li>';
+    list.innerHTML = '<li class="empty">No DINGS logged. Areas ticked as checked above count as flawless; unchecked areas leave the grade incomplete. Tap the card above where you see wear.</li>';
   }
+  const areas = state.report && state.report.grades.TAG.subgrades;
   state.defects.forEach((d, i) => {
     const li = document.createElement("li");
-    li.innerHTML = `<span class="sev-pill ${d.severity}"></span>
-      <span><span class="d-label"></span><br><span class="where"></span></span>
-      <button type="button" aria-label="Remove defect">✕</button>`;
-    $(".sev-pill", li).textContent = d.severity;
+    li.innerHTML = `<span class="ding-no ${d.severity}" aria-hidden="true">${i + 1}</span>
+      <span class="d-text"><span class="d-label"></span><br><span class="where"></span></span>
+      <span class="d-impact"></span>
+      <button type="button" class="remove" aria-label="Remove DING ${i + 1}">✕</button>`;
     $(".d-label", li).textContent = CRITERIA.defects.types[d.type].label;
-    $(".where", li).textContent = whereText(d) + (d.note ? ` · ${d.note}` : "");
-    $("button", li).addEventListener("click", () => {
+    $(".where", li).textContent = `${cap(d.severity)} · ${whereText(d)}${d.note ? ` · ${d.note}` : ""}`;
+    const area = `${d.side} ${COMPONENT_OF[d.location]}`;
+    if (areas && areas[area] != null) $(".d-impact", li).textContent = `${cap(area)} ${areas[area]}`;
+    $(".remove", li).addEventListener("click", () => {
       leaveExample();
       state.defects.splice(i, 1);
-      renderDefects();
-      scheduleGrade();
+      runGrade();
     });
     list.append(li);
   });
+  const n = state.defects.length;
+  const checked = SIDES.reduce((k, side) => k + COMPONENTS.filter((c) => isInspected(side, c)).length, 0);
+  $("#defect-summary").textContent = `${n ? `${n} logged` : "None logged"} · ${checked}/6 checked`;
   paintZones();
+  renderInspect();
 }
 
-/* ---------------------------------------------------------------- grading */
+/* ---------------------------------------------------------------- inspection checklist */
+
+// Same rules as the engine: a component with a DING logged on that side has been looked at, unless the
+// photo can't show it; then only a check on the card in hand counts.
+const hasDefect = (side, comp) => state.defects.some((d) => d.side === side && COMPONENT_OF[d.location] === comp);
+const photoLimited = (side, comp) => state.photoLimits[side].includes(comp);
+const isInspected = (side, comp) =>
+  state.inHand[side].includes(comp) || (!photoLimited(side, comp) && (state.inspected[side].includes(comp) || hasDefect(side, comp)));
+
+function markInspected(side, comp) {
+  if (!state.inspected[side].includes(comp)) state.inspected[side] = COMPONENTS.filter((c) => c === comp || state.inspected[side].includes(c));
+}
+
+function setInspected(side, comp, on) {
+  leaveExample();
+  if (photoLimited(side, comp)) {
+    // The photo can't show this area, so ticking it means "checked on the card in hand".
+    state.inHand[side] = on ? COMPONENTS.filter((c) => c === comp || state.inHand[side].includes(c)) : state.inHand[side].filter((c) => c !== comp);
+  } else if (on) markInspected(side, comp);
+  else state.inspected[side] = state.inspected[side].filter((c) => c !== comp);
+  runGrade();
+}
+
+function renderInspect() {
+  let all = true;
+  for (const box of $$("#inspect input[type=checkbox]")) {
+    const { side, comp } = box.dataset;
+    const limited = photoLimited(side, comp);
+    const locked = !limited && hasDefect(side, comp);  // can't be unchecked while a DING is logged there
+    box.checked = isInspected(side, comp);
+    box.disabled = locked;
+    const row = box.closest(".check");
+    row.classList.toggle("locked", locked);
+    row.classList.toggle("limited", limited);
+    const span = $("span", row);
+    span.textContent = `${cap(comp)} ${limited ? "checked in hand" : "checked"}`;
+    span.dataset.hint = comp === "surface" ? "A flat photo can't show it: tilt the card under a light" : "Photo can't show these: check the card in hand";
+    row.title = !limited ? "" : comp === "surface"
+      ? "A flat photo can't show scratches, print lines, dents, creases or gloss loss. Tilt the card under a light, log what you find, then tick."
+      : "The photo can't show these. Check the card in hand under good light, then tick.";
+    all = all && box.checked;
+  }
+  $("#inspect").classList.toggle("incomplete", !all);
+}
+
+/* ---------------------------------------------------------------- card viewer */
+
+// Where each DING marker sits on the card, as fractions of width/height.
+const MARKER_POS = {
+  top_left: [0.08, 0.06], top_right: [0.92, 0.06], bottom_left: [0.08, 0.94], bottom_right: [0.92, 0.94],
+  top: [0.5, 0.035], bottom: [0.5, 0.965], left: [0.045, 0.5], right: [0.955, 0.5], surface: [0.5, 0.5],
+};
+
+function zoneAt(px, py) {
+  const cx = px < 0.16 ? "left" : px > 0.84 ? "right" : null;
+  const cy = py < 0.12 ? "top" : py > 0.88 ? "bottom" : null;
+  if (cx && cy) return `${cy}_${cx}`;
+  if (px < 0.07) return "left";
+  if (px > 0.93) return "right";
+  if (py < 0.05) return "top";
+  if (py > 0.95) return "bottom";
+  return "surface";
+}
+
+const viewer = {
+  W: 750, H: 1048, thumbImgs: { front: null, back: null },
+
+  init() {
+    this.canvas = $("#viewer-canvas");
+    this.canvas.width = this.W;
+    this.canvas.height = this.H;
+    this.ctx = this.canvas.getContext("2d");
+    this.canvas.addEventListener("click", (e) => {
+      const r = this.canvas.getBoundingClientRect();
+      openSheet(state.activeSide, zoneAt((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height));
+    });
+    $("#overlay").addEventListener("input", () => this.render());
+  },
+
+  thumbImage(side) {
+    const src = state.thumbs[side];
+    if (!src) return null;
+    const cached = this.thumbImgs[side];
+    if (cached && cached.src === src) return cached.complete ? cached : null;
+    const img = new Image();
+    img.onload = () => this.render();
+    img.src = src;
+    this.thumbImgs[side] = img;
+    return null;
+  },
+
+  render() {
+    const { ctx, W, H } = this;
+    const side = state.activeSide;
+    const css = getComputedStyle(document.documentElement);
+    const color = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+    ctx.clearRect(0, 0, W, H);
+    const scan = state.scans[side];
+    let map = null;  // scan pixel -> viewer pixel, for the centering lines
+    if (scan) {
+      const m = scan.margin, sw = scan.width - 2 * m, sh = scan.height - 2 * m;
+      ctx.drawImage(scan.img, m, m, sw, sh, 0, 0, W, H);
+      map = { m, kx: W / sw, ky: H / sh };
+    } else {
+      const img = this.thumbImage(side);
+      if (img) ctx.drawImage(img, 0, 0, W, H);
+      else {
+        ctx.fillStyle = color("--surface-3", "#e4e7ec");
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = color("--muted", "#5d6572");
+        ctx.font = "600 36px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(`No ${side} photo`, W / 2, H / 2);
+      }
+    }
+    const alpha = Number($("#overlay").value) / 100;
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "rgba(8, 10, 14, 0.22)";
+    ctx.fillRect(0, 0, W, H);
+    if (map) {
+      const L = scan.lines;
+      const X = (v) => (v - map.m) * map.kx, Y = (v) => (v - map.m) * map.ky;
+      for (const kind of ["outer", "inner"]) {
+        ctx.strokeStyle = kind === "outer" ? color("--outer", "#38bdf8") : color("--inner", "#f472b6");
+        ctx.lineWidth = 3;
+        ctx.setLineDash(kind === "outer" ? [12, 8] : []);
+        ctx.beginPath();
+        ctx.moveTo(X(L[kind].left), 0); ctx.lineTo(X(L[kind].left), H);
+        ctx.moveTo(X(L[kind].right), 0); ctx.lineTo(X(L[kind].right), H);
+        ctx.moveTo(0, Y(L[kind].top)); ctx.lineTo(W, Y(L[kind].top));
+        ctx.moveTo(0, Y(L[kind].bottom)); ctx.lineTo(W, Y(L[kind].bottom));
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    drawSuspects(ctx, scan, map ? (v) => (v - map.m) * map.kx : null, map ? (v) => (v - map.m) * map.ky : null, color);
+    const sevColor = { micro: color("--good", "#178a5d"), minor: color("--warn", "#b26b00"), moderate: color("--bad", "#c2362f"), major: color("--bad", "#c2362f") };
+    const seen = {};
+    state.defects.forEach((d, i) => {
+      if (d.side !== side) return;
+      const k = (seen[d.location] = (seen[d.location] || 0) + 1) - 1;
+      let [fx, fy] = MARKER_POS[d.location];
+      if (d.location === "surface" && k) {
+        fx += 0.2 * Math.cos(k * 2.2);
+        fy += 0.18 * Math.sin(k * 2.2);
+      } else if (k) {
+        fy += (fy > 0.5 ? -1 : 1) * 0.06 * k;
+      }
+      const x = fx * W, y = fy * H, r = 28;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = sevColor[d.severity];
+      ctx.fill();
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+      ctx.fillStyle = d.severity === "minor" ? "#1d1400" : "#ffffff";
+      ctx.font = "700 30px ui-monospace, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i + 1), x, y + 1);
+    });
+    ctx.restore();
+  },
+};
+
+/* ---------------------------------------------------------------- scan check (photo quality + edge/corner candidates) */
+
+const httpsUrl = (u) => (typeof u === "string" && /^https:\/\//i.test(u) ? u : "");  // reference URLs are untrusted data
+const QUALITY_TEXT = { ok: "Photo OK", warn: "Usable, with limits", rescan: "Retake this photo" };
+// Whatever its quality, a flat photo can't show surface wear (scratches, print lines, dents, creases, gloss
+// loss): that needs the card tilted under a light, so the surface only counts once checked in hand.
+const FLAT_PHOTO_LIMITS = ["surface"];
+
+function runInspection(side) {
+  const s = state.scans[side];
+  if (!s || !s.photo || !s.result) return;
+  try {
+    s.quality = Inspect.quality(s.photo, s.result);
+    state.photoLimits[side] = Grading.photoLimitComponents([...s.quality.blocked, ...FLAT_PHOTO_LIMITS]);
+    const opts = { quality: s.quality, face: side };
+    if (side === "front" && state.reference && state.reference.rgba && state.reference.usable) {
+      opts.printedMask = Identify.printedMask(state.reference.rgba, s.result.warped, s.margin);
+    }
+    s.check = Inspect.edgesAndCorners(s.result, opts);
+  } catch (err) {
+    s.quality = null;
+    s.check = null;
+  }
+}
+
+const blockedText = (item) => {
+  const [comp, where] = item.split(":");
+  return where ? `${pretty(where)} ${comp === "corners" ? "corner" : "edge"}` : comp;
+};
+
+function scanCheckLine(text, cls = "") {
+  const li = document.createElement("li");
+  if (cls) li.className = cls;
+  li.textContent = text;
+  return li;
+}
+
+function renderScanCheck() {
+  const body = $("#scancheck-body");
+  const parts = SIDES.map((side) => {
+    const q = state.scans[side] && state.scans[side].quality;
+    return q ? `${cap(side)}: ${QUALITY_TEXT[q.verdict].toLowerCase()}` : null;
+  }).filter(Boolean);
+  $("#scancheck-summary").textContent = parts.join(" · ") || "No photos";
+  if (!body) return;
+  body.innerHTML = "";
+  const side = state.activeSide, s = state.scans[side];
+  if (!s || !s.photo) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = s ? "The photo isn't kept after you reload the page, so it can't be checked again. Rescan it to check the photo." : `No ${side} photo, so nothing can be checked here. Photos of both sides are needed for a full assessment.`;
+    body.append(p);
+    return;
+  }
+  const q = s.quality, c = s.check;
+  if (!q || !c) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "The checks couldn't run on this photo. Try scanning it again.";
+    body.append(p);
+    return;
+  }
+  const head = document.createElement("div");
+  head.className = "sc-verdict";
+  head.innerHTML = `<span class="chip ${q.verdict}"></span>`;
+  $(".chip", head).textContent = QUALITY_TEXT[q.verdict];
+  body.append(head);
+
+  const problems = Object.entries(q.checks).filter(([, v]) => v.status !== "ok");
+  const ul = document.createElement("ul");
+  ul.className = "sc-list";
+  if (problems.length) for (const [, v] of problems) ul.append(scanCheckLine(v.note, v.status));
+  else ul.append(scanCheckLine("Sharpness, glare, resolution and framing look fine."));
+  if (q.blocked.length) ul.append(scanCheckLine(`This photo can't show: ${q.blocked.map(blockedText).join(", ")}. Rescan with better light, or check those by eye and log them in DINGS.`, "warn"));
+  ul.append(scanCheckLine("A flat photo can't show the surface (scratches, print lines, dents, creases, gloss loss). Tilt the card under a light, log what you find in DINGS, then tick “Surface checked in hand”."));
+  body.append(ul);
+
+  const toggle = document.createElement("label");
+  toggle.className = "sc-toggle";
+  toggle.innerHTML = '<input type="checkbox"><span>Show suspected damage on the card</span>';
+  const box = $("input", toggle);
+  box.checked = state.showSuspects;
+  box.addEventListener("change", () => { state.showSuspects = box.checked; viewer.render(); });
+  body.append(toggle);
+
+  const sub = document.createElement("p");
+  sub.className = "sc-sub";
+  sub.textContent = "Edges and corners";
+  body.append(sub);
+  const sum = document.createElement("p");
+  sum.className = "sc-summary";
+  sum.textContent = c.summary;
+  body.append(sum);
+
+  for (const d of c.defects) {
+    const row = document.createElement("div");
+    row.className = "sc-cand";
+    const label = CRITERIA.defects.types[d.type] ? CRITERIA.defects.types[d.type].label : pretty(d.type);
+    row.innerHTML = "<div><b></b><small></small></div><button type=\"button\" class=\"btn small\">Add to DINGS</button>";
+    $("b", row).textContent = `${label} · ${cap(d.severity)} · ${whereText(d)}`;
+    $("small", row).textContent = d.note || "";
+    $("button", row).addEventListener("click", () => {
+      leaveExample();
+      state.defects.push({ side: d.side || side, location: d.location, type: d.type, severity: d.severity, note: `Auto-detected: ${d.note || label}`.slice(0, 200) });
+      markInspected(d.side || side, COMPONENT_OF[d.location]);
+      runGrade();
+    });
+    body.append(row);
+  }
+  const det = document.createElement("details");
+  det.innerHTML = "<summary class=\"link-btn\">What this can't tell you</summary><ul class=\"sc-limits\"></ul>";
+  for (const l of c.limitations) { const li = document.createElement("li"); li.textContent = l; $("ul", det).append(li); }
+  body.append(det);
+}
+
+// Draw the photo-check overlays on the card viewer (coordinates are in the flattened scan, margin included).
+function drawSuspects(ctx, scan, X, Y, color) {
+  if (!state.showSuspects || !scan || !X) return;
+  const sev = { micro: color("--good", "#178a5d"), minor: color("--warn", "#b26b00"), moderate: color("--bad", "#c2362f"), major: color("--bad", "#c2362f") };
+  const shapes = [...((scan.quality && scan.quality.overlays) || []), ...((scan.check && scan.check.overlays) || [])];
+  ctx.save();
+  ctx.lineWidth = 3;
+  for (const o of shapes) {
+    const likely = o.kind === "edge" || o.kind === "corner" ? o.likely : false;
+    if (o.kind === "glare") { ctx.fillStyle = "rgba(255, 214, 10, 0.35)"; ctx.strokeStyle = "transparent"; }
+    else if (o.kind === "unassessable") { ctx.fillStyle = "rgba(150, 156, 168, 0.28)"; ctx.strokeStyle = "transparent"; }
+    else { ctx.fillStyle = "transparent"; ctx.strokeStyle = likely ? sev[o.severity] || sev.minor : "rgba(190, 196, 208, 0.9)"; ctx.setLineDash(likely ? [] : [6, 5]); }
+    if (o.type === "rect") {
+      const x = X(o.x), y = Y(o.y), w = o.w * (X(1) - X(0)), h = o.h * (Y(1) - Y(0));
+      const pad = o.kind === "edge" || o.kind === "corner" ? 4 : 0;
+      ctx.fillRect(x - pad, y - pad, w + 2 * pad, h + 2 * pad);
+      if (o.kind === "edge" || o.kind === "corner") ctx.strokeRect(x - pad, y - pad, w + 2 * pad, h + 2 * pad);
+    } else if (o.type === "polyline" && o.points && o.points.length) {
+      ctx.beginPath();
+      o.points.forEach(([px, py], i) => (i ? ctx.lineTo(X(px), Y(py)) : ctx.moveTo(X(px), Y(py))));
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+/* ---------------------------------------------------------------- identify the card + reference image */
+
+function clearReference() {
+  if (state.reference && state.reference.objectUrl) URL.revokeObjectURL(state.reference.objectUrl);
+  const had = !!state.reference;
+  state.reference = null;
+  $("#reference-panel").hidden = true;
+  if (had && state.scans.front) { runInspection("front"); renderScanCheck(); viewer.render(); }
+}
+
+function showReference() {
+  const r = state.reference;
+  $("#reference-panel").hidden = !r;
+  if (!r) return;
+  $("#reference-img").src = httpsUrl(r.thumb_url) || httpsUrl(r.image_url) || r.objectUrl || "";
+  $("#reference-name").textContent = r.name || "Your reference image";
+  const src = $("#reference-source");
+  src.textContent = r.source === "user" ? "Source: an image you supplied." : `Source: ${r.source}, matched by set and number and confirmed by you. `;
+  if (httpsUrl(r.source_url)) {
+    const a = document.createElement("a");
+    a.href = r.source_url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = "Open the source";
+    src.append(a);
+  }
+  const notes = [];
+  if (r.problems && r.problems.length) notes.push(`Not used for comparison: ${r.problems.join(" ")}`);
+  else if (r.usable) notes.push(`Printed white/light areas on the front are ignored when looking for whitening (${r.coverage}% of the edge band marked).`);
+  else if (r.image_readable === false) notes.push("This image host doesn't allow reading its pixels, so it is shown for you to compare by eye only. Save the image and add it as a file to use it for printed-white masking.");
+  else notes.push("Loading the image for comparison…");
+  $("#reference-checks").textContent = notes.join(" ");
+}
+
+async function prepareReference(ref) {
+  // Decode the reference and judge whether it can be used; never throws.
+  if (ref.image_readable === false && !ref.image) return;
+  try {
+    ref.rgba = await Identify.loadReferenceRGBA(ref);
+    const chk = Identify.checkReference(ref.rgba);
+    ref.usable = chk.usable;
+    ref.problems = chk.usable ? [] : chk.reasons;
+    if (chk.usable && state.scans.front) {
+      const mask = Identify.printedMask(ref.rgba, state.scans.front.result.warped, state.scans.front.margin);
+      ref.coverage = Math.round(Identify.maskCoverage(mask, state.scans.front.width, state.scans.front.height, state.scans.front.margin) * 100);
+    }
+  } catch (err) {
+    ref.usable = false;
+    ref.problems = ["The image couldn't be loaded for comparison."];
+  }
+}
+
+async function setReference(ref) {
+  if (state.reference && state.reference.objectUrl) URL.revokeObjectURL(state.reference.objectUrl);
+  state.reference = ref;
+  showReference();
+  await prepareReference(ref);
+  if (state.reference !== ref) return;  // replaced meanwhile
+  showReference();
+  runInspection("front");
+  renderScanCheck();
+  viewer.render();
+}
+
+function setStatus(text) { $("#id-status").textContent = text; }
+
+function confirmCandidate(c) {
+  leaveExample();
+  const set = (id, v) => { if (v) $(`#${id}`).value = v; };
+  set("card-name", c.name);
+  set("card-set", c.set_name);
+  set("card-set-code", c.set_code);
+  set("card-number", c.number);
+  set("card-year", c.year);
+  if (c.rarity) {
+    const sel = $("#card-rarity");
+    if (![...sel.options].some((o) => o.value === c.rarity)) {  // the database's wording may differ from our list
+      const o = document.createElement("option");
+      o.value = o.textContent = c.rarity;
+      sel.append(o);
+    }
+    sel.value = c.rarity;
+  }
+  renderDetails();
+  saveDraft();
+  $("#id-results").hidden = true;
+  setStatus(`Confirmed: ${c.name}. Finish and language are left for you to set.`);
+  setReference({ image_url: c.image_url, thumb_url: c.thumb_url, source: c.source, source_url: c.source_url, name: `${c.name}${c.variant ? ` · ${c.variant}` : ""}`, image_readable: c.image_readable });
+  state.market = c.market || null;
+  state.tcgplayerId = c.tcgplayer_id || "";
+  loadPrices({ force: true });
+}
+
+function idNote(box, text) {
+  const p = document.createElement("p");
+  p.className = "id-note";
+  p.textContent = text;
+  box.append(p);
+}
+
+function renderManualReference(box) {
+  const wrap = document.createElement("div");
+  wrap.className = "id-manual";
+  wrap.innerHTML = '<label>Use your own reference image (link or file)<input type="url" placeholder="https://… image link" autocomplete="off"></label><input type="file" accept="image/png,image/jpeg,image/webp"><button type="button" class="btn small">Use this reference</button>';
+  $("button", wrap).addEventListener("click", async () => {
+    const file = $("input[type=file]", wrap).files[0];
+    const url = $("input[type=url]", wrap).value.trim();
+    const res = Identify.manualReference(file ? { file } : { url });
+    if (!res.ok) { setStatus(res.error); return; }
+    const ref = { source: "user", name: file ? file.name : "Your reference image", image_readable: true };
+    if (file) { ref.image = file; ref.objectUrl = URL.createObjectURL(file); } else ref.image_url = res.image_url;
+    box.hidden = true;
+    setStatus("Reference added. Nothing is inferred from it beyond ignoring printed white near the edges.");
+    setReference(ref);
+  });
+  box.append(wrap);
+}
+
+function renderCandidates(res, reading = null) {
+  const box = $("#id-results");
+  box.innerHTML = "";
+  box.hidden = false;
+  if (reading) idNote(box, `Read from your photo: ${[reading.name && `"${reading.name}"`, reading.number, reading.set_code].filter(Boolean).join(" · ")}. Text recognition can misread a letter or digit, so compare the pictures before you pick.`);
+  if (res.error || !res.candidates.length) {
+    idNote(box, res.error || "No matching card found.");
+    idNote(box, "Nothing is being used as a reference. You can fill in the details by hand, or supply a reference image yourself.");
+    renderManualReference(box);
+    setStatus("Not identified.");
+    return;
+  }
+  setStatus(res.needs_confirmation ? "Several cards could match. Pick yours, or none." : "Check this is your exact card, including the variant.");
+  idNote(box, "Look closely at the artwork, frame and any foil pattern: alternate versions of the same number look alike. Nothing is used until you confirm.");
+  for (const c of res.candidates.slice(0, 6)) {
+    const row = document.createElement("div");
+    row.className = "id-cand";
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = httpsUrl(c.thumb_url) || httpsUrl(c.image_url);
+    const info = document.createElement("div");
+    const b = document.createElement("b");
+    b.textContent = c.name;
+    const line = document.createElement("span");
+    line.textContent = [c.set_name, c.number, c.rarity, c.variant].filter(Boolean).join(" · ");
+    const ev = document.createElement("span");
+    ev.textContent = ` ${Math.round(c.confidence * 100)}% match: ${(c.evidence || []).join("; ")}`;
+    info.append(b, line, document.createElement("br"), ev);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn small";
+    btn.textContent = "This is my card";
+    btn.addEventListener("click", () => confirmCandidate(c));
+    row.append(img, info, btn);
+    box.append(row);
+  }
+  renderManualReference(box);
+}
+
+async function findCard() {
+  const btn = $("#find-card");
+  const c = assessment().card;
+  if (!c.set_code && !c.number && !c.name) { setStatus("Enter a set code and number (or a name) first."); return; }
+  btn.disabled = true;
+  setStatus("Looking it up…");
+  let res;
+  try {
+    res = await Identify.candidates({ game: state.game, set_code: c.set_code, number: c.number, name: c.name, language: c.language }, { fetch: (...a) => window.fetch(...a) });
+  } catch (err) {
+    res = { candidates: [], error: "The lookup failed (offline, or this page can't reach the card database)." };
+  }
+  btn.disabled = false;
+  renderCandidates(res);
+}
+
+/* ---------------------------------------------------------------- read the card from the photo */
+
+let recognizer = null;
+
+/** The front photo plus the card outline (full resolution), or the flattened card when the photo is gone. */
+function ocrSource() {
+  const s = state.scans.front;
+  if (!s) return null;
+  if (s.photo && s.corners) return { img: s.photo, H: Vision.warpMatrix(s.corners, 0) };
+  return s.result ? CardOCR.fromWarped(s.result.warped, s.margin) : null;
+}
+
+async function readFromPhoto({ auto = false } = {}) {
+  const src = ocrSource();
+  if (!src) { if (!auto) setStatus("Add a front photo first."); return; }
+  const btn = $("#read-card");
+  btn.disabled = true;
+  setDetailsEditing(true);
+  if (!recognizer) recognizer = CardOCR.browserRecognizer(setStatus);
+  setStatus("Reading the card…");
+  let reading;
+  try {
+    reading = await CardOCR.read(src, state.game, recognizer);
+  } catch (err) {
+    btn.disabled = false;
+    setStatus(`${(err && err.message) || "Couldn't read the card."} Type the name and number, then tap Find this card online.`);
+    return;
+  }
+  btn.disabled = false;
+  if (!reading.found) {
+    setStatus("Couldn't read the name or number from this photo (glare, a holo pattern, or a non-English card). Type them, then tap Find this card online.");
+    return;
+  }
+  leaveExample();
+  // A confirmed reference belongs to the card it was confirmed for; a new reading has to be confirmed again.
+  if (state.reference && state.reference.source !== "user") clearReference();
+  state.market = null;
+  state.tcgplayerId = "";
+  if (reading.name && (!auto || !$("#card-name").value.trim())) $("#card-name").value = reading.name;
+  if (reading.number) {
+    $("#collector-line").value = [reading.set_code, reading.number, reading.language].filter(Boolean).join(" · ");
+    $("#card-number").value = reading.number;
+    if (reading.set_code) $("#card-set-code").value = reading.set_code;
+    if (reading.language) $("#card-language").value = reading.language === "JA" ? "JP" : reading.language;
+  }
+  renderDetails();
+  saveDraft();
+  setStatus("Looking it up…");
+  let res = { candidates: [] };
+  for (const q of CardOCR.queries(reading, state.game)) {
+    try {
+      res = await Identify.candidates(q, { fetch: (...a) => window.fetch(...a) });
+    } catch (err) {
+      res = { candidates: [], error: "The lookup failed (offline, or this page can't reach the card database)." };
+    }
+    if (res.candidates && res.candidates.length) break;
+  }
+  renderCandidates(res, reading);
+}
+
+/* ---------------------------------------------------------------- prices */
+
+const PC_TOKEN_KEY = "cardGradingLab.pricecharting.token";  // never part of backups, drafts or History
+const pcStorage = () => { try { return window.localStorage; } catch (_) { return null; } };
+const pcToken = () => { try { return (pcStorage() && pcStorage().getItem(PC_TOKEN_KEY)) || ""; } catch (_) { return ""; } };
+
+function priceCard() {
+  const c = assessment().card;
+  return { game: c.game, name: $("#card-name").value.trim(), set_name: c.set_name, number: c.number, finish: c.finish };
+}
+const priceKey = (c) => [c.game, c.name, c.set_name, c.number, c.finish].map((v) => String(v || "").toLowerCase()).join("|");
+
+async function loadPrices({ force = false } = {}) {
+  const card = priceCard();
+  const key = priceKey(card);
+  if (!card.name || !card.number) { state.price = { key, status: "idle" }; renderPrices(); return; }
+  const token = pcToken();
+  if (!token) { state.price = { key, status: "no-token" }; renderPrices(); return; }
+  if (!force && state.price.key === key && ["loading", "ok"].includes(state.price.status)) return;
+  state.price = { key, status: "loading" };
+  renderPrices();
+  const opts = { token, fetch: (...a) => window.fetch(...a), storage: pcStorage() };
+  try {
+    const search = await Prices.search(card, opts);
+    if (state.price.key !== key) return;
+    if (!search.matches.length) throw new Error(search.error || "PriceCharting has no product matching this card.");
+    const chosen = search.best || search.matches[0];
+    const product = await Prices.product(chosen.id, opts);
+    if (state.price.key !== key) return;
+    state.price = { key, status: "ok", search, chosenId: chosen.id, product };
+  } catch (err) {
+    if (state.price.key === key) state.price = { key, status: "error", error: (err && err.message) || "The price lookup failed." };
+  }
+  renderPrices();
+}
+
+async function choosePriceVersion(id) {
+  const p = state.price;
+  if (!p.search) return;
+  const key = p.key;
+  state.price = { ...p, status: "loading", chosenId: id };
+  renderPrices();
+  try {
+    const product = await Prices.product(id, { token: pcToken(), fetch: (...a) => window.fetch(...a), storage: pcStorage() });
+    if (state.price.key === key) state.price = { ...state.price, status: "ok", product };
+  } catch (err) {
+    if (state.price.key === key) state.price = { ...state.price, status: "error", error: (err && err.message) || "The price lookup failed." };
+  }
+  renderPrices();
+}
+
+function priceNote(box, text, cls = "") {
+  const p = document.createElement("p");
+  p.className = `pr-note ${cls}`.trim();
+  p.textContent = text;
+  box.append(p);
+  return p;
+}
+
+function priceLink(box, href, text) {
+  if (!httpsUrl(href)) return;
+  const a = document.createElement("a");
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = text;
+  box.append(a);
+}
+
+function renderMarket(box) {
+  // Free ungraded prices from the card database (TCGdex), when there's no PriceCharting access.
+  const m = state.game === "pokemon" ? Prices.fromTcgdex(state.market) : null;
+  if (!m) return;
+  const parts = [];
+  if (m.tcgplayer) {
+    const v = m.tcgplayer.versions[0];
+    parts.push(`TCGplayer market $${v.market.toFixed(2)}${m.tcgplayer.versions.length > 1 ? ` (${v.version})` : ""}`);
+  }
+  if (m.cardmarket) parts.push(`Cardmarket trend €${m.cardmarket.trend.toFixed(2)}`);
+  const when = (m.tcgplayer && m.tcgplayer.updated) || (m.cardmarket && m.cardmarket.updated) || "";
+  priceNote(box, `Ungraded, from the card database (TCGdex): ${parts.join(" · ")}${when ? `, updated ${when.slice(0, 10)}` : ""}. Not a graded price.`);
+}
+
+function renderPrices() {
+  const box = $("#prices-body");
+  if (!box) return;
+  box.innerHTML = "";
+  const card = priceCard();
+  const has = !!(card.name && card.number);
+  $("#refresh-prices").hidden = !has;
+  $("#pc-status").textContent = pcToken() ? "A token is saved on this phone." : "";
+  if (!has) {
+    priceNote(box, "Confirm which card this is first: Card details → Read from photo, or Find this card online.");
+    return;
+  }
+  const p = state.price;
+  const stale = p.key !== priceKey(card);
+  if (stale && p.status !== "idle") priceNote(box, "The card details changed. Tap Update for this card's prices.");
+  if (!stale && p.status === "loading") priceNote(box, "Looking up prices…");
+  if (!stale && p.status === "error") priceNote(box, p.error, "warn");
+  if (p.status === "no-token" || !pcToken()) priceNote(box, "Graded prices need PriceCharting access (below). Without it, open the card on PriceCharting to see every grade.");
+  if (!stale && p.status === "ok" && p.product) {
+    const prod = p.product;
+    const head = document.createElement("div");
+    head.className = "pr-product";
+    head.innerHTML = "<b></b><span></span>";
+    $("b", head).textContent = prod.product_name;
+    $("span", head).textContent = prod.console_name;
+    box.append(head);
+    const matches = p.search.matches.filter((m) => m.score > 0).slice(0, 8);
+    if (matches.length > 1) {
+      const sel = document.createElement("select");
+      sel.className = "pr-choose";
+      sel.setAttribute("aria-label", "PriceCharting version");
+      for (const m of matches) {
+        const o = document.createElement("option");
+        o.value = m.id;
+        o.textContent = `${m.product_name} · ${m.console_name}`;
+        sel.append(o);
+      }
+      sel.value = p.chosenId;
+      sel.addEventListener("change", () => choosePriceVersion(sel.value));
+      box.append(sel);
+    }
+    if (p.search.needs_choice) priceNote(box, "Check this is your exact version: 1st Edition, Shadowless, reverse holo, foil and promo copies are priced separately.", "warn");
+    const report = state.report;
+    const rows = report ? Prices.forReport(prod, report) : { ungraded: prod.prices["loose-price"], rows: [], ceiling: false };
+    const table = document.createElement("table");
+    table.className = "pr-table";
+    const add = (label, cents, small = "", cls = "") => {
+      const tr = document.createElement("tr");
+      if (cls) tr.className = cls;
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = label;
+      if (small) { const sm = document.createElement("small"); sm.textContent = small; $("th", tr).append(sm); }
+      $("td", tr).textContent = Prices.money(cents);
+      table.append(tr);
+    };
+    add("Ungraded", rows.ungraded);
+    for (const r of rows.rows) {
+      const grade = r.label.replace(/^Up to /, "").replace(/ · incomplete$/, "");
+      add(`${r.company} ${r.ceiling ? "up to " : ""}${grade}`, r.cents, [r.basis && `PriceCharting: ${r.basis}.`, r.note].filter(Boolean).join(" "), r.ceiling ? "pr-ceiling" : "");
+    }
+    box.append(table);
+    if (rows.ceiling) priceNote(box, "These grades are best-case ceilings, so the graded prices are the most this card could sell for at those grades, not what it's worth. The real grade may be lower.", "warn");
+    const ladder = document.createElement("details");
+    ladder.className = "pr-ladder";
+    ladder.innerHTML = "<summary>All grades</summary>";
+    const lt = document.createElement("table");
+    lt.className = "pr-table";
+    for (const l of Prices.ladder(prod)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = l.label;
+      $("td", tr).textContent = Prices.money(l.cents);
+      lt.append(tr);
+    }
+    ladder.append(lt);
+    box.append(ladder);
+    priceNote(box, `Prices from PriceCharting, fetched ${new Date(prod.fetched_at).toLocaleDateString()}. Grades 1-9.5 are PriceCharting's prices for any grading company.`);
+  }
+  if (p.status !== "ok" || stale) renderMarket(box);
+  const links = document.createElement("div");
+  links.className = "pr-links";
+  if (!stale && p.status === "ok" && p.product) priceLink(links, Prices.productUrl(p.product), "Open on PriceCharting");
+  else priceLink(links, Prices.searchUrl(card), "See prices on PriceCharting");
+  if (state.tcgplayerId && /^\d+$/.test(state.tcgplayerId)) priceLink(links, `https://www.tcgplayer.com/product/${state.tcgplayerId}`, "TCGplayer");
+  box.append(links);
+}
+
+function savePriceToken() {
+  const t = $("#pc-token").value.trim();
+  if (!Prices.validToken(t)) { $("#pc-status").textContent = "That doesn't look like a PriceCharting token (40 letters and digits)."; return; }
+  try { pcStorage().setItem(PC_TOKEN_KEY, t); } catch (_) { $("#pc-status").textContent = "This browser won't store it (private mode?)."; return; }
+  $("#pc-token").value = "";
+  $("#pc-settings").open = false;
+  loadPrices({ force: true });
+}
+
+function removePriceToken() {
+  try { pcStorage().removeItem(PC_TOKEN_KEY); } catch (_) { /* blocked */ }
+  Prices.clearCache(pcStorage());  // PriceCharting data may only be kept while subscribed
+  $("#pc-token").value = "";
+  state.price = { key: "", status: "no-token" };
+  renderPrices();
+}
+
+/* ---------------------------------------------------------------- grading + report */
 
 function assessment() {
   return {
     card: {
+      game: state.game,
       name: $("#card-name").value.trim(),
-      set_name: $("#card-set").value.trim(),
-      number: $("#card-number").value.trim(),
-      holo: $("#card-holo").checked,
+      ...Object.fromEntries(Object.entries(DETAIL_FIELDS).map(([id, key]) => [key, $(`#${id}`).value.trim()])),
+      holo: ["Holo", "Reverse holo", "Foil", "Etched / textured", "Metal"].includes($("#card-finish").value),
       notes: "",
     },
-    centering: state.centering,
+    // Raw shares plus where they came from: the engine counts an unread axis as 55/45.
+    centering: { front: { ...state.centering.front }, back: { ...state.centering.back } },
+    centering_evidence: { front: { ...state.evidence.front }, back: { ...state.evidence.back } },
     defects: state.defects,
+    inspected: { front: [...state.inspected.front], back: [...state.inspected.back] },
+    photo_limits: { front: [...state.photoLimits.front], back: [...state.photoLimits.back] },
+    inspected_in_hand: { front: [...state.inHand.front], back: [...state.inHand.back] },
   };
 }
 
@@ -514,65 +1529,163 @@ function runGrade() {
   const a = assessment();
   try {
     state.report = Grading.gradeAll(a, CRITERIA);
-    renderReport(state.report, a.card);
   } catch (err) {
     toast(`Grading failed: ${err.message}`);
+    return;
   }
-  if (!state.example) localStore.write(KEYS.draft, a);
+  renderReport();
+  saveDraft();
 }
 
-const bigGrade = (g) => (g.tier >= 99 ? "—" : g.grade % 1 === 0 ? g.grade.toFixed(0) : g.grade.toFixed(1));
+const gradeText = (g) => (g.grade % 1 === 0 ? g.grade.toFixed(0) : g.grade.toFixed(1));
+// An incomplete grade is a ceiling (this app's convention): shown as "≤ 10", never as a plain 10.
+const bigGrade = (g) => (g.tier >= 99 ? "—" : g.complete === false ? `≤ ${gradeText(g)}` : gradeText(g));
+const bigGradeHTML = (g) => (g.tier >= 99 ? "—" : g.complete === false ? `<span class="ceil">≤</span>${gradeText(g)}` : gradeText(g) + (isPristine(g) ? "<small>P</small>" : ""));
 const isPristine = (g) => g.label.startsWith("Pristine");
+// Label without the "Up to … · incomplete" wrapper, for the short tile/score labels.
+const baseLabel = (g) => g.label.replace(/^Up to /, "").replace(/ · incomplete$/, "");
+const conditionWord = (v) => CONDITION_WORDS.find(([min]) => v >= min)[1];
+const status = (v) => (v >= 10 ? "good" : v >= 8.5 ? "warn" : "bad");
 
-function renderGradeBar(report) {
-  const btn = $("#grade-bar-btn");
-  btn.innerHTML = "";
-  btn.setAttribute("aria-label", `${report.summary} Tap for details.`);
+// Rank for the "Best shot" badge: the highest grade wins, with Pristine and Black Label above a plain 10.
+const gradeRank = (g) => (g.tier >= 99 ? -1 : g.label.includes("Black Label") ? 11 : isPristine(g) ? 10.5 : g.grade);
+
+function bestCompany(report) {
+  if (report.complete === false) return null;  // a ceiling isn't a grade, so there's no best shot yet
+  let best = null;
+  for (const g of Object.values(report.grades)) if (!best || gradeRank(g) > gradeRank(best)) best = g;
+  return best;
+}
+
+function renderTiles(report) {
+  const box = $("#tiles");
+  box.innerHTML = "";
+  const top = bestCompany(report);
   for (const g of Object.values(report.grades)) {
-    const item = document.createElement("span");
-    item.className = "gb-item" + (g.company === report.best_fit ? " best" : "");
-    item.dataset.co = g.company;
-    item.innerHTML = `<span class="gb-co">${g.company}</span><span class="gb-grade">${bigGrade(g)}${isPristine(g) ? "<small>P</small>" : ""}</span>`;
-    btn.append(item);
+    const best = g === top && g.tier < 99;
+    const incomplete = g.complete === false;
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = "tile" + (best ? " best" : "") + (incomplete ? " incomplete" : "");
+    tile.dataset.co = g.company;
+    tile.innerHTML = `<span class="tile-co">${g.company}${best ? '<span class="tile-badge">Best shot</span>' : ""}</span>
+      ${incomplete ? '<span class="tile-flag">Incomplete</span>' : ""}
+      <span class="tile-grade"></span><span class="tile-label"></span><span class="tile-sub"></span>`;
+    $(".tile-grade", tile).innerHTML = bigGradeHTML(g);
+    $(".tile-label", tile).textContent = (incomplete ? "Up to " : "") +
+      baseLabel(g).replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
+    $(".tile-sub", tile).textContent = g.company === "TAG" && g.score != null ? `${incomplete ? "≤ " : ""}${g.score} / 1000` : g.qualifiers.length ? g.qualifiers.join(" · ") : " ";
+    tile.addEventListener("click", () => {
+      const d = $(`.company[data-co="${g.company}"]`);
+      d.open = true;
+      d.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    box.append(tile);
+  }
+  const line = $("#best-line");
+  line.classList.toggle("incomplete", !top);
+  line.textContent = !top
+    ? `Incomplete: not checked yet: ${report.unassessed.join(", ")}. These are ceilings, not grades.`
+    : top.tier >= 99
+      ? "This card looks altered, so no company would give it a number."
+      : `Your best shot is ${top.company} ${top.label}. Tap a grade for the breakdown.`;
+}
+
+function renderScore(report) {
+  const g = report.grades.TAG;
+  const altered = g.tier >= 99;
+  const incomplete = report.complete === false;
+  $(".score-block").classList.toggle("incomplete", incomplete);
+  $("#score-incomplete").hidden = !incomplete;
+  $("#score-missing").hidden = !incomplete;
+  $("#score-missing-list").textContent = incomplete ? report.unassessed.join(", ") : "";
+  $("#score-grade").innerHTML = bigGradeHTML(g);
+  $("#score-label").textContent = altered ? g.label : (incomplete ? "Up to " : "") + baseLabel(g).replace(/\s*\d+(\.\d)?$/, "");
+  $("#score-num").textContent = altered ? "—" : incomplete ? `≤ ${g.score}` : g.score;
+  $("#score-bar").style.width = altered ? "0%" : `${Math.max(0, ((g.score - 100) / 900) * 100)}%`;
+  const f = state.centering.front, b = state.centering.back;
+  $("#centering-summary").textContent = `${splitText(Math.max(f.lr, f.tb))} · ${splitText(Math.max(b.lr, b.tb))}`;
+}
+
+function renderMetrics(report) {
+  // Rank only complete grades (re-graded with the current rules): a ceiling can't be ranked.
+  const score = report.complete === false ? null : report.grades.TAG.score;
+  const others = localStore.cards().map((c) => ({ c, r: currentReport(c) }))
+    .filter(({ c, r }) => c.id !== state.savedId && r && r.complete !== false && r.grades.TAG.score != null);
+  const rank = score == null ? null : 1 + others.filter(({ r }) => r.grades.TAG.score > score).length;
+  const f = state.centering.front, ev = state.evidence.front;
+  const items = [
+    [String(state.defects.length), "DINGS"],
+    [rank == null ? "—" : `#${rank}/${others.length + 1}`, "Rank in History"],
+    [ev.lr === "unread" || ev.tb === "unread" ? (state.scans.front ? "Check guides" : "Not measured") : splitText(Math.max(f.lr, f.tb)), "Front centering"],
+  ];
+  const box = $("#metrics");
+  box.innerHTML = "";
+  for (const [value, label] of items) {
+    const div = document.createElement("div");
+    div.className = "metric";
+    div.innerHTML = "<b></b><span></span>";
+    $("b", div).textContent = value;
+    $("span", div).textContent = label;
+    box.append(div);
+  }
+}
+
+function renderSubgrades(report) {
+  const box = $("#subgrades");
+  const areas = report.grades.TAG.subgrades;
+  box.innerHTML = "";
+  if (report.grades.TAG.tier >= 99) {
+    box.innerHTML = '<p class="hint" style="grid-column: 1 / -1">No subgrades: the card is logged as altered.</p>';
+    return;
+  }
+  box.insertAdjacentHTML("beforeend", '<span></span><span class="col-head">Front</span><span class="col-head">Back</span>');
+  for (const comp of ["centering", "corners", "edges", "surface"]) {
+    const name = document.createElement("span");
+    name.className = "row-name";
+    name.textContent = cap(comp);
+    box.append(name);
+    for (const side of SIDES) {
+      const v = areas[`${side} ${comp}`];
+      const cell = document.createElement("div");
+      if (v == null) {  // not inspected: no score, only a ceiling
+        cell.className = "sub-cell unchecked";
+        cell.innerHTML = '<b>Not checked</b><span class="sbar"></span>';
+        cell.setAttribute("aria-label", `${side} ${comp} not checked`);
+        box.append(cell);
+        continue;
+      }
+      cell.className = `sub-cell ${v >= 950 ? "good" : v >= 850 ? "warn" : "bad"}`;
+      cell.innerHTML = '<b></b><span class="sbar"><span></span></span>';
+      $("b", cell).textContent = v;
+      $(".sbar span", cell).style.width = `${Math.max(2, ((v - 100) / 900) * 100)}%`;
+      cell.setAttribute("aria-label", `${side} ${comp} ${v} out of 1000`);
+      box.append(cell);
+    }
   }
 }
 
 function subLabel(company, v) {
-  if (typeof v !== "number" || company === "TAG") return String(v);  // TAG areas are points
+  if (v == null) return "not checked";
+  if (typeof v !== "number" || company === "TAG") return String(v);
   return v >= 10.5 ? "10P" : String(v);
 }
 
-function renderReport(report, card = {}) {
-  renderGradeBar(report);
-  const box = $("#grades");
+function renderCompanies(report) {
+  const box = $("#companies");
+  const open = new Set($$(".company[open]", box).map((d) => d.dataset.co));
   box.innerHTML = "";
-  $("#best-fit").textContent = report.summary.split(". ")[0] + ".";
-  $("#disclaimer").textContent = report.disclaimer;
-  const cardLine = [card.name || "Your card", card.number].filter(Boolean).join(" · ");
   for (const g of Object.values(report.grades)) {
-    const slab = document.createElement("div");
-    slab.className = "slab" + (g.company === report.best_fit ? " best" : "");
-    slab.dataset.co = g.company;
-    slab.innerHTML = `
-      <div class="slab-label">
-        <span class="slab-co">${g.company}</span>
-        <div class="slab-grade"><div class="slab-num"></div><div class="slab-desc"></div></div>
-        <span class="slab-card"></span>
-      </div>
-      <div class="slab-body">
-        <div class="slab-sub"></div>
-        <div class="chips"></div>
-        <div class="slab-alt"></div>
-        <details><summary>Why this grade</summary><ul></ul></details>
-      </div>`;
-    $(".slab-num", slab).innerHTML = `${bigGrade(g)}${isPristine(g) ? "<small>PRISTINE</small>" : ""}`;
-    $(".slab-desc", slab).textContent = g.label.replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
-    $(".slab-card", slab).textContent = cardLine;
-    $(".slab-sub", slab).textContent =
-      g.company === "TAG" && g.score != null ? `TAG Score ${g.score} / 1000`
-      : g.company === "PSA" ? "One overall grade. The component values are estimates."
-      : "Subgrades";
-    const chips = $(".chips", slab);
+    const d = document.createElement("details");
+    d.className = "company" + (g.complete === false ? " incomplete" : "");
+    d.dataset.co = g.company;
+    d.open = open.has(g.company);
+    d.innerHTML = `<summary><span class="co-code">${g.company}</span><span class="co-label"></span><span class="co-grade"></span></summary>
+      <div class="co-body"><div class="chips"></div><p class="co-alt"></p><ul class="why"></ul><ul class="notes"></ul></div>`;
+    $(".co-label", d).textContent = g.label;
+    $(".co-grade", d).textContent = bigGrade(g);
+    const chips = $(".chips", d);
+    if (g.score != null) chips.insertAdjacentHTML("beforeend", `<span class="chip">TAG Score <b>${g.score}</b></span>`);
     for (const q of g.qualifiers) {
       const c = document.createElement("span");
       c.className = "chip q";
@@ -582,67 +1695,299 @@ function renderReport(report, card = {}) {
     for (const [k, v] of Object.entries(g.subgrades)) {
       const c = document.createElement("span");
       c.className = "chip";
-      c.textContent = `${k} ${subLabel(g.company, v)}`;
+      c.innerHTML = `${k} <b></b>`;
+      $("b", c).textContent = subLabel(g.company, v);
       chips.append(c);
     }
-    $(".slab-alt", slab).textContent = g.alternatives.join(" · ");
-    const ul = $("ul", slab);
-    const reasons = g.limiting_factors.length ? g.limiting_factors : ["Nothing is holding this card back at this company."];
-    for (const r of [...reasons, ...g.notes]) {
+    const alt = $(".co-alt", d);
+    alt.textContent = g.alternatives.join(" · ");
+    alt.hidden = !g.alternatives.length;
+    const why = $(".why", d);
+    for (const r of g.limiting_factors.length ? g.limiting_factors : ["Nothing is holding this card back at this company."]) {
       const li = document.createElement("li");
       li.textContent = r;
-      ul.append(li);
+      why.append(li);
     }
-    box.append(slab);
+    const notes = $(".notes", d);
+    for (const n of g.notes) {
+      const li = document.createElement("li");
+      li.textContent = n;
+      notes.append(li);
+    }
+    box.append(d);
   }
 }
 
-/* ---------------------------------------------------------------- example card */
+function renderReport() {
+  const report = state.report;
+  if (!report) return;
+  renderScore(report);
+  renderDetails();
+  renderMetrics(report);
+  renderSubgrades(report);
+  renderTiles(report);
+  renderDefects();
+  renderScanCheck();
+  renderCompanies(report);
+  renderPrices();
+  viewer.render();
+  $("#disclaimer").textContent = report.disclaimer;
+}
+
+/* ---------------------------------------------------------------- card details */
+
+function fillSelect(sel, options, labels = null) {
+  const current = sel.value;
+  sel.innerHTML = "";
+  for (const v of options) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v === "" ? "—" : labels ? labels[v] : v;
+    sel.append(o);
+  }
+  if (options.includes(current)) sel.value = current;
+}
+
+function renderDetails() {
+  const c = assessment().card;
+  const rows = [
+    ["Game", gameInfo(state.game).label],
+    ["Set", [c.set_name, c.set_code && `(${c.set_code})`].filter(Boolean).join(" ")],
+    ["Number", c.number],
+    ["Rarity", c.rarity],
+    ["Finish", c.finish],
+    ["Card type", c.card_type],
+    ["Language", c.language ? LANGUAGES[c.language] || c.language : ""],
+    ["Year", c.year],
+  ];
+  const dl = $("#details-view");
+  dl.innerHTML = "";
+  for (const [k, v] of rows) {
+    const div = document.createElement("div");
+    div.innerHTML = "<dt></dt><dd></dd>";
+    $("dt", div).textContent = k;
+    const dd = $("dd", div);
+    dd.textContent = v || "Not set";
+    dd.classList.toggle("empty", !v);
+    dl.append(div);
+  }
+  $("#identity-sub").textContent = [c.subtitle, c.card_type].filter(Boolean).join(" · ");
+}
+
+function setDetailsEditing(on) {
+  $("#details-form").hidden = !on;
+  $("#details-view").hidden = on;
+  $("#edit-details").textContent = on ? "Close" : "Edit";
+  $("#edit-details").setAttribute("aria-expanded", String(on));
+}
+
+function clearDetails() {
+  for (const id of Object.keys(DETAIL_FIELDS)) $(`#${id}`).value = "";
+  $("#card-language").value = "EN";
+  $("#collector-line").value = "";
+}
+
+function fillDetails(card) {
+  for (const [id, key] of Object.entries(DETAIL_FIELDS)) {
+    const el = $(`#${id}`);
+    const v = card[key] == null ? "" : String(card[key]);
+    if (el.tagName === "SELECT" && v && ![...el.options].some((o) => o.value === v)) {
+      const o = document.createElement("option");  // keep values from older saves or other games
+      o.value = v;
+      o.textContent = v;
+      el.append(o);
+    }
+    el.value = v;
+  }
+  if (!card.language) $("#card-language").value = "EN";
+}
+
+/* ---------------------------------------------------------------- game */
+
+function renderGame() {
+  const g = gameInfo(state.game);
+  $$("#game-seg button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.game === state.game)));
+  const tips = $("#tips");
+  tips.innerHTML = "";
+  for (const t of g.tips) {
+    const li = document.createElement("li");
+    li.textContent = t;
+    tips.append(li);
+  }
+  $("#card-name").placeholder = g.placeholders.name;
+  $("#card-set").placeholder = g.placeholders.set;
+  $("#card-number").placeholder = g.placeholders.number;
+  fillSelect($("#card-rarity"), ["", ...g.rarities]);
+  $("#condition-hint").textContent = g.hint;
+  $("#game-chip").textContent = g.label;
+}
+
+function setGame(game, { remember = true } = {}) {
+  state.game = GAMES[game] ? game : "pokemon";
+  if (remember) localStore.write(KEYS.game, state.game);
+  renderGame();
+}
+
+/* ---------------------------------------------------------------- views */
+
+function setView(view, { animate = true } = {}) {
+  state.view = view;
+  $("#app").dataset.view = view;
+  $("#scan-screen").hidden = view !== "scan";
+  $("#report-screen").hidden = view !== "report";
+  window.scrollTo({ top: 0 });
+  if (view === "report") {
+    const screen = $("#report-screen");
+    screen.classList.remove("enter");
+    if (animate) { void screen.offsetWidth; screen.classList.add("enter"); }
+    renderCentering();
+    renderDefects();
+    runGrade();
+    const s = state.scans.front;
+    if (!state.example && !state.autoRead && s && s.photo && !$("#card-name").value.trim() && !$("#card-number").value.trim() && navigator.onLine !== false) {
+      state.autoRead = true;   // once per card: reading downloads the text reader the first time
+      readFromPhoto({ auto: true });
+    } else if (!state.example) {
+      loadPrices();
+    }
+  } else {
+    renderSlots();
+    renderResume();
+  }
+}
+
+function resetCard() {
+  state.scans = { front: null, back: null };
+  state.thumbs = { front: null, back: null };
+  state.centering = { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } };
+  state.defects = [];
+  state.inspected = { front: [], back: [] };
+  state.photoLimits = { front: [], back: [] };
+  state.inHand = { front: [], back: [] };
+  state.evidence = { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } };
+  state.activeSide = "front";
+  state.example = false;
+  state.report = null;
+  state.savedId = null;
+  state.market = null;
+  state.tcgplayerId = "";
+  state.price = { key: "", status: "idle" };
+  state.autoRead = false;
+  clearReference();
+  $("#id-results").hidden = true;
+  $("#card-name").value = "";
+  clearDetails();
+  setDetailsEditing(false);
+  $("#example-note").hidden = true;
+}
+
+function newScan() {
+  resetCard();
+  localStore.remove(KEYS.draft);
+  localStore.remove(KEYS.draftV2);
+  setView("scan");
+}
+
+/* ---------------------------------------------------------------- example + drafts */
 
 function showExample() {
+  resetCard();
+  const ex = gameInfo(state.game).example;
+  for (const side of SIDES) {
+    const photo = samplePhoto(side, state.game);
+    applyScan(side, Vision.scan(photo), photo);
+  }
+  state.defects = ex.defects.map((d) => ({ ...d }));
+  // The example card was fully inspected (in hand too), so it shows a complete grade.
+  state.inspected = { front: [...COMPONENTS], back: [...COMPONENTS] };
+  state.inHand = { front: [...COMPONENTS], back: [...COMPONENTS] };
+  $("#card-name").value = ex.name;
+  fillDetails({ ...ex.details, set_name: ex.set, number: ex.number });
   state.example = true;
-  $("#example-banner").hidden = false;
-  $("#card-name").value = "Charizard ex (example)";
-  $("#card-set").value = "Obsidian Flames";
-  $("#card-number").value = "223/197";
-  $("#card-holo").checked = true;
-  for (const side of SIDES) scanners[side].loadScan(Vision.scan(samplePhoto(side)), { quiet: true });
-  state.defects = [
-    { side: "back", location: "top_right", type: "corner_whitening", severity: "minor", note: null },
-    { side: "front", location: "surface", type: "holo_scratch", severity: "micro", note: "Only under a lamp" },
-  ];
-  renderDefects();
-  runGrade();
+  $("#example-note").hidden = false;
+  setView("report");
 }
 
 function leaveExample() {
   if (!state.example) return;
   state.example = false;
-  $("#example-banner").hidden = true;
-  if ($("#card-name").value === "Charizard ex (example)") $("#card-name").value = "Charizard ex";
+  $("#example-note").hidden = true;
+}
+
+function saveDraft() {
+  if (state.example || state.view !== "report") return;
+  localStore.write(KEYS.draft, { ...assessment(), thumbs: state.thumbs, saved_at: new Date().toISOString() });
+}
+
+function renderResume() {
+  const draft = localStore.draft();
+  const btn = $("#resume");
+  btn.hidden = !(draft && draft.centering);
+  if (!btn.hidden) btn.textContent = `Resume ${draft.card && draft.card.name ? draft.card.name : "last card"}`;
+}
+
+function loadAssessment(a, thumbs) {
+  resetCard();
+  setGame((a.card && a.card.game) || "pokemon", { remember: false });
+  $("#card-name").value = a.card.name || "";
+  fillDetails(a.card);
+  state.centering = { front: { ...a.centering.front }, back: { ...a.centering.back } };
+  state.defects = (a.defects || []).map((d) => ({ ...d }));
+  // Older saves have no inspection record: their areas start unchecked. Their centering was typed or
+  // measured before saving (the grading engine's default when evidence is missing).
+  const bySide = (x) => ({ front: [...((x || {}).front || [])], back: [...((x || {}).back || [])] });
+  state.inspected = bySide(a.inspected);
+  state.photoLimits = { front: Grading.photoLimitComponents(bySide(a.photo_limits).front), back: Grading.photoLimitComponents(bySide(a.photo_limits).back) };
+  state.inHand = bySide(a.inspected_in_hand);
+  const ev = a.centering_evidence || {};
+  state.evidence = {
+    front: { lr: "typed", tb: "typed", ...(ev.front || {}) },
+    back: { lr: "typed", tb: "typed", ...(ev.back || {}) },
+  };
+  state.thumbs = { front: (thumbs && thumbs.front) || null, back: (thumbs && thumbs.back) || null };
+  setView("report");
 }
 
 /* ---------------------------------------------------------------- history */
+
+// Saved reports are re-graded with the current rules (so older saves show as incomplete if nothing was
+// marked as checked). Cached per saved card: the rules don't change while the page is open.
+const regradeCache = new Map();
+function currentReport(c) {
+  const key = `${c.id}|${c.created_at}`;
+  if (!regradeCache.has(key)) {
+    let r = c.report || null;
+    try { r = Grading.gradeAll(c.assessment, CRITERIA); } catch (_) { /* keep the saved report */ }
+    regradeCache.set(key, r);
+  }
+  return regradeCache.get(key);
+}
 
 function renderHistory() {
   const list = $("#history-list");
   list.innerHTML = "";
   const cards = localStore.cards();
   if (!cards.length) {
-    list.innerHTML = '<li class="empty">No saved cards yet. Grade a card and tap Save card.</li>';
+    list.innerHTML = '<li class="empty">No saved cards yet. Scan a card and tap Save to History.</li>';
     return;
   }
   for (const c of cards) {
     const li = document.createElement("li");
-    li.innerHTML = `${c.front_thumb ? '<img alt="">' : '<div class="ph"></div>'}
+    li.innerHTML = `${c.front_thumb ? '<img alt="">' : '<span class="ph"></span>'}
       <div><div class="h-name"></div><div class="h-meta"></div><div class="h-grades"></div></div>
-      <div class="h-actions"><button type="button" class="ghost del" aria-label="Delete saved card">✕</button></div>`;
+      <button type="button" class="del" aria-label="Delete saved card">✕</button>`;
     if (c.front_thumb) $("img", li).src = c.front_thumb;
     const card = c.assessment.card;
-    $(".h-name", li).textContent = card.name || "(unnamed card)";
-    $(".h-meta", li).textContent = [card.set_name, card.number, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
-    $(".h-grades", li).textContent = Object.values(c.report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ");
-    li.addEventListener("click", () => loadCard(c.id));
+    $(".h-name", li).textContent = card.name || "Unnamed card";
+    $(".h-meta", li).textContent = [gameInfo(card.game).label, card.set_name, card.number, card.rarity, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
+    const report = currentReport(c);
+    $(".h-grades", li).textContent = report ? Object.values(report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ") : "";
+    if (report && report.complete === false) $(".h-grades", li).insertAdjacentHTML("afterbegin", '<span class="h-flag">Incomplete</span> · ');
+    li.addEventListener("click", () => {
+      $("#history").hidden = true;
+      loadAssessment(c.assessment, { front: c.front_thumb, back: c.back_thumb });
+      toast("Loaded from History");
+    });
     const del = $(".del", li);
     del.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -666,38 +2011,23 @@ function openHistory() {
   $("#history").hidden = false;
 }
 
-function loadCard(id) {
-  const saved = localStore.cards().find((c) => c.id === id);
-  if (!saved) return;
-  resetForm();
-  const a = saved.assessment;
-  $("#card-name").value = a.card.name || "";
-  $("#card-set").value = a.card.set_name || "";
-  $("#card-number").value = a.card.number || "";
-  $("#card-holo").checked = !!a.card.holo;
-  for (const side of SIDES) scanners[side].setValues(a.centering[side].lr, a.centering[side].tb);
-  state.defects = a.defects;
-  state.thumbs = { front: saved.front_thumb, back: saved.back_thumb };
-  renderDefects();
-  runGrade();
-  $("#history").hidden = true;
-  toast("Loaded saved card");
-}
-
 function saveCard() {
   leaveExample();
   runGrade();
-  const cards = localStore.cards();
-  const a = assessment();
+  const cards = localStore.cards().filter((c) => c.id !== state.savedId);  // saving again replaces the earlier save
+  state.savedId = `${Date.now()}`;
   cards.unshift({
-    id: `${Date.now()}`,
+    id: state.savedId,
     created_at: new Date().toISOString(),
-    assessment: a,
+    assessment: assessment(),
     report: state.report,
     front_thumb: state.thumbs.front,
     back_thumb: state.thumbs.back,
   });
-  if (localStore.saveCards(cards)) toast(`Saved. ${cards.length} card${cards.length === 1 ? "" : "s"} in History.`);
+  if (localStore.saveCards(cards)) {
+    toast(`Saved. ${cards.length} card${cards.length === 1 ? "" : "s"} in History.`);
+    renderMetrics(state.report);
+  }
   else toast("This browser isn't letting the app save. Copy a backup from History to keep your cards.");
 }
 
@@ -738,64 +2068,113 @@ function restoreFrom(text) {
   toast(added ? `Restored ${added} card${added === 1 ? "" : "s"}.` : "Those cards are already here.");
 }
 
-/* ---------------------------------------------------------------- reset / init */
-
-function resetForm() {
-  leaveExample();
-  for (const id of ["#card-name", "#card-set", "#card-number"]) $(id).value = "";
-  $("#card-holo").checked = false;
-  for (const side of SIDES) scanners[side].clear();
-  state.defects = [];
-  state.thumbs = { front: null, back: null };
-  state.pick = { side: null, location: null, severity: null };
-  $("#picked").textContent = "Select a spot on the card map";
-  $("#defect-type").innerHTML = "";
-  $("#defect-type").disabled = true;
-  $("#defect-note").value = "";
-  updateAddButton();
-  renderDefects();
-}
-
-function restoreDraft(draft) {
-  $("#card-name").value = draft.card.name || "";
-  $("#card-set").value = draft.card.set_name || "";
-  $("#card-number").value = draft.card.number || "";
-  $("#card-holo").checked = !!draft.card.holo;
-  for (const side of SIDES) scanners[side].setValues(draft.centering[side].lr, draft.centering[side].tb);
-  state.defects = draft.defects || [];
-  renderDefects();
-  runGrade();
-}
+/* ---------------------------------------------------------------- init */
 
 function init() {
-  for (const root of $$(".side")) scanners[root.dataset.side] = new SideScanner(root, root.dataset.side);
+  guide.init();
   for (const fig of $$(".map")) buildMap(fig, fig.dataset.side);
 
-  $$("#severity button").forEach((b) => b.addEventListener("click", () => {
-    state.pick.severity = b.dataset.sev;
-    updateAddButton();
-  }));
-  $("#defect-type").addEventListener("change", updateAddButton);
-  $("#add-defect").addEventListener("click", () => {
-    leaveExample();
-    const { side, location, severity } = state.pick;
-    const note = $("#defect-note").value.trim();
-    state.defects.push({ side, location, type: $("#defect-type").value, severity, note: note || null });
-    $("#defect-note").value = "";
-    renderDefects();
-    scheduleGrade();
-  });
-  for (const id of ["#card-name", "#card-set", "#card-number", "#card-holo"]) {
-    $(id).addEventListener("input", () => { leaveExample(); scheduleGrade(); });
+  // Scan screen
+  $$("#game-seg button").forEach((b) => b.addEventListener("click", () => setGame(b.dataset.game)));
+  setGame(localStore.read(KEYS.game, "pokemon"), { remember: false });
+  for (const side of SIDES) {
+    const input = $(`#file-${side}`);
+    input.addEventListener("change", (e) => {
+      const f = e.target.files[0];
+      e.target.value = "";
+      if (f) scanFile(side, f);
+    });
+    const slot = $(`.slot[data-side="${side}"]`);
+    slot.tabIndex = 0;
+    slot.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
   }
+  $("#get-report").addEventListener("click", () => setView("report"));
+  $("#front-only").addEventListener("click", () => setView("report"));
+  $("#try-example").addEventListener("click", showExample);
+  $("#resume").addEventListener("click", () => {
+    const draft = localStore.draft();
+    if (draft) loadAssessment(draft, draft.thumbs);
+  });
+
+  // Report screen
+  $("#back-to-scan").addEventListener("click", newScan);
+  $("#new-scan").addEventListener("click", newScan);
+  $("#scan-own").addEventListener("click", newScan);
   $("#save-card").addEventListener("click", saveCard);
-  $("#new-card").addEventListener("click", () => { resetForm(); runGrade(); window.scrollTo({ top: 0 }); });
-  $("#start-own").addEventListener("click", () => { resetForm(); runGrade(); });
-  $("#open-history").addEventListener("click", openHistory);
+  for (const id of ["#open-history", "#open-history-2"]) $(id).addEventListener("click", openHistory);
+  viewer.init();
+  $$("#centering-section .segmented button, #scancheck-section .segmented button, .viewer-side button").forEach((b) => b.addEventListener("click", () => {
+    if (guide.outline) setOutlineMode(false);
+    state.activeSide = b.dataset.side;
+    renderCentering();
+  }));
+  for (const [id, key] of [["#ratio-lr", "lr"], ["#ratio-tb", "tb"]]) {
+    $(id).addEventListener("input", (e) => {
+      const v = parseFloat(e.target.value);
+      if (isNaN(v)) return;
+      leaveExample();
+      state.centering[state.activeSide][key] = Math.min(100, Math.max(50, v));
+      state.evidence[state.activeSide][key] = "typed";  // typed in by hand: no longer unread
+      renderRatioInputs();
+      scheduleGrade();
+    });
+    $(id).addEventListener("blur", renderRatioInputs);
+  }
+  $("#adjust-outline").addEventListener("click", () => setOutlineMode(true));
+  $("#outline-cancel").addEventListener("click", () => setOutlineMode(false));
+  $("#outline-apply").addEventListener("click", applyOutline);
+  $("#retake-file").addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (f) scanFile(state.activeSide, f);
+  });
+  fillSelect($("#card-finish"), FINISHES);
+  fillSelect($("#card-language"), ["", ...Object.keys(LANGUAGES)], { "": "—", ...LANGUAGES });
+  $("#card-language").value = "EN";
+  for (const id of ["card-name", ...Object.keys(DETAIL_FIELDS)]) {
+    $(`#${id}`).addEventListener("input", () => { leaveExample(); renderDetails(); saveDraft(); });
+    $(`#${id}`).addEventListener("change", () => { leaveExample(); renderDetails(); saveDraft(); });
+  }
+  $("#collector-line").addEventListener("input", (e) => {
+    const parsed = parseCollectorLine(e.target.value);
+    if (parsed.set_code) $("#card-set-code").value = parsed.set_code;
+    if (parsed.number) $("#card-number").value = parsed.number;
+    if (parsed.language) $("#card-language").value = parsed.language;
+    leaveExample();
+    renderDetails();
+    saveDraft();
+  });
+  $("#find-card").addEventListener("click", findCard);
+  $("#read-card").addEventListener("click", () => readFromPhoto());
+  $("#refresh-prices").addEventListener("click", () => loadPrices({ force: true }));
+  $("#pc-save").addEventListener("click", savePriceToken);
+  $("#pc-remove").addEventListener("click", removePriceToken);
+  $("#clear-reference").addEventListener("click", () => { clearReference(); setStatus("Reference removed."); });
+  // A reference only belongs to the card it was confirmed for: changing what identifies the card drops it.
+  for (const id of ["card-set-code", "card-number", "card-language"]) {
+    $(`#${id}`).addEventListener("input", () => { if (state.reference && state.reference.source !== "user") { clearReference(); setStatus("Details changed: find the card again to get its reference."); } });
+  }
+  $("#edit-details").addEventListener("click", () => setDetailsEditing($("#details-form").hidden));
+  $("#done-details").addEventListener("click", () => setDetailsEditing(false));
+
+  // Inspection checklist
+  for (const box of $$("#inspect input[type=checkbox]")) {
+    box.addEventListener("change", () => setInspected(box.dataset.side, box.dataset.comp, box.checked));
+  }
+  $("#go-checklist").addEventListener("click", () => {
+    $("#condition-section").open = true;
+    $("#inspect").scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+
+  // Defect sheet
+  $$("#sev-seg button").forEach((b) => b.addEventListener("click", () => { state.sheet.severity = b.dataset.sev; updateSheet(); }));
+  $("#sheet-add").addEventListener("click", addDefectFromSheet);
+  $("#sheet-cancel").addEventListener("click", closeSheet);
+  $("#defect-sheet").addEventListener("click", (e) => { if (e.target.id === "defect-sheet") closeSheet(); });
+
+  // History sheet
   $("#close-history").addEventListener("click", () => ($("#history").hidden = true));
   $("#history").addEventListener("click", (e) => { if (e.target.id === "history") $("#history").hidden = true; });
-  $("#grade-bar-btn").addEventListener("click", () => $("#results").scrollIntoView({ behavior: "smooth", block: "start" }));
-
   $("#copy-backup").addEventListener("click", () => {
     const text = backupText();
     const box = $("#backup-text");
@@ -829,11 +2208,13 @@ function init() {
     if (f) restoreFrom(await f.text());
   });
   $("#restore-text").addEventListener("click", () => restoreFrom($("#backup-text").value));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    closeSheet();
+    $("#history").hidden = true;
+  });
 
-  renderDefects();
-  const draft = localStore.read(KEYS.draft, null);
-  if (draft && draft.centering && draft.card) restoreDraft(draft);
-  else showExample();
+  setView("scan", { animate: false });
 }
 
 init();

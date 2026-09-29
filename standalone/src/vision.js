@@ -13,7 +13,7 @@
   "use strict";
 
   const CARD_W = 750, CARD_H = 1048;  // 63 x 88 mm at ~300 dpi
-  const MARGIN = 24;                  // px of surrounding photo kept around the card
+  const MARGIN = 48;                  // px of surrounding photo kept around the card (room to drag the edge guides)
   const SIDES = ["left", "right", "top", "bottom"];
 
   /* ---------------------------------------------------------------- colour */
@@ -54,13 +54,6 @@
     const s = Float64Array.from(arr).sort();
     const m = s.length >> 1;
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-  }
-
-  // numpy.percentile with linear interpolation, on a sorted array
-  function percentileSorted(s, p) {
-    const pos = (s.length - 1) * (p / 100);
-    const lo = Math.floor(pos), hi = Math.ceil(pos);
-    return s[lo] + (s[hi] - s[lo]) * (pos - lo);
   }
 
   /* ---------------------------------------------------------------- image ops */
@@ -164,6 +157,322 @@
     return line;
   }
 
+  /* ---------------------------------------------------------------- find the card: straight edges */
+
+  /**
+   * Find the card as the best card-shaped rectangle formed by four straight edges.
+   * This is how document scanners work, and it copes with cluttered photos (a card in a sleeve on
+   * a desk or keyboard) where the card doesn't stand out from one plain background colour.
+   *
+   * 1. Colour gradients on a ~640 px copy, with Hough line voting guided by each pixel's gradient direction.
+   * 2. The strongest near-vertical and near-horizontal lines become candidate card sides.
+   * 3. Every pair of verticals x pair of horizontals is scored by aspect ratio (63 x 88 mm, either way up)
+   *    and by how strongly the image changes along all four sides. The weakest side counts most,
+   *    so a faint sleeve edge or a keyboard line that runs past the card loses.
+   * Returns null when nothing convincing is found.
+   */
+  function findCardEdges(img) {
+    const { img: small, scale } = downscale(img, 640);
+    const w = small.width, h = small.height, n = w * h;
+    const lab = toLab(blur3(small));
+
+    // Colour gradient: per pixel, the Sobel response of whichever Lab channel changes most.
+    const gx = new Float32Array(n), gy = new Float32Array(n), mag = new Float32Array(n);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        let bx = 0, by = 0, bm = -1;
+        for (let c = 0; c < 3; c++) {
+          const v = (dx, dy) => lab[((y + dy) * w + (x + dx)) * 3 + c];
+          const sx = v(1, -1) + 2 * v(1, 0) + v(1, 1) - v(-1, -1) - 2 * v(-1, 0) - v(-1, 1);
+          const sy = v(-1, 1) + 2 * v(0, 1) + v(1, 1) - v(-1, -1) - 2 * v(0, -1) - v(1, -1);
+          const m = sx * sx + sy * sy;
+          if (m > bm) { bm = m; bx = sx; by = sy; }
+        }
+        gx[i] = bx; gy[i] = by; mag[i] = Math.sqrt(bm) / 4;
+      }
+    }
+    const sortedMag = Float32Array.from(mag).sort();
+    // Edge pixels: the top 15% by strength, but never demanding more than a moderate step, so a
+    // low-contrast card edge (dark blue on a dark desk) still counts in a busy photo.
+    const edgeT = Math.max(8, Math.min(22, sortedMag[Math.floor(n * 0.85)]));
+
+    // Hough voting, only near the direction of each pixel's gradient.
+    const diag = Math.ceil(Math.hypot(w, h));
+    const NT = 180, NR = 2 * diag + 1;
+    const acc = new Float32Array(NT * NR);
+    const cosT = new Float32Array(NT), sinT = new Float32Array(NT);
+    for (let t = 0; t < NT; t++) { cosT[t] = Math.cos((t * Math.PI) / 180); sinT[t] = Math.sin((t * Math.PI) / 180); }
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        if (mag[i] < edgeT) continue;
+        let t0 = Math.round((Math.atan2(gy[i], gx[i]) * 180) / Math.PI);  // normal direction
+        t0 = ((t0 % 180) + 180) % 180;
+        const wgt = Math.min(mag[i], 80);
+        for (let dt = -4; dt <= 4; dt++) {
+          const t = (t0 + dt + 180) % 180;
+          const r = Math.round(x * cosT[t] + y * sinT[t]) + diag;
+          acc[t * NR + r] += wgt;
+        }
+      }
+    }
+
+    // Peak lines, with non-maximum suppression.
+    const peaks = [];
+    const minVotes = Math.min(w, h) * 0.12 * 20;
+    for (let t = 0; t < NT; t++) {
+      for (let r = 0; r < NR; r++) {
+        const v = acc[t * NR + r];
+        if (v < minVotes) continue;
+        let isMax = true;
+        for (let dt = -3; dt <= 3 && isMax; dt++) {
+          const tt = (t + dt + NT) % NT;
+          for (let dr = -6; dr <= 6; dr++) {
+            const rr = r + dr;
+            if (rr < 0 || rr >= NR || (dt === 0 && dr === 0)) continue;
+            const o = acc[tt * NR + rr];
+            if (o > v || (o === v && (dt < 0 || (dt === 0 && dr < 0)))) { isMax = false; break; }
+          }
+        }
+        if (isMax) peaks.push({ t, rho: r - diag, v });
+      }
+    }
+    peaks.sort((a, b) => b.v - a.v);
+
+    // Split into near-vertical (normal ~0 deg) and near-horizontal (normal ~90 deg) lines.
+    const vert = [], horz = [];
+    for (const p of peaks.slice(0, 90)) {
+      let t = p.t, rho = p.rho;
+      if (t > 90) { t -= 180; rho = -rho; }  // normal angle in (-90, 90]
+      if (Math.abs(t) <= 30) { if (vert.length < 24) vert.push({ t, rho }); }
+      else if (Math.abs(Math.abs(t) - 90) <= 30) {
+        if (t < 0) { t += 180; rho = -rho; }
+        if (horz.length < 24) horz.push({ t, rho });
+      }
+    }
+    if (vert.length < 2 || horz.length < 2) return null;
+
+    const lineIntersect = (a, b) => {
+      const ca = Math.cos((a.t * Math.PI) / 180), sa = Math.sin((a.t * Math.PI) / 180);
+      const cb = Math.cos((b.t * Math.PI) / 180), sb = Math.sin((b.t * Math.PI) / 180);
+      const det = ca * sb - sa * cb;
+      if (Math.abs(det) < 1e-6) return null;
+      return [(a.rho * sb - b.rho * sa) / det, (ca * b.rho - cb * a.rho) / det];
+    };
+
+    const labAt = (x, y) => {
+      const xi = Math.min(w - 1, Math.max(0, Math.round(x))), yi = Math.min(h - 1, Math.max(0, Math.round(y)));
+      const i = (yi * w + xi) * 3;
+      return [lab[i], lab[i + 1], lab[i + 2]];
+    };
+    const inside = (x, y) => x >= 0 && y >= 0 && x < w && y < h;
+    const k = Math.max(4, Math.round(Math.min(w, h) * 0.012));
+    // Colour step across a line at one point. A card edge is a step (different colours on each
+    // side); a thin printed frame line has the same colour on both sides and scores low.
+    const stepAt = (cx, cy, nx, ny) => {
+      const a = labAt(cx + nx * k, cy + ny * k), b = labAt(cx - nx * k, cy - ny * k);
+      return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    };
+    const sideScore = (p, q) => {
+      const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+      const nx = -(q[1] - p[1]) / len, ny = (q[0] - p[0]) / len;
+      const at = (f) => [p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f];
+      let total = 0, strong = 0;
+      const samples = 32;
+      for (let i = 0; i < samples; i++) {
+        const [cx, cy] = at(0.12 + (0.76 * i) / (samples - 1));
+        const d = stepAt(cx, cy, nx, ny);
+        total += Math.min(d / 35, 1);
+        if (d > 12) strong++;
+      }
+      // A card edge stops at the corners; a keyboard or desk line keeps going.
+      let cont = 0, contN = 0;
+      for (const f of [-0.24, -0.18, -0.12, 1.12, 1.18, 1.24]) {
+        const [cx, cy] = at(f);
+        if (!inside(cx, cy)) continue;
+        cont += Math.min(stepAt(cx, cy, nx, ny) / 35, 1);
+        contN++;
+      }
+      const contMean = contN ? cont / contN : 0;
+      return { score: (total / samples) * (1 - 0.25 * contMean), frac: strong / samples };
+    };
+
+    const target = CARD_H / CARD_W;
+    let best = null;
+    const cands = [];
+    for (let a = 0; a < vert.length; a++) {
+      for (let b = a + 1; b < vert.length; b++) {
+        const [L, R] = vert[a].rho <= vert[b].rho ? [vert[a], vert[b]] : [vert[b], vert[a]];
+        if (Math.abs(L.t - R.t) > 5 || R.rho - L.rho < Math.min(w, h) * 0.15) continue;
+        for (let c = 0; c < horz.length; c++) {
+          for (let d = c + 1; d < horz.length; d++) {
+            const [T, B] = horz[c].rho <= horz[d].rho ? [horz[c], horz[d]] : [horz[d], horz[c]];
+            if (Math.abs(T.t - B.t) > 5 || B.rho - T.rho < Math.min(w, h) * 0.15) continue;
+            // A card photographed roughly face-on: sides nearly parallel and square to each other.
+            if (Math.abs((L.t + R.t) / 2 - ((T.t + B.t) / 2 - 90)) > 5) continue;
+            const q = [lineIntersect(L, T), lineIntersect(R, T), lineIntersect(R, B), lineIntersect(L, B)];
+            if (q.some((pt) => !pt || pt[0] < -0.05 * w || pt[0] > 1.05 * w || pt[1] < -0.05 * h || pt[1] > 1.05 * h)) continue;
+            const dist = (u, v) => Math.hypot(u[0] - v[0], u[1] - v[1]);
+            const qw = (dist(q[0], q[1]) + dist(q[3], q[2])) / 2, qh = (dist(q[0], q[3]) + dist(q[1], q[2])) / 2;
+            const aspect = Math.max(qw, qh) / Math.min(qw, qh);
+            const aspectErr = Math.abs(aspect - target) / target;
+            if (aspectErr > 0.1) continue;
+            const area = (qw * qh) / (w * h);
+            if (area < 0.06 || area > 0.97) continue;
+            const sides = [sideScore(q[0], q[1]), sideScore(q[1], q[2]), sideScore(q[2], q[3]), sideScore(q[3], q[0])];
+            const minFrac = Math.min(...sides.map((x) => x.frac));
+            if (minFrac < 0.4) continue;
+            const scores = sides.map((x) => x.score);
+            const support = 0.6 * Math.min(...scores) + 0.4 * (scores.reduce((x, y) => x + y, 0) / 4);
+            // Priors: cards are usually photographed upright (same orientation as the photo) and near the middle.
+            const landscape = qw > qh, photoLandscape = w > h;
+            const orient = landscape === photoLandscape ? 1 : 0.75;
+            const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4, cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
+            const off = Math.hypot((cx - w / 2) / w, (cy - h / 2) / h);
+            const score = support * (1 - 4 * aspectErr) * (0.85 + 0.15 * Math.sqrt(area)) * orient * (1 - 0.6 * off);
+            cands.push({ score, q, minFrac, support, area });
+            if (!best || score > best.score) best = { score, q, minFrac, support };
+          }
+        }
+      }
+    }
+    if (!best || best.support < 0.2) return null;
+
+    // Refine the few best rough outlines and keep the one that ends up most card-shaped with the
+    // strongest edges. A wrong rough pick (desk line, sleeve) usually refines into a worse shape.
+    const refine = (Q) => {
+      // Exact edges: the rough lines are already close, so snap each side to the strongest colour
+      // step within a narrow band. The step is measured a few pixels either side of the line, so thin
+      // printed lines (same colour on both sides) don't win.
+      const qcx = (Q[0][0] + Q[1][0] + Q[2][0] + Q[3][0]) / 4, qcy = (Q[0][1] + Q[1][1] + Q[2][1] + Q[3][1]) / 4;
+      const dist2 = (u, v) => Math.hypot(u[0] - v[0], u[1] - v[1]);
+      const shortSide = Math.min((dist2(Q[0], Q[1]) + dist2(Q[3], Q[2])) / 2, (dist2(Q[0], Q[3]) + dist2(Q[1], Q[2])) / 2);
+      const band = Math.max(4, Math.round(shortSide * 0.03));
+      const kk = Math.max(3, Math.round(shortSide * 0.012));
+      // Median colour of a short strip running away from the line (kk..3kk pixels out on one side).
+      // Using the median over a wide strip means a thin printed line barely moves it.
+      const stripColor = (cx, cy, nx, ny, sign) => {
+        const vals = [[], [], []];
+        for (let j = 0; j < 5; j++) {
+          const dd = sign * (kk + (2 * kk * j) / 4);
+          const x = cx + nx * dd, y = cy + ny * dd;
+          if (!inside(x, y)) return null;
+          const c = labAt(x, y);
+          vals[0].push(c[0]); vals[1].push(c[1]); vals[2].push(c[2]);
+        }
+        return vals.map((v) => v.sort((a, b) => a - b)[2]);
+      };
+      const stepAlong = (p, q, nx, ny) => {
+        let total = 0, n2 = 0;
+        for (let i = 0; i < 30; i++) {
+          const f = 0.12 + (0.76 * i) / 29;
+          const cx = p[0] + (q[0] - p[0]) * f, cy = p[1] + (q[1] - p[1]) * f;
+          const a = stripColor(cx, cy, nx, ny, 1), b = stripColor(cx, cy, nx, ny, -1);
+          if (!a || !b) continue;
+          total += Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+          n2++;
+        }
+        return n2 ? total / n2 : 0;
+      };
+      const outward = (p, q) => {
+        const len = dist2(p, q);
+        let nx = -(q[1] - p[1]) / len, ny = (q[0] - p[0]) / len;
+        const mx = (p[0] + q[0]) / 2, my = (p[1] + q[1]) / 2;
+        if ((mx - qcx) * nx + (my - qcy) * ny < 0) { nx = -nx; ny = -ny; }
+        return [nx, ny];
+      };
+      // Snap one side (p->q) to the straight line with the strongest colour step within +-range pixels
+      // (both ends may move independently, so the side can tilt slightly).
+      const snap = (p, q, range) => {
+        const [nx, ny] = outward(p, q);
+        let bestS = { s: -1, pair: [p, q] };
+        for (let d = -range; d <= range; d++) {
+          for (let t = -2; t <= 2; t++) {
+            const pp = [p[0] + nx * (d - t), p[1] + ny * (d - t)], qq = [q[0] + nx * (d + t), q[1] + ny * (d + t)];
+            const v = stepAlong(pp, qq, nx, ny);
+            if (v > bestS.s) bestS = { s: v, pair: [pp, qq] };
+          }
+        }
+        return bestS;
+      };
+      let sides = [0, 1, 2, 3].map((i) => snap(Q[i], Q[(i + 1) % 4], band));
+      const meet = (s1, s2) => {
+        const [a, b] = s1, [c, d] = s2;
+        const d1x = b[0] - a[0], d1y = b[1] - a[1], d2x = d[0] - c[0], d2y = d[1] - c[1];
+        const den = d1x * d2y - d1y * d2x;
+        if (Math.abs(den) < 1e-9) return a;
+        const t = ((c[0] - a[0]) * d2y - (c[1] - a[1]) * d2x) / den;
+        return [a[0] + d1x * t, a[1] + d1y * t];
+      };
+      const quadOf = (sd) => {
+        const r = sd.map((x) => x.pair);
+        return [meet(r[3], r[0]), meet(r[0], r[1]), meet(r[1], r[2]), meet(r[2], r[3])];
+      };
+      const aspectErrOf = (q) => {
+        const qw = (dist2(q[0], q[1]) + dist2(q[3], q[2])) / 2, qh = (dist2(q[0], q[3]) + dist2(q[1], q[2])) / 2;
+        return Math.abs(Math.max(qw, qh) / Math.min(qw, qh) - target) / target;
+      };
+      // A side in shadow can be too faint to be found as a line, and a neighbouring line (sleeve, desk)
+      // gets used instead. If the outline isn't card-shaped, re-place each side in turn where the
+      // other three and the 63 x 88 shape say it should be, snap it, and keep the most card-like result.
+      let quad = quadOf(sides);
+      let bestFit = { err: aspectErrOf(quad), quad, total: sides.reduce((x, y) => x + y.s, 0) };
+      if (bestFit.err > 0.03) {
+        for (let i = 0; i < 4; i++) {
+          const opp = (i + 2) % 4;
+          const [p, q] = sides[i].pair;
+          const [op, oq] = sides[opp].pair;
+          const [nx, ny] = outward(p, q);
+          const sideLen = (dist2(sides[(i + 1) % 4].pair[0], sides[(i + 1) % 4].pair[1]) + dist2(sides[(i + 3) % 4].pair[0], sides[(i + 3) % 4].pair[1])) / 2;
+          const across = (dist2(p, q) + dist2(op, oq)) / 2;  // length of this side ~ the other dimension
+          const long = sideLen > across;
+          const wanted = long ? across * target : across / target;  // expected distance between side i and its opposite
+          const midOpp = [(op[0] + oq[0]) / 2, (op[1] + oq[1]) / 2], mid = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2];
+          const current = Math.abs((mid[0] - midOpp[0]) * nx + (mid[1] - midOpp[1]) * ny);
+          const shift = wanted - current;
+          const moved = snap([p[0] + nx * shift, p[1] + ny * shift], [q[0] + nx * shift, q[1] + ny * shift], band);
+          const trial = sides.slice();
+          trial[i] = moved;
+          const tq = quadOf(trial);
+          const err = aspectErrOf(tq);
+          if (err < bestFit.err - 0.01 && moved.s > 8) bestFit = { err, quad: tq };
+        }
+      }
+      return { quad: bestFit.quad, err: bestFit.err, strength: sides.reduce((x, y) => x + y.s, 0) / 4 };
+
+    };
+    cands.sort((x, y) => y.score - x.score);
+    // Nested rectangles (sleeve > card edge > printed frame) often score alike. Prefer the outermost
+    // one whose edges are about as strong as the best's: that is the card's physical edge, while a faint
+    // sleeve edge falls short of the strength bar.
+    const insideQuad = (pt, q) => {
+      let sign = 0;
+      for (let i = 0; i < 4; i++) {
+        const a = q[i], b = q[(i + 1) % 4];
+        const cr = (b[0] - a[0]) * (pt[1] - a[1]) - (b[1] - a[1]) * (pt[0] - a[0]);
+        if (cr !== 0) { if (sign && Math.sign(cr) !== sign) return false; sign = Math.sign(cr); }
+      }
+      return true;
+    };
+    const top0 = cands[0];
+    let outer = top0;
+    for (const c of cands.slice(0, 40)) {
+      if (c === top0 || c.support < 0.8 * top0.support || c.score < 0.7 * top0.score) continue;
+      if (outer.q.every((pt) => insideQuad(pt, c.q)) && c.area > outer.area && c.area < outer.area * 1.35) outer = c;
+    }
+    if (outer !== top0) cands.unshift(outer);
+    let chosen = null;
+    for (const c of cands.slice(0, 6)) {
+      const r = refine(c.q);
+      const value = r.strength * Math.max(0, 1 - 5 * r.err) * (0.5 + 0.5 * c.score / cands[0].score);
+      if (!chosen || value > chosen.value) chosen = { value, quad: r.quad };
+    }
+    best.q = chosen.quad;
+    const corners = best.q.map(([x, y]) => [(x + 0.5) / scale - 0.5, (y + 0.5) / scale - 0.5]);
+    return { corners, confidence: Math.min(1, 0.45 + best.support * 0.6), method: "edges" };
+  }
+
   /**
    * Return {corners: [[x,y] TL, TR, BR, BL], confidence}.
    * mode "cropped" (or an image already shaped like a card) uses the whole image.
@@ -173,9 +482,23 @@
     const target = CARD_H / CARD_W;
     const aspect = Math.max(w, h) / Math.min(w, h);
     if (mode === "cropped" || (mode === "auto" && Math.abs(aspect - target) / target < 0.025)) {
-      return { corners: fullImage(w, h), confidence: 0.6 };
+      return { corners: fullImage(w, h), confidence: 0.6, method: "full" };
     }
 
+    // Plain, even background: the card is the big region that differs from it (precise and fast).
+    // Anything else (a desk, keyboard, sleeve): find the card from its straight edges instead.
+    const blob = findCardBlob(img);
+    // A clean, card-shaped region (within ~12% of 63 x 88, allowing for an off-angle photo) is trusted.
+    if (blob && blob.aspectScore >= 0.5) return blob;
+    const edges = findCardEdges(img);
+    if (edges) return edges;
+    return blob || { corners: fullImage(w, h), confidence: 0.3, method: "full" };
+  }
+
+  /** The card as the largest region that differs from a plain background, or null. */
+  function findCardBlob(img) {
+    const w = img.width, h = img.height;
+    const target = CARD_H / CARD_W;
     const { img: small, scale } = downscale(img, 1000);
     const sw = small.width, sh = small.height;
     const lab = toLab(blur3(small));
@@ -218,7 +541,7 @@
       if (size > bestSize) { bestSize = size; bestLabel = next; }
     }
     const areaRatio = bestSize / (sw * sh);
-    if (!bestLabel || areaRatio < 0.15 || areaRatio > 0.995) return { corners: fullImage(w, h), confidence: 0.3 };
+    if (!bestLabel || areaRatio < 0.15 || areaRatio > 0.995) return null;
 
     // Outer outline: extreme pixels per row/column, plus rough corners from x+y and x-y.
     const rowMin = new Int32Array(sh).fill(-1), rowMax = new Int32Array(sh).fill(-1);
@@ -251,7 +574,7 @@
     const right = robustFit(collect(span(tr[1], br[1]), rowMax));
     const topL = robustFit(collect(span(tl[0], tr[0]), colMin));     // y = a*x + b
     const bottom = robustFit(collect(span(bl[0], br[0]), colMax));
-    if (!left || !right || !topL || !bottom) return { corners: fullImage(w, h), confidence: 0.3 };
+    if (!left || !right || !topL || !bottom) return null;
 
     // Intersect x = a1*y + b1 with y = a2*x + b2. The outline pixels sit half a pixel
     // inside the true edge, so push each line outward by 0.5 px.
@@ -266,7 +589,7 @@
       meet(right, bottom, 0.5, 0.5),
       meet(left, bottom, -0.5, 0.5),
     ];
-    if (corners.some(([x, y]) => !isFinite(x) || !isFinite(y))) return { corners: fullImage(w, h), confidence: 0.3 };
+    if (corners.some(([x, y]) => !isFinite(x) || !isFinite(y))) return null;
     // back to full-resolution pixel coordinates
     corners = corners.map(([x, y]) => [(x + 0.5) / scale - 0.5, (y + 0.5) / scale - 0.5]);
 
@@ -275,8 +598,8 @@
     const height = (d(corners[3], corners[0]) + d(corners[2], corners[1])) / 2;
     const quadAspect = Math.max(width, height) / Math.min(width, height);
     const aspectScore = Math.max(0, 1 - Math.abs(quadAspect - target) / 0.25);
-    if (aspectScore < 0.2) return { corners: fullImage(w, h), confidence: 0.3 };
-    return { corners, confidence: Math.min(1, aspectScore * Math.pow(areaRatio, 0.25) + 0.1) };
+    if (aspectScore < 0.2) return null;
+    return { corners, confidence: Math.min(1, aspectScore * Math.pow(areaRatio, 0.25) + 0.1), aspectScore, method: "blob" };
   }
 
   /* ---------------------------------------------------------------- flatten */
@@ -304,16 +627,26 @@
     return [...hvec, 1];
   }
 
-  /** Perspective-warp the card upright to CARD_W x CARD_H with `margin` px of context on every side. */
-  function warpCard(img, corners, margin = MARGIN) {
+  /** Output-pixel -> source-pixel homography for warping `corners` upright with `margin` px around. */
+  function warpMatrix(corners, margin) {
     let [tl, tr, br, bl] = corners;
     const d = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
     const width = (d(tr, tl) + d(br, bl)) / 2, height = (d(bl, tl) + d(br, tr)) / 2;
     if (width > height) [tl, tr, br, bl] = [bl, tl, tr, br];  // landscape photo of a portrait card
     const m = margin;
     const dst = [[m, m], [m + CARD_W - 1, m], [m + CARD_W - 1, m + CARD_H - 1], [m, m + CARD_H - 1]];
-    const H = homography(dst, [tl, tr, br, bl]);  // output pixel -> source pixel
-    const W = CARD_W + 2 * m, Ht = CARD_H + 2 * m;
+    return homography(dst, [tl, tr, br, bl]);
+  }
+
+  const applyH = (H, u, v) => {
+    const den = H[6] * u + H[7] * v + H[8];
+    return [(H[0] * u + H[1] * v + H[2]) / den, (H[3] * u + H[4] * v + H[5]) / den];
+  };
+
+  /** Perspective-warp the card upright to CARD_W x CARD_H with `margin` px of context on every side. */
+  function warpCard(img, corners, margin = MARGIN) {
+    const H = warpMatrix(corners, margin);
+    const W = CARD_W + 2 * margin, Ht = CARD_H + 2 * margin;
     const out = new Uint8ClampedArray(W * Ht * 4);
     const sw = img.width, sh = img.height, src = img.data;
     for (let v = 0; v < Ht; v++) {
@@ -337,6 +670,215 @@
       }
     }
     return { width: W, height: Ht, data: out };
+  }
+
+  /**
+   * Rounded-corner test. A card's corners are rounded (radius ~3 mm, 4.8% of its width); a sleeve's,
+   * a printed frame's or a desk line's are not. At each corner of a candidate outline, the small patch
+   * cut off by the rounded corner should look like what is outside the card, not like the card.
+   * `sample(u, v)` returns the Lab colour at card coordinates (0..CARD_W-1, 0..CARD_H-1), or null.
+   * Returns one value per corner (TL, TR, BR, BL) in [-1, 1]; +1 = clearly a rounded card corner.
+   */
+  function cornerRoundness(sample, x0, y0, x1, y1, only = -1) {
+    const r = 0.048 * (x1 - x0), q = Math.max(2, Math.round(r * 0.3));
+    const col = (pts) => {
+      const s = [];
+      for (const [u, v] of pts) { const c = sample(u, v); if (c) s.push(c); }
+      if (s.length < 3) return null;
+      return [0, 1, 2].map((c) => median(s.map((v) => v[c])));
+    };
+    // Brightness counts half: a sleeve often catches the light right at the card's corner.
+    const dE = (p, o) => Math.hypot(0.5 * (p[0] - o[0]), p[1] - o[1], p[2] - o[2]);
+    const out = [];
+    for (const [ci, [cx, cy, sx, sy]] of [[x0, y0, 1, 1], [x1, y0, -1, 1], [x1, y1, -1, -1], [x0, y1, 1, -1]].entries()) {
+      if (only >= 0 && ci !== only) { out.push(0); continue; }
+      const cut = [], inV = [], outV = [], inH = [], outH = [];
+      for (let u = 2; u <= q; u++) for (let v = 2; v <= q; v++) if ((r - u) ** 2 + (r - v) ** 2 > 1.2 * r * r) cut.push([cx + sx * u, cy + sy * v]);
+      for (let a = 0.6 * r; a <= 1.8 * r; a += 1.5) {
+        for (let d = 6; d <= 20; d += 3) {
+          inV.push([cx + sx * d, cy + sy * a]); outV.push([cx - sx * d, cy + sy * a]);
+          inH.push([cx + sx * a, cy + sy * d]); outH.push([cx + sx * a, cy - sy * d]);
+        }
+      }
+      const C = col(cut);
+      const one = (I, O) => {
+        I = col(I); O = col(O);
+        if (!C || !I || !O) return 0;
+        return (dE(C, I) - dE(C, O)) / Math.max(dE(I, O), 6);
+      };
+      out.push(Math.max(-1, Math.min(1, (one(inV, outV) + one(inH, outH)) / 2)));
+    }
+    return out;
+  }
+
+  /**
+   * Decide which lines are the card's own edges. Around a card in a clear sleeve there are several
+   * strong straight lines close together: the sleeve's edge a few mm outside, the card's edge, and
+   * often a printed frame a few mm inside. Flatten the current outline with a wide margin, list the
+   * strongest colour-step lines near each side (fitted on both halves of the side, so a slightly
+   * tilted side is followed), and score every combination by edge strength, 63 x 88 shape and above
+   * all the rounded-corner test, which only the card's own outline passes.
+   */
+  function resolveEdges(img, corners) {
+    const M = 100, k = 3, NS = 7, SPAN = 2 * M;
+    const warped = warpCard(img, corners, M);
+    const W = warped.width, H = warped.height;
+    // Lab with L on its natural 0-100 scale, so a colour change (navy card on a grey sleeve) counts
+    // as much as a brightness change (a sleeve's edge).
+    const lab = toLab(blur3(warped));
+    for (let i = 0; i < lab.length; i += 3) lab[i] /= 2.55;
+    const Hm = warpMatrix(corners, M);
+    const px = (x, y) => (Math.min(H - 1, Math.max(0, Math.round(y))) * W + Math.min(W - 1, Math.max(0, Math.round(x)))) * 3;
+    const S1 = 0.3, S2 = 0.7;  // the two halves' fitted positions sit at 30% and 70% along the side
+    const tmp = new Float32Array(NS);
+    const med7 = (arr, from, step) => {
+      for (let m = 0; m < NS; m++) tmp[m] = arr[from + step * (m + 1) * k];
+      tmp.sort();
+      return tmp[3];
+    };
+    // Median colour-step profile across one side, over the lines between fractions lo..hi of the side.
+    const peaksOf = (side, lo, hi) => {
+      const along = side === "left" || side === "right" ? H : W;
+      const len = SPAN + 2 * NS * k + 2;
+      const chans = [new Float32Array(len), new Float32Array(len), new Float32Array(len)];
+      const steps = [], fines = [];
+      for (let ln = Math.round(M + (along - 2 * M) * lo); ln < M + (along - 2 * M) * hi; ln += 10) {
+        for (let i = 0; i < len; i++) {
+          const d = i - NS * k - 1;  // distance in from the image edge (negative = off the image, clamped)
+          const p = side === "left" ? px(d, ln) : side === "right" ? px(W - 1 - d, ln) : side === "top" ? px(ln, d) : px(ln, H - 1 - d);
+          chans[0][i] = lab[p]; chans[1][i] = lab[p + 1]; chans[2][i] = lab[p + 2];
+        }
+        const row = new Float32Array(SPAN + 1), fine = new Float32Array(SPAN + 1);
+        for (let d = 22; d <= SPAN - 22; d++) {
+          const i = d + NS * k + 1;
+          let s = 0, f = 0;
+          for (let c = 0; c < 3; c++) {
+            const o = med7(chans[c], i, -1), n = med7(chans[c], i, 1);
+            s += (n - o) * (n - o);
+            const ch = chans[c], a = (ch[i - 1] + ch[i - 2] + ch[i - 3]) / 3, b = (ch[i + 1] + ch[i + 2] + ch[i + 3]) / 3;
+            f += (b - a) * (b - a);
+          }
+          row[d] = Math.sqrt(s);
+          fine[d] = Math.sqrt(f);
+        }
+        steps.push(row);
+        fines.push(fine);
+      }
+      const prof = new Float32Array(SPAN + 1), fprof = new Float32Array(SPAN + 1);
+      let maxV = 0;
+      const col = new Float32Array(steps.length);
+      for (let d = 22; d <= SPAN - 22; d++) {
+        steps.forEach((row, j) => { col[j] = row[d]; });
+        prof[d] = median(col);
+        fines.forEach((row, j) => { col[j] = row[d]; });
+        fprof[d] = median(col);
+        maxV = Math.max(maxV, prof[d]);
+      }
+      const pk = [];
+      for (let d = 23; d < SPAN - 22; d++) {
+        if (!(prof[d] >= prof[d - 1] && prof[d] > prof[d + 1] && prof[d] >= Math.max(4, 0.2 * maxV))) continue;
+        // The wide step is flat for a few px around an edge; place the line where the colour actually changes.
+        let at = d;
+        for (let e = Math.max(22, d - 10); e <= Math.min(SPAN - 22, d + 10); e++) if (fprof[e] > fprof[at]) at = e;
+        pk.push({ d: at, v: prof[d] / maxV });
+      }
+      pk.sort((a, b) => b.v - a.v);
+      const kept = [];
+      for (const p of pk) if (kept.every((o) => Math.abs(o.d - p.d) > 6)) kept.push(p);
+      return kept.slice(0, 5);
+    };
+    const cands = {};
+    for (const side of SIDES) {
+      const A = peaksOf(side, 0.1, 0.5), B = peaksOf(side, 0.5, 0.9), list = [];
+      for (const a of A) for (const b of B) {
+        // A photo's keystone tilts a side only a little: prefer lines that are nearly straight up.
+        const tilt = Math.abs(a.d - b.d);
+        if (tilt <= 24) list.push({ d1: a.d, d2: b.d, v: (0.7 * Math.min(a.v, b.v) + 0.15 * (a.v + b.v)) * (1 - tilt / 60) });
+      }
+      list.sort((x, y) => y.v - x.v);
+      // Keep distinct lines only (a thick line gives a few near-identical pairs).
+      const kept = [];
+      for (const c of list) {
+        if (kept.length < 9 && kept.every((o) => Math.abs(o.d1 - c.d1) + Math.abs(o.d2 - c.d2) > 8)) kept.push(c);
+      }
+      cands[side] = kept.length ? kept : [{ d1: M, d2: M, v: 0 }];
+    }
+    // Side lines in the flattened image, as a function of the other coordinate.
+    const lineD = (c, s) => c.d1 + ((c.d2 - c.d1) * (s - S1)) / (S2 - S1);
+    const linesOf = ([l, r, t, b]) => ({
+      xl: (y) => lineD(l, (y - M) / (H - 2 * M)),
+      xr: (y) => W - 1 - lineD(r, (y - M) / (H - 2 * M)),
+      yt: (x) => lineD(t, (x - M) / (W - 2 * M)),
+      yb: (x) => H - 1 - lineD(b, (x - M) / (W - 2 * M)),
+    });
+    const meet = (xf, yf) => {
+      let x = xf(H / 2), y = yf(W / 2);
+      for (let i = 0; i < 6; i++) { y = yf(x); x = xf(y); }
+      return [x, y];
+    };
+    const quadOf = (L) => [meet(L.xl, L.yt), meet(L.xr, L.yt), meet(L.xr, L.yb), meet(L.xl, L.yb)];
+    const cache = new Map();
+    const labAt = (x, y) => { const p = px(x, y); return [lab[p], lab[p + 1], lab[p + 2]]; };
+    const stepXY = (x, y, nx, ny) => {
+      let s = 0;
+      for (let c = 0; c < 3; c++) {
+        for (let m = 0; m < NS; m++) tmp[m] = lab[px(x - nx * (m + 1) * k, y - ny * (m + 1) * k) + c];
+        tmp.sort();
+        const o = tmp[3];
+        for (let m = 0; m < NS; m++) tmp[m] = lab[px(x + nx * (m + 1) * k, y + ny * (m + 1) * k) + c];
+        tmp.sort();
+        s += (tmp[3] - o) ** 2;
+      }
+      return Math.sqrt(s);
+    };
+    const target = CARD_H / CARD_W;
+    const dist = (u, v) => Math.hypot(u[0] - v[0], u[1] - v[1]);
+    let best = null;
+    for (const l of cands.left) for (const r of cands.right) for (const t of cands.top) for (const b of cands.bottom) {
+      const combo = [l, r, t, b];
+      const q = quadOf(linesOf(combo));
+      if (q.some(([x, y]) => !isFinite(x) || !isFinite(y))) continue;
+      // Shape in the photo (the flattened view is only as square as the current outline).
+      const p = q.map(([x, y]) => applyH(Hm, x, y));
+      const qw = (dist(p[0], p[1]) + dist(p[3], p[2])) / 2, qh = (dist(p[0], p[3]) + dist(p[1], p[2])) / 2;
+      if (qw <= 0 || qh <= 0) continue;
+      const err = Math.abs(Math.max(qw, qh) / Math.min(qw, qh) / target - 1);
+      if (err > 0.1) continue;
+      // Each corner depends only on its two sides, so cache it.
+      const x0 = (q[0][0] + q[3][0]) / 2, x1 = (q[1][0] + q[2][0]) / 2;
+      const rs = [[l, t, 0], [r, t, 1], [r, b, 2], [l, b, 3]].map(([s1, s2, i]) => {
+        const key = `${i}:${s1.d1},${s1.d2}:${s2.d1},${s2.d2}`;
+        if (!cache.has(key)) {
+          // Test the corner in a local frame aligned with the (near axis-aligned) flattened card.
+          const [cx, cy] = q[i];
+          const sample = (u, v) => {
+            const du = i === 1 || i === 2 ? u - (CARD_W - 1) : u, dv = i >= 2 ? v - (CARD_H - 1) : v;
+            return labAt(cx + du * ((x1 - x0) / (CARD_W - 1)), cy + dv * ((x1 - x0) / (CARD_W - 1)));
+          };
+          const rnd = cornerRoundness(sample, 0, 0, CARD_W - 1, CARD_H - 1, i)[i];
+          // A card's edge stops at its corner. A sleeve's or desk's edge carries on past the card's
+          // other side, which gives away an outline that mixes the card with the sleeve.
+          const sx = i === 0 || i === 3 ? 1 : -1, sy = i < 2 ? 1 : -1, rad = 0.048 * (x1 - x0);
+          const along = (bx, by, nx, ny, ax, ay) => {
+            const past = [], inner = [];
+            for (let e = 8; e <= 28; e += 4) past.push(stepXY(cx - bx * e, cy - by * e, nx, ny));
+            for (let a = 3 * rad; a <= 6 * rad; a += 6) inner.push(stepXY(cx + ax * a, cy + ay * a, nx, ny));
+            return Math.min(1, median(past) / Math.max(median(inner), 4));
+          };
+          const cont = Math.max(along(sx, 0, 0, sy, sx, 0), along(0, sy, sx, 0, 0, sy));
+          cache.set(key, rnd - Math.max(0, cont - 0.3));
+        }
+        return cache.get(key);
+      });
+      const round = (rs[0] + rs[1] + rs[2] + rs[3]) / 4;
+      const step = (l.v + r.v + t.v + b.v) / 4;
+      // Between two similar outlines prefer the outer one: a printed frame sits inside the card's edge.
+      const size = ((q[1][0] - q[0][0] + q[2][0] - q[3][0]) * (q[3][1] - q[0][1] + q[2][1] - q[1][1])) / (4 * (W - 2 * M) * (H - 2 * M));
+      const score = step + round - 3 * err + Math.max(-0.3, Math.min(0.3, 0.8 * (size - 1)));
+      if (!best || score > best.score) best = { score, q, round };
+    }
+    if (!best) return { corners, round: 0, score: -Infinity };
+    return { corners: best.q.map(([x, y]) => applyH(Hm, x, y)), round: best.round, score: best.score };
   }
 
   /* ---------------------------------------------------------------- measure borders */
@@ -389,25 +931,36 @@
 
     const inner = [], outer = [];
     const over = new Uint8Array(depth);
-    const back = new Uint8Array(refStart);
     let found = 0;
     for (let l = 0; l < lines; l++) {
       for (let i = 0; i < depth; i++) over[i] = dist[l * depth + i] > thresh ? 1 : 0;
       const rel = firstRun(over, refEnd, depth, 3);
       if (rel < 0) continue;
       found++;
-      for (let i = 0; i < refStart; i++) back[i] = over[refStart - 1 - i];
-      const orel = firstRun(back, 0, refStart, 2);
       inner.push(rel + refEnd);
-      outer.push(orel < 0 ? margin : refStart - orel);
+      // The card's edge was placed exactly at the margin when the card was found; a colour change
+      // further out is the sleeve or the desk, not the card.
+      outer.push(margin);
     }
     if (found < Math.max(5, lines * 0.2)) return { outer: margin, inner: NaN, confidence: 0 };
-    const widths = inner.map((v, i) => v - outer[i]);
-    const sorted = Float64Array.from(widths).sort();
-    const med = median(widths);
-    const iqr = percentileSorted(sorted, 75) - percentileSorted(sorted, 25);
-    const consistency = Math.max(0, 1 - iqr / Math.max(4, med * 0.25));
-    return { outer: median(outer), inner: median(inner), confidence: (found / lines) * consistency };
+    // The frame's inner edge is where most rows first change colour: the densest window of positions.
+    // A row that changes colour only *later* saw artwork that matches the border there (the dark-blue swirl
+    // along the left and right of the WOTC Pokémon back does this on a third of the rows or more): it didn't
+    // see the frame edge, but it doesn't contradict it either. A row that changes colour *earlier* does
+    // contradict it. So confidence comes from how many rows agree, minus the contradicting ones; a spread
+    // of late rows no longer counts against the reading (it used to, through the interquartile range).
+    const sorted = Float64Array.from(inner).sort();
+    const win = Math.max(4, extent * 0.006);
+    let best = 0, lo = 0;
+    for (let i = 0, j = 0; i < found; i++) {
+      while (sorted[j] < sorted[i] - win) j++;
+      if (i - j + 1 > best) { best = i - j + 1; lo = sorted[j]; }
+    }
+    const agree = inner.filter((v) => v >= lo && v <= lo + win);
+    const early = inner.filter((v) => v < lo).length;
+    const support = Math.min(1, Math.max(0, (best / found - 0.2) / 0.5));  // 20% agreeing: nothing; 70%: full
+    const contradiction = Math.max(0, 1 - early / found / 0.3);           // 30% crossing earlier: nothing
+    return { outer: median(outer), inner: median(agree), confidence: (found / lines) * support * contradiction };
   }
 
   function measureBorders(card, margin = MARGIN) {
@@ -435,14 +988,33 @@
   const share = (a, b) => (a + b <= 0 ? 50 : (Math.max(a, b) / (a + b)) * 100);
 
   /** Full pipeline, same result shape as the Python app's POST /api/scan. */
-  function scan(img, mode = "auto") {
-    const { corners, confidence: cardConf } = findCard(img, mode);
+  function scan(img, mode = "auto", manualCorners = null) {
+    let corners, cardConf;
+    if (manualCorners) {
+      corners = manualCorners;
+      cardConf = 1;
+    } else {
+      const found = findCard(img, mode);
+      ({ corners, confidence: cardConf } = found);
+      if (found.method !== "full") {
+        // Settle which lines are the card's own edges (not a sleeve's or a printed frame's), re-flattening
+        // each time until the outline stops moving: every round the view gets squarer (this also takes
+        // out an off-angle photo's keystone), so the later rounds judge the corners best.
+        for (let i = 0; i < 4; i++) {
+          const next = resolveEdges(img, corners).corners;
+          const moved = Math.max(...next.map((p, j) => Math.hypot(p[0] - corners[j][0], p[1] - corners[j][1])));
+          corners = next;
+          if (i > 0 && moved < 3) break;
+        }
+      }
+    }
     const warped = warpCard(img, corners, MARGIN);
     const m = measureBorders(warped, MARGIN);
     const W = warped.width, H = warped.height, e = m.edges;
     const r2 = (v) => Math.round(v * 100) / 100;
     return {
       warped,
+      corners,
       width: W,
       height: H,
       margin: MARGIN,
@@ -460,5 +1032,5 @@
     };
   }
 
-  return { scan, findCard, warpCard, measureBorders, CARD_W, CARD_H, MARGIN };
+  return { scan, findCard, findCardEdges, resolveEdges, cornerRoundness, warpCard, warpMatrix, applyH, measureBorders, CARD_W, CARD_H, MARGIN };
 });

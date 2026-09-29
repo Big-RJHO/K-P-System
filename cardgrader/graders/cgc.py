@@ -6,7 +6,7 @@ from .. import criteria_loader
 from ..centering import centering_grade
 from ..condition import component_conditions, floor_to
 from ..models import CardAssessment, CompanyGrade
-from .base import altered_grade, binding_factors
+from .base import altered_grade, binding_factors, finish, prepare, shown_subgrades
 
 
 def overall_grade(subs: list[float], rules: dict, grades: list[float]) -> float:
@@ -23,22 +23,24 @@ def overall_grade(subs: list[float], rules: dict, grades: list[float]) -> float:
 def grade(assessment: CardAssessment) -> CompanyGrade:
     if altered := altered_grade("CGC", assessment):
         return altered
+    assessment = prepare(assessment)
     crit = criteria_loader.company("cgc")
     grades = [float(g) for g in crit["grades"]]
 
     cent = centering_grade(assessment.centering, crit)
     cond = component_conditions(assessment, "CGC")
-    subs = {"centering": cent.grade, **{c: floor_to(grades, cc.grade) for c, cc in cond.items()}}
+    # An unassessed component counts at its best case, so the overall grade is a ceiling.
+    subs = {"centering": cent.grade, **{c: floor_to(grades, cc.ceiling) for c, cc in cond.items()}}
     overall = overall_grade(list(subs.values()), crit["overall_rules"], grades)
 
     limiting = [] if overall == 10.5 else binding_factors(min(subs.values()), subs, cent.limiting, cond)
 
-    return CompanyGrade(
+    return finish(CompanyGrade(
         company="CGC",
         grade=min(overall, 10.0),
         label=crit["labels"][overall],
         tier=grades.index(overall),
-        subgrades=subs,
+        subgrades=shown_subgrades(subs, cond),
         limiting_factors=limiting,
         notes=["CGC subgrades are optional, and a 10.5 subgrade here means Pristine."],
-    )
+    ), assessment)

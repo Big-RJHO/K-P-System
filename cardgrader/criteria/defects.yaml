@@ -1,4 +1,4 @@
-# Defect catalog, tuned for Pokémon / TCG cards.
+# Defect catalog for TCG cards (Pokémon, Riftbound and other 63 x 88 mm cards).
 #
 # Each severity has a "cap": the highest condition grade the affected component
 # (corners, edges or surface) can still get with that defect. The cap uses a shared
@@ -35,7 +35,7 @@ types:
     caps: {micro: 9, minor: 8, moderate: 6, major: 4}
 
   edge_whitening:
-    label: Edge whitening (blue back border)
+    label: Edge whitening
     applies_to: [edges]
     caps: {micro: 10, minor: 9, moderate: 8, major: 6}
   edge_chipping:
@@ -47,7 +47,7 @@ types:
     applies_to: [edges]
     caps: {micro: 10, minor: 9.5, moderate: 8.5, major: 7}
   rough_cut:
-    label: Rough factory cut
+    label: Rough factory cut / burred edge
     applies_to: [edges]
     caps: {micro: 10, minor: 9, moderate: 8, major: 7}
   edge_dent:
@@ -60,7 +60,7 @@ types:
     applies_to: [surface]
     caps: {micro: 10, minor: 9, moderate: 7, major: 5}
   holo_scratch:
-    label: Holo scratch
+    label: Holo / foil scratch
     applies_to: [surface]
     caps: {micro: 10, minor: 9, moderate: 8, major: 6}
   print_line:

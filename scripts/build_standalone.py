@@ -52,7 +52,7 @@ FONTS = (
     '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
     '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800'
-    '&family=IBM+Plex+Mono:wght@400;500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">'
+    '&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">'
 )
 # Same small reset the Claude page skeleton provides, for the GitHub Pages build.
 SITE_RESET = (
@@ -80,7 +80,7 @@ def _parts(env: str) -> tuple[str, str, str]:
     css = (SRC / "style.css").read_text(encoding="utf-8")
     criteria = json.dumps(criteria_json(), separators=(",", ":"), ensure_ascii=False)
     scripts = [f"window.GRADING_LAB_ENV={json.dumps(env)};window.GRADING_CRITERIA={criteria};"]
-    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("grading.js", "vision.js", "app.js")]
+    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("grading.js", "vision.js", "inspect.js", "identify.js", "ocr.js", "prices.js", "app.js")]
     script_tags = "\n".join(f"<script>{_inline_script(code)}</script>" for code in scripts)
     return body, css, script_tags
 
@@ -140,11 +140,14 @@ self.addEventListener("activate", (e) => {
 });
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
+  const url = new URL(e.request.url);
+  const fonts = url.hostname === "fonts.googleapis.com" || url.hostname === "fonts.gstatic.com";
+  // Card lookups, prices and the text reader go straight to the network: never cached here (price
+  // requests carry the user's PriceCharting token).
+  if (url.origin !== location.origin && !fonts) return;
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((hit) =>
       hit || fetch(e.request).then((res) => {
-        const url = new URL(e.request.url);
-        const fonts = url.hostname === "fonts.googleapis.com" || url.hostname === "fonts.gstatic.com";
         if ((res.ok && url.origin === location.origin) || (fonts && (res.ok || res.type === "opaque"))) {
           const copy = res.clone();
           caches.open(CACHE).then((c) => c.put(e.request, copy));

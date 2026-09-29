@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 import pytest
 
-from synthetic import make_card, place_on_background
+from synthetic import make_card, place_in_clutter, place_on_background, tilt_photo
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -66,6 +66,49 @@ def test_js_centering_within_one_point(tmp_path):
         assert abs(got["lr"] - lr) <= 1.0, (lr, tb, res)
         assert abs(got["tb"] - tb) <= 1.0, (lr, tb, res)
         assert res["confidence"]["borders"] > 0.6
+
+
+def test_js_riftbound_style_cards(tmp_path):
+    from test_vision import RIFTBOUND_CASES
+
+    images, truth = [], []
+    for borders, angle, color, bg in RIFTBOUND_CASES:
+        images.append((place_on_background(make_card(*borders, border_bgr=color), angle, bg=bg), "auto"))
+        truth.append(expected(*borders))
+    for (lr, tb), res in zip(truth, run(images, tmp_path)):
+        assert abs(res["centering"]["lr"] - lr) <= 1.0, (lr, tb, res)
+        assert abs(res["centering"]["tb"] - tb) <= 1.0, (lr, tb, res)
+
+
+def test_js_card_in_sleeve_on_busy_desk(tmp_path):
+    """Photos like real phone shots: a sleeved card on a laptop, with keys, a laptop edge and wood grain around it."""
+    cards = [
+        # Pokemon-style front in a snug sleeve
+        (make_card(40, 31, 44, 47, border_bgr=(40, 205, 245), frame_bgr=(60, 150, 190)), (40, 31, 44, 47), 2, {}),
+        # Riftbound-style back (navy border, thin yellow frame) in a roomy sleeve that catches the light:
+        # the sleeve's edge is a stronger line than the card's own edge
+        (make_card(33, 36, 30, 31, border_bgr=(90, 45, 20), frame_bgr=(40, 220, 240)), (33, 36, 30, 31), 1,
+         {"sleeve_pad": (70, 80), "sleeve_light": 45}),
+        (make_card(36, 33, 32, 30, border_bgr=(90, 45, 20), frame_bgr=(40, 220, 240)), (36, 33, 32, 30), -2,
+         {"sleeve_pad": (64, 90), "sleeve_light": 35, "seed": 8}),
+    ]
+    images = [(place_in_clutter(card, angle, **kw), "auto") for card, _, angle, kw in cards]
+    for (card, borders, _, _), res in zip(cards, run(images, tmp_path)):
+        lr, tb = expected(*borders)
+        assert abs(res["centering"]["lr"] - lr) <= 1.5, (lr, tb, res["centering"])
+        assert abs(res["centering"]["tb"] - tb) <= 1.5, (lr, tb, res["centering"])
+
+
+def test_js_off_angle_photos(tmp_path):
+    """Phone not held square to the card: the card is keystoned in the photo and must come out straight."""
+    cases = [((40, 31, 44, 47), (40, 205, 245), 0.05, 1), ((36, 44, 45, 40), (150, 70, 25), 0.07, 2), ((45, 45, 46, 46), (40, 205, 245), 0.06, 4)]
+    images, truth = [], []
+    for borders, color, amount, seed in cases:
+        images.append((tilt_photo(place_on_background(make_card(*borders, border_bgr=color), 2), amount, seed), "auto"))
+        truth.append(expected(*borders))
+    for (lr, tb), res in zip(truth, run(images, tmp_path)):
+        assert abs(res["centering"]["lr"] - lr) <= 1.5, (lr, tb, res["centering"])
+        assert abs(res["centering"]["tb"] - tb) <= 1.5, (lr, tb, res["centering"])
 
 
 def test_js_cropped_mode_and_guides(tmp_path):

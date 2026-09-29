@@ -34,14 +34,39 @@ def test_scan_grade_save_list(client):
     }
     report = client.post("/api/grade", json=assessment).json()
     assert report["grades"]["PSA"]["grade"] == 9
+    # Nothing marked as inspected: the 9 is only a ceiling.
+    assert report["complete"] is False and report["best_fit"] is None
+    assert report["grades"]["PSA"]["label"] == "Up to MINT 9 · incomplete"
+    assert "front corners" in report["unassessed"] and "back corners" not in report["unassessed"]
+
+    everything = ["corners", "edges", "surface"]
+    assessment["inspected"] = {"front": everything, "back": everything}
+    assessment["centering_evidence"] = {"front": {"lr": "measured", "tb": "measured"}, "back": {"lr": "typed", "tb": "typed"}}
+    report = client.post("/api/grade", json=assessment).json()
+    assert report["complete"] is True and report["grades"]["PSA"]["label"] == "MINT 9"
+    assert report["best_fit"] in report["grades"]
 
     saved = client.post("/api/cards", json={"assessment": assessment, "front_thumb": scan["thumb"]}).json()
     listing = client.get("/api/cards").json()
     assert listing[0]["id"] == saved["id"] and listing[0]["name"] == "Pikachu"
     full = client.get(f"/api/cards/{saved['id']}").json()
     assert full["assessment"]["card"]["number"] == "58/102"
+    assert full["assessment"]["inspected"]["back"] == everything
+    assert full["assessment"]["centering_evidence"]["front"]["lr"] == "measured"
     assert client.delete(f"/api/cards/{saved['id']}").status_code == 200
     assert client.get(f"/api/cards/{saved['id']}").status_code == 404
+
+    # The photo check wins over "inspected"; only checks done on the card in hand lift it.
+    assessment["photo_limits"] = {"front": ["edges:top", "corners:top_left", "centering"]}
+    report = client.post("/api/grade", json=assessment).json()
+    assert report["complete"] is False and report["grades"]["PSA"]["label"] == "Up to MINT 9 · incomplete"
+    assert report["unassessed"] == ["front corners (photo can't show them)", "front edges (photo can't show them)"]
+    assessment["inspected_in_hand"] = {"front": ["corners", "edges"]}
+    assert client.post("/api/grade", json=assessment).json()["complete"] is True
+    saved = client.post("/api/cards", json={"assessment": assessment}).json()
+    full = client.get(f"/api/cards/{saved['id']}").json()
+    assert full["assessment"]["photo_limits"] == {"front": ["corners", "edges"]}
+    assert full["assessment"]["inspected_in_hand"] == {"front": ["corners", "edges"]}
 
 
 def test_bad_inputs(client):
@@ -50,6 +75,11 @@ def test_bad_inputs(client):
     assert client.post("/api/grade", json=bad).status_code == 422
     bad_loc = {"defects": [{"side": "front", "location": "middle", "type": "stain", "severity": "minor"}]}
     assert client.post("/api/grade", json=bad_loc).status_code == 422
+    assert client.post("/api/grade", json={"inspected": {"front": ["gloss"]}}).status_code == 422
+    wrong_area = {"defects": [{"side": "front", "location": "top", "type": "print_spot", "severity": "minor"}]}
+    assert client.post("/api/grade", json=wrong_area).status_code == 422
+    assert client.post("/api/grade", json={"photo_limits": {"front": ["edges:middle"]}}).status_code == 422
+    assert client.post("/api/grade", json={"centering_evidence": {"front": {"lr": "guessed"}}}).status_code == 422
 
 
 def test_connect_info(client, monkeypatch):
