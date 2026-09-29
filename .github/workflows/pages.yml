@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    # Daily, after tcgcsv.com's 20:00 UTC update: refreshes the Riftbound price file.
+    - cron: "37 21 * * *"
 
 permissions:
   contents: read
@@ -25,6 +28,10 @@ jobs:
       # The build only needs the criteria loader, not the whole Python app.
       - run: pip install "pyyaml>=6.0"
       - run: python scripts/build_standalone.py
+      # Riftbound prices (TCGplayer via tcgcsv.com). If the download fails the app still deploys; it then
+      # says the price list isn't available.
+      - run: python scripts/fetch_riftbound_prices.py
+        continue-on-error: true
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

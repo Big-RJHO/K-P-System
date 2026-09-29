@@ -1,6 +1,13 @@
 # Reading the card from the photo, and its prices
 
-Price sources in the app: CardSight sales for Pokémon (section 4); Gemini web search for Riftbound, and optionally for Pokémon (section 3); PriceCharting only with your own subscription token (section 2); TCGdex's free ungraded prices as a fallback.
+Reading the card: Gemini when a Gemini key is saved (section 5, 31/31 on the test photos), otherwise the on-phone reader (section 1, 15/31).
+
+Price sources in the app:
+- **Pokémon:** CardSight sales (section 4).
+- **Riftbound:** TCGplayer market prices from a daily file (section 6), ungraded only.
+- **Web search (Gemini):** graded prices for Riftbound, and optionally for Pokémon (section 3). Needs billing on the Gemini key.
+- **PriceCharting:** only with your own subscription token (section 2).
+- **TCGdex:** free ungraded Pokémon prices, as a fallback.
 
 Two steps run after a scan:
 
@@ -190,3 +197,49 @@ Checked on CardSight's OpenAPI spec, pricing page and terms, 2026-09-29.
 ### Not used yet
 - **Photo identification:** CardSight can identify a card from the photo (`POST /v1/identify/card`, 1 call). That would likely beat the on-phone text reading for Pokémon, but it isn't wired in.
 - **Population reports:** CardSight also offers free PSA population reports.
+
+## 5. Reading the card with Gemini (`geminiid.js`)
+
+With a Gemini key saved, **Read from photo** sends the flattened front of the card to Gemini and gets back the name, collector number, set code and set name, language, and version. The request is a JPEG about 1,000 px tall, sent to `gemini-3.5-flash-lite` with a JSON response schema.
+
+### How it's used
+- **Same path as the on-phone reader:** the reading goes through the same card lookup and **This is my card** confirmation.
+- **Fallback:** if Gemini fails (offline, over its limit), the app falls back to the on-phone reader and says so.
+- **Wrong game:** if Gemini sees a different game than the one selected, the app suggests switching.
+
+### Privacy and cost
+- **Your photo leaves the phone:** the front photo is sent to Google. On Google's free tier, content may be used to improve their products. The key's settings box says so.
+- **Cost:** plain image requests work on a free key; no billing is needed for this part. Only Google search (section 3) needs billing.
+
+### Measured
+Live, 2026-09-29, with a new free key, on the 31 real photos from `docs/blind-test.md`:
+
+| | Gemini | On-phone reader |
+|---|---|---|
+| Collector number right | **31 / 31** | 15 / 31 |
+| Name right | **30 / 30** | 21 / 27 (English) |
+| Set name given | 29 / 31, correct where checked | — |
+| Time per card | about 2 s | about 1 s |
+
+- **Test set:** 30 TAG-slabbed Pokémon cards, including Japanese cards and gold stars, plus the raw Ahri (Riftbound) card.
+- **Near misses:** one Legendary Collection card was read as 2/18 instead of 2/110. The number was right; the lookup still needs the name.
+- **Full browser run:** Gemini, then the live card databases, then confirming the card.
+  - Ahri was read as "Ahri · SP3/006 · VEN" and the right card came first at 100% match, in about 6 s.
+  - The Lugia slab was read as "Lugia · 9/111 · Neo Genesis" and the right card came first.
+
+## 6. Riftbound prices from TCGplayer (`rbprices.js`, `scripts/fetch_riftbound_prices.py`)
+
+TCGplayer's own API isn't open to new developers. tcgcsv.com republishes its product and price data once a day, and its FAQ invites programmatic downloads. Its files don't allow cross-site reads from a browser, so:
+
+- **Daily file:** the Pages workflow runs `scripts/fetch_riftbound_prices.py` once a day, at 21:37 UTC, after tcgcsv's 20:00 UTC update, and on every deploy.
+  - It makes about 27 requests, 0.3 s apart, with an identifying User-Agent.
+  - It writes `riftbound-prices.json` next to the app: single cards only, with each printing's market, low and mid price.
+  - On 2026-09-29 that was 1,510 cards (1,447 with prices), 470 KB.
+- **Where the app reads it:** from its own site. The Claude-hosted copy reads the GitHub Pages copy, which allows cross-site reads.
+- **Service worker:** always tries the network first for this file, so it isn't stuck on an old day, and falls back to the cached copy offline.
+- **Matching:** by the TCGplayer product id Riftcodex gives for the confirmed card, otherwise by set code and collector number, with the name as a check.
+  - Example: Ahri, Inquisitive (VEN SP3/006) is TCGplayer product 705996, Foil, market $76.22.
+- **What's shown:** the market price (recent sales), lowest listing and mid price for each printing, the update date, and a link to TCGplayer.
+- **Ungraded only:** TCGplayer doesn't list graded cards, so graded Riftbound prices come from the web search (section 3), which needs billing on the Gemini key.
+- **Public file:** the price file is public on the Pages site, as tcgcsv's own files are. It holds only the Riftbound subset needed by the app.
+- **Tests:** `tests/test_standalone_rbprices.py` covers matching, loading, printings and the download script (offline). The browser run above showed the price after confirming the card.
