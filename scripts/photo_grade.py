@@ -169,7 +169,9 @@ def cmd_scan(args) -> None:
                                   "quality": r["quality"]["verdict"], "blocked": blocked,
                                   "blocked_reasons": r["quality"]["blocked_reasons"],
                                   # what `grade` treats as unassessed on this side, whatever is ticked as inspected
-                                  "photo_limits": limits}
+                                  "photo_limits": limits,
+                                  # the automatic edge/corner candidates, in the DING shape (suggestions only)
+                                  "auto_defects": [{**d, "side": side} for d in r["check"]["defects"]]}
         print(f"=== {side.upper()} ===")
         print(f"centering  left/right {axes['lr'][0]:.1f} ({axes['lr'][1]})   top/bottom {axes['tb'][0]:.1f} ({axes['tb'][1]})")
         print(f"photo quality: {r['quality']['verdict']}")
