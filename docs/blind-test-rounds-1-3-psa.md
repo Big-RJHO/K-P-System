@@ -1,12 +1,14 @@
 # PSA blind test (3 rounds)
 
+> Superseded by [blind-test.md](blind-test.md), which covers all rounds and the fixes made since.
+
 **What was tested.** Photos of ten PSA-graded Shadowless Charizard cards (one each at PSA 1 to 10, front and back, from the
 "PSA Grading Scale in Pokemon" thread on elitefourum.com) were given to fresh agents. Each round used 10 new agents, each
 with a different card (a random assignment, no card given twice in a round, and a different assignment each round). The
 slab label was cropped off so the grade wasn't visible, and files were renamed. Each agent ran the system
 (`scripts/photo_grade.py scan`, then looked at the flattened card, corner and edge images, wrote down the defects
 it saw and which areas it inspected, then `photo_grade.py grade`). The PSA number the system produced was compared with the
-slab's grade (`scripts/score_psa_test.py`). The photos are third-party images and are not stored in this repository.
+slab's grade (`scripts/score_blind_test.py (then called score_psa_test.py)`). The photos are third-party images and are not stored in this repository.
 
 **How to read the numbers.**
 - Only **10 distinct cards** were used. The three rounds measure how consistent the agents are on the same photos, not 30
