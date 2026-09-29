@@ -37,8 +37,11 @@ def card_mask(radius: int = 36) -> np.ndarray:
     return mask
 
 
-def place_on_background(card: np.ndarray, angle: float = 3.0, seed: int = 1, bg: int = 35) -> np.ndarray:
-    """Rotate the card and paste it onto a larger, noisy dark background, like a photo."""
+def place_on_background(
+    card: np.ndarray, angle: float = 3.0, seed: int = 1, bg: int = 35, mask: np.ndarray | None = None
+) -> np.ndarray:
+    """Rotate the card and paste it onto a larger, noisy dark background, like a photo.
+    `mask` replaces the card's shape (default: `card_mask()`), e.g. with worn corners."""
     rng = np.random.default_rng(seed)
     bh, bw = int(H * 1.5), int(W * 1.6)
     bg = np.clip(rng.normal(bg, 10, (bh, bw, 3)), 0, 255).astype(np.uint8)
@@ -47,7 +50,7 @@ def place_on_background(card: np.ndarray, angle: float = 3.0, seed: int = 1, bg:
     matrix[0, 2] += center[0] - W / 2
     matrix[1, 2] += center[1] - H / 2
     warped = cv2.warpAffine(card, matrix, (bw, bh), flags=cv2.INTER_CUBIC, borderValue=(0, 0, 0))
-    mask = cv2.warpAffine(card_mask(), matrix, (bw, bh), flags=cv2.INTER_NEAREST)
+    mask = cv2.warpAffine(card_mask() if mask is None else mask, matrix, (bw, bh), flags=cv2.INTER_NEAREST)
     bg[mask > 0] = warped[mask > 0]
     return bg
 
@@ -94,6 +97,66 @@ def place_in_clutter(
     mask = cv2.warpAffine(card_mask(), matrix, (bw, bh), flags=cv2.INTER_NEAREST)
     bg[mask > 0] = warped[mask > 0]
     return bg
+
+
+def card_mask_worn(radius: int = 36, worn: dict[str, int] | None = None, fray: float = 0.0, seed: int = 0) -> np.ndarray:
+    """Card shape where some corners are worn rounder: `worn` maps a corner ("top_left", ...) to its radius.
+    `fray` (px) roughens those corners' outlines."""
+    worn = worn or {}
+    rng = np.random.default_rng(seed)
+    mask = card_mask(radius)
+    centers = {"top_left": (1, 1), "top_right": (-1, 1), "bottom_right": (-1, -1), "bottom_left": (1, -1)}
+    for corner, r in worn.items():
+        sx, sy = centers[corner]
+        x0 = 0 if sx > 0 else W - 1
+        y0 = 0 if sy > 0 else H - 1
+        cx, cy = x0 + sx * r, y0 + sy * r
+        for v in range(r + 1):
+            for u in range(r + 1):
+                x, y = x0 + sx * u, y0 + sy * v
+                d = np.hypot(x - cx, y - cy)
+                jitter = rng.uniform(-fray, fray) if fray else 0.0
+                if u < r and v < r and d > r + jitter:
+                    mask[y, x] = 0
+    return mask
+
+
+def paint_edge_whitening(
+    card: np.ndarray, side: str, start: int, length: int, depth: int, seed: int = 0, color=(238, 240, 242)
+) -> np.ndarray:
+    """Paint exposed white card stock along one edge: `length` px starting `start` px along the edge
+    (top/bottom from the left, left/right from the top), reaching up to `depth` px in (ragged)."""
+    rng = np.random.default_rng(seed)
+    out = card.copy()
+    for t in range(start, start + length):
+        d = int(rng.integers(max(1, depth // 2), depth + 1))
+        if side == "top":
+            out[0:d, t] = color
+        elif side == "bottom":
+            out[H - d : H, t] = color
+        elif side == "left":
+            out[t, 0:d] = color
+        else:
+            out[t, W - d : W] = color
+    return out
+
+
+def paint_corner_whitening(card: np.ndarray, corner: str, depth: int = 6, radius: int = 36, seed: int = 0, color=(238, 240, 242)) -> np.ndarray:
+    """Paint a frayed white band just inside a rounded corner's arc (a worn, whitened corner)."""
+    rng = np.random.default_rng(seed)
+    out = card.copy()
+    sx, sy = {"top_left": (1, 1), "top_right": (-1, 1), "bottom_right": (-1, -1), "bottom_left": (1, -1)}[corner]
+    x0 = 0 if sx > 0 else W - 1
+    y0 = 0 if sy > 0 else H - 1
+    cx, cy = x0 + sx * radius, y0 + sy * radius
+    for ang in np.linspace(0, np.pi / 2, 200):
+        d = rng.uniform(depth / 2, depth)
+        for rr in np.arange(radius - d, radius + 0.5, 0.5):
+            x = int(round(cx - sx * rr * np.cos(ang)))
+            y = int(round(cy - sy * rr * np.sin(ang)))
+            if 0 <= x < W and 0 <= y < H:
+                out[y, x] = color
+    return out
 
 
 def tilt_photo(img: np.ndarray, amount: float = 0.06, seed: int = 3) -> np.ndarray:
