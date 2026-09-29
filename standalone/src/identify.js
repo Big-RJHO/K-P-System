@@ -95,7 +95,7 @@
     return out;
   }
 
-  const emptyCard = () => ({ name: "", set_name: "", set_code: "", number: "", rarity: "", variant: "", year: null, language: "", image_url: "", thumb_url: "", image_readable: false, source_url: "", source: "", source_id: "", confidence: 0, evidence: [] });
+  const emptyCard = () => ({ name: "", set_name: "", set_code: "", number: "", rarity: "", variant: "", year: null, language: "", image_url: "", thumb_url: "", image_readable: false, source_url: "", source: "", source_id: "", confidence: 0, evidence: [], market: null, tcgplayer_id: "" });
 
   /** Confidence from how many typed fields agree with a database record. */
   function score(base, q, rec, ev) {
@@ -139,6 +139,7 @@
     c.source_id = card.id || "";
     c.source_url = `${TCGDEX}/${lang}/cards/${encodeURIComponent(card.id || "")}`;
     c._total = (card.set && card.set.cardCount && card.set.cardCount.official) ?? (set && set.cardCount && set.cardCount.official) ?? null;
+    c.market = card.pricing && typeof card.pricing === "object" ? card.pricing : null;   // TCGplayer / Cardmarket ungraded prices, when TCGdex has them
     return c;
   }
 
@@ -265,6 +266,7 @@
     c.source = "riftcodex";
     c.source_id = card.riftbound_id || "";
     c.source_url = `${RIFTCODEX}/cards/riftbound/${encodeURIComponent(card.riftbound_id || "")}`;
+    c.tcgplayer_id = card.tcgplayer_id ? String(card.tcgplayer_id) : "";
     return c;
   }
 

@@ -515,3 +515,25 @@ select:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 4px var(--
 .sc-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 8px 0; }
 .sc-toggle input { width: auto; flex: none; }
 .reference-text a { color: var(--accent-text); font-weight: 600; }
+
+/* ---------------------------------------------------------------- prices */
+.pr-product { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 8px; }
+.pr-product b { font-size: 15px; }
+.pr-product span { font-size: 12.5px; color: var(--muted); }
+.pr-choose { width: 100%; margin: 0 0 10px; }
+.pr-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.pr-table th, .pr-table td { text-align: left; padding: 8px 4px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.pr-table th { font-weight: 600; }
+.pr-table td.pr-val { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.pr-table small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.pr-table tr.pr-ceiling th { color: var(--muted); }
+.pr-note { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; line-height: 1.45; }
+.pr-note.warn { color: var(--warn); font-weight: 600; }
+.pr-note a, .pr-links a { color: var(--accent-text); font-weight: 600; }
+.pr-links { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; margin-top: 8px; }
+.pr-ladder summary { cursor: pointer; font-size: 13px; font-weight: 600; margin-top: 10px; }
+.pc-settings { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.pc-settings summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
+.pc-settings .hint { font-size: 12.5px; }
+.pc-settings input { width: 100%; font-family: var(--font-mono); }
+.pc-settings .row-actions { justify-content: flex-start; flex-wrap: wrap; margin-top: 8px; }

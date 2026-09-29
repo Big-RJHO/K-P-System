@@ -91,7 +91,7 @@ Can:
 - Use the printed total (`/197`) and a typed name as cross-checks: a mismatch lowers confidence and is shown.
 
 Cannot:
-- Read the card from the photo. It relies on what the user typed (or later OCR, see below).
+- Read the card from the photo by itself. The app's "Read from photo" (`ocr.js`, `docs/pricing.md`) fills in the text this module looks up.
 - Tell which physical finish/print run a card is: TCGdex lists which finishes exist for a number
   ("Normal / Reverse holo"), not which one this copy is. Riftbound alt-art, signature and overnumbered
   cards have their own ids; a shared printed number is possible, so the artwork must be compared by eye.
@@ -146,7 +146,9 @@ almost no detail. A card-shaped image is never trimmed, so a white-bordered card
   on the printed collector line, the pale top edge and the gold-white frame corners; alignment was visibly within a few pixels.
   Computing the mask takes about 0.1 s.
 
-## 5. OCR assessment (tesseract.js) - not integrated
+## 5. OCR assessment (tesseract.js)
+
+**Update:** now integrated as "Read from photo", following the "If revisited" plan below and cropping from the full-resolution photo. See `docs/pricing.md` for how it works and its measured accuracy. The assessment below is kept as it was written.
 
 Question: can the collector line ("VEN - SP3/006 - EN") be read from the photo instead of typed?
 

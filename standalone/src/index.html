@@ -135,8 +135,9 @@
             <input id="collector-line" placeholder="e.g. VEN · SP3/006 · EN" autocomplete="off">
           </label>
           <div class="id-find">
+            <button type="button" class="btn small" id="read-card">Read from photo</button>
             <button type="button" class="btn small" id="find-card">Find this card online</button>
-            <span class="hint-inline" id="id-status">Uses the set code and number above. Nothing is sent about your photos.</span>
+            <span class="hint-inline" id="id-status">Reads the name and number from your front photo on this phone, then looks the card up. Only the text is sent, never your photos.</span>
           </div>
           <div id="id-results" class="id-results" hidden></div>
           <div class="form-grid">
@@ -169,6 +170,24 @@
             <p class="hint">Support evidence only. A reference card can have its own wear, and its grade is never applied to yours.</p>
           </div>
         </div>
+      </section>
+
+      <section class="card-panel prices-panel reveal" id="prices-panel" aria-labelledby="prices-title">
+        <div class="panel-head">
+          <h2 id="prices-title">Prices</h2>
+          <button type="button" class="link-btn strong" id="refresh-prices">Update</button>
+        </div>
+        <div id="prices-body"></div>
+        <details class="pc-settings" id="pc-settings">
+          <summary>PriceCharting access</summary>
+          <p class="hint">Graded prices come from PriceCharting's API, which needs your own paid PriceCharting subscription. Paste the 40-character token from its Subscription page (API/Download). It stays on this phone only: it's never saved in backups, History or drafts, and it's only sent to pricecharting.com. PriceCharting licenses this data for your own use.</p>
+          <label for="pc-token" class="note-label">API token<input id="pc-token" type="password" autocomplete="off" spellcheck="false" placeholder="40 letters and digits"></label>
+          <div class="row-actions">
+            <button type="button" class="btn small" id="pc-save">Save token</button>
+            <button type="button" class="btn small ghost" id="pc-remove">Remove</button>
+            <span class="hint-inline" id="pc-status"></span>
+          </div>
+        </details>
       </section>
 
       <div class="metrics reveal" id="metrics"></div>

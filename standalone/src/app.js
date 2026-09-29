@@ -105,6 +105,10 @@ const state = {
   evidence: { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } },
   activeSide: "front",
   reference: null,  // {image_url|image, source, source_url, name, rgba, mask}: only set once the user confirms the card
+  market: null,     // ungraded market prices TCGdex returned for the confirmed card (Pokemon only)
+  tcgplayerId: "",  // TCGplayer product id Riftcodex returned for the confirmed card
+  price: { key: "", status: "idle" },  // PriceCharting lookup for the current card: see loadPrices()
+  autoRead: false,  // the card has been read from the photo once already (automatic runs only)
   showSuspects: true,
   sheet: { side: null, location: null, type: null, severity: null },
   example: false,
@@ -1162,6 +1166,9 @@ function confirmCandidate(c) {
   $("#id-results").hidden = true;
   setStatus(`Confirmed: ${c.name}. Finish and language are left for you to set.`);
   setReference({ image_url: c.image_url, thumb_url: c.thumb_url, source: c.source, source_url: c.source_url, name: `${c.name}${c.variant ? ` · ${c.variant}` : ""}`, image_readable: c.image_readable });
+  state.market = c.market || null;
+  state.tcgplayerId = c.tcgplayer_id || "";
+  loadPrices({ force: true });
 }
 
 function idNote(box, text) {
@@ -1189,10 +1196,11 @@ function renderManualReference(box) {
   box.append(wrap);
 }
 
-function renderCandidates(res) {
+function renderCandidates(res, reading = null) {
   const box = $("#id-results");
   box.innerHTML = "";
   box.hidden = false;
+  if (reading) idNote(box, `Read from your photo: ${[reading.name && `"${reading.name}"`, reading.number, reading.set_code].filter(Boolean).join(" · ")}. Text recognition can misread a letter or digit, so compare the pictures before you pick.`);
   if (res.error || !res.candidates.length) {
     idNote(box, res.error || "No matching card found.");
     idNote(box, "Nothing is being used as a reference. You can fill in the details by hand, or supply a reference image yourself.");
@@ -1241,6 +1249,253 @@ async function findCard() {
   }
   btn.disabled = false;
   renderCandidates(res);
+}
+
+/* ---------------------------------------------------------------- read the card from the photo */
+
+let recognizer = null;
+
+/** The front photo plus the card outline (full resolution), or the flattened card when the photo is gone. */
+function ocrSource() {
+  const s = state.scans.front;
+  if (!s) return null;
+  if (s.photo && s.corners) return { img: s.photo, H: Vision.warpMatrix(s.corners, 0) };
+  return s.result ? CardOCR.fromWarped(s.result.warped, s.margin) : null;
+}
+
+async function readFromPhoto({ auto = false } = {}) {
+  const src = ocrSource();
+  if (!src) { if (!auto) setStatus("Add a front photo first."); return; }
+  const btn = $("#read-card");
+  btn.disabled = true;
+  setDetailsEditing(true);
+  if (!recognizer) recognizer = CardOCR.browserRecognizer(setStatus);
+  setStatus("Reading the card…");
+  let reading;
+  try {
+    reading = await CardOCR.read(src, state.game, recognizer);
+  } catch (err) {
+    btn.disabled = false;
+    setStatus(`${(err && err.message) || "Couldn't read the card."} Type the name and number, then tap Find this card online.`);
+    return;
+  }
+  btn.disabled = false;
+  if (!reading.found) {
+    setStatus("Couldn't read the name or number from this photo (glare, a holo pattern, or a non-English card). Type them, then tap Find this card online.");
+    return;
+  }
+  leaveExample();
+  // A confirmed reference belongs to the card it was confirmed for; a new reading has to be confirmed again.
+  if (state.reference && state.reference.source !== "user") clearReference();
+  state.market = null;
+  state.tcgplayerId = "";
+  if (reading.name && (!auto || !$("#card-name").value.trim())) $("#card-name").value = reading.name;
+  if (reading.number) {
+    $("#collector-line").value = [reading.set_code, reading.number, reading.language].filter(Boolean).join(" · ");
+    $("#card-number").value = reading.number;
+    if (reading.set_code) $("#card-set-code").value = reading.set_code;
+    if (reading.language) $("#card-language").value = reading.language === "JA" ? "JP" : reading.language;
+  }
+  renderDetails();
+  saveDraft();
+  setStatus("Looking it up…");
+  let res = { candidates: [] };
+  for (const q of CardOCR.queries(reading, state.game)) {
+    try {
+      res = await Identify.candidates(q, { fetch: (...a) => window.fetch(...a) });
+    } catch (err) {
+      res = { candidates: [], error: "The lookup failed (offline, or this page can't reach the card database)." };
+    }
+    if (res.candidates && res.candidates.length) break;
+  }
+  renderCandidates(res, reading);
+}
+
+/* ---------------------------------------------------------------- prices */
+
+const PC_TOKEN_KEY = "cardGradingLab.pricecharting.token";  // never part of backups, drafts or History
+const pcStorage = () => { try { return window.localStorage; } catch (_) { return null; } };
+const pcToken = () => { try { return (pcStorage() && pcStorage().getItem(PC_TOKEN_KEY)) || ""; } catch (_) { return ""; } };
+
+function priceCard() {
+  const c = assessment().card;
+  return { game: c.game, name: $("#card-name").value.trim(), set_name: c.set_name, number: c.number, finish: c.finish };
+}
+const priceKey = (c) => [c.game, c.name, c.set_name, c.number, c.finish].map((v) => String(v || "").toLowerCase()).join("|");
+
+async function loadPrices({ force = false } = {}) {
+  const card = priceCard();
+  const key = priceKey(card);
+  if (!card.name || !card.number) { state.price = { key, status: "idle" }; renderPrices(); return; }
+  const token = pcToken();
+  if (!token) { state.price = { key, status: "no-token" }; renderPrices(); return; }
+  if (!force && state.price.key === key && ["loading", "ok"].includes(state.price.status)) return;
+  state.price = { key, status: "loading" };
+  renderPrices();
+  const opts = { token, fetch: (...a) => window.fetch(...a), storage: pcStorage() };
+  try {
+    const search = await Prices.search(card, opts);
+    if (state.price.key !== key) return;
+    if (!search.matches.length) throw new Error(search.error || "PriceCharting has no product matching this card.");
+    const chosen = search.best || search.matches[0];
+    const product = await Prices.product(chosen.id, opts);
+    if (state.price.key !== key) return;
+    state.price = { key, status: "ok", search, chosenId: chosen.id, product };
+  } catch (err) {
+    if (state.price.key === key) state.price = { key, status: "error", error: (err && err.message) || "The price lookup failed." };
+  }
+  renderPrices();
+}
+
+async function choosePriceVersion(id) {
+  const p = state.price;
+  if (!p.search) return;
+  const key = p.key;
+  state.price = { ...p, status: "loading", chosenId: id };
+  renderPrices();
+  try {
+    const product = await Prices.product(id, { token: pcToken(), fetch: (...a) => window.fetch(...a), storage: pcStorage() });
+    if (state.price.key === key) state.price = { ...state.price, status: "ok", product };
+  } catch (err) {
+    if (state.price.key === key) state.price = { ...state.price, status: "error", error: (err && err.message) || "The price lookup failed." };
+  }
+  renderPrices();
+}
+
+function priceNote(box, text, cls = "") {
+  const p = document.createElement("p");
+  p.className = `pr-note ${cls}`.trim();
+  p.textContent = text;
+  box.append(p);
+  return p;
+}
+
+function priceLink(box, href, text) {
+  if (!httpsUrl(href)) return;
+  const a = document.createElement("a");
+  a.href = href;
+  a.target = "_blank";
+  a.rel = "noopener noreferrer";
+  a.textContent = text;
+  box.append(a);
+}
+
+function renderMarket(box) {
+  // Free ungraded prices from the card database (TCGdex), when there's no PriceCharting access.
+  const m = state.game === "pokemon" ? Prices.fromTcgdex(state.market) : null;
+  if (!m) return;
+  const parts = [];
+  if (m.tcgplayer) {
+    const v = m.tcgplayer.versions[0];
+    parts.push(`TCGplayer market $${v.market.toFixed(2)}${m.tcgplayer.versions.length > 1 ? ` (${v.version})` : ""}`);
+  }
+  if (m.cardmarket) parts.push(`Cardmarket trend €${m.cardmarket.trend.toFixed(2)}`);
+  const when = (m.tcgplayer && m.tcgplayer.updated) || (m.cardmarket && m.cardmarket.updated) || "";
+  priceNote(box, `Ungraded, from the card database (TCGdex): ${parts.join(" · ")}${when ? `, updated ${when.slice(0, 10)}` : ""}. Not a graded price.`);
+}
+
+function renderPrices() {
+  const box = $("#prices-body");
+  if (!box) return;
+  box.innerHTML = "";
+  const card = priceCard();
+  const has = !!(card.name && card.number);
+  $("#refresh-prices").hidden = !has;
+  $("#pc-status").textContent = pcToken() ? "A token is saved on this phone." : "";
+  if (!has) {
+    priceNote(box, "Confirm which card this is first: Card details → Read from photo, or Find this card online.");
+    return;
+  }
+  const p = state.price;
+  const stale = p.key !== priceKey(card);
+  if (stale && p.status !== "idle") priceNote(box, "The card details changed. Tap Update for this card's prices.");
+  if (!stale && p.status === "loading") priceNote(box, "Looking up prices…");
+  if (!stale && p.status === "error") priceNote(box, p.error, "warn");
+  if (p.status === "no-token" || !pcToken()) priceNote(box, "Graded prices need PriceCharting access (below). Without it, open the card on PriceCharting to see every grade.");
+  if (!stale && p.status === "ok" && p.product) {
+    const prod = p.product;
+    const head = document.createElement("div");
+    head.className = "pr-product";
+    head.innerHTML = "<b></b><span></span>";
+    $("b", head).textContent = prod.product_name;
+    $("span", head).textContent = prod.console_name;
+    box.append(head);
+    const matches = p.search.matches.filter((m) => m.score > 0).slice(0, 8);
+    if (matches.length > 1) {
+      const sel = document.createElement("select");
+      sel.className = "pr-choose";
+      sel.setAttribute("aria-label", "PriceCharting version");
+      for (const m of matches) {
+        const o = document.createElement("option");
+        o.value = m.id;
+        o.textContent = `${m.product_name} · ${m.console_name}`;
+        sel.append(o);
+      }
+      sel.value = p.chosenId;
+      sel.addEventListener("change", () => choosePriceVersion(sel.value));
+      box.append(sel);
+    }
+    if (p.search.needs_choice) priceNote(box, "Check this is your exact version: 1st Edition, Shadowless, reverse holo, foil and promo copies are priced separately.", "warn");
+    const report = state.report;
+    const rows = report ? Prices.forReport(prod, report) : { ungraded: prod.prices["loose-price"], rows: [], ceiling: false };
+    const table = document.createElement("table");
+    table.className = "pr-table";
+    const add = (label, cents, small = "", cls = "") => {
+      const tr = document.createElement("tr");
+      if (cls) tr.className = cls;
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = label;
+      if (small) { const sm = document.createElement("small"); sm.textContent = small; $("th", tr).append(sm); }
+      $("td", tr).textContent = Prices.money(cents);
+      table.append(tr);
+    };
+    add("Ungraded", rows.ungraded);
+    for (const r of rows.rows) {
+      const grade = r.label.replace(/^Up to /, "").replace(/ · incomplete$/, "");
+      add(`${r.company} ${r.ceiling ? "up to " : ""}${grade}`, r.cents, [r.basis && `PriceCharting: ${r.basis}.`, r.note].filter(Boolean).join(" "), r.ceiling ? "pr-ceiling" : "");
+    }
+    box.append(table);
+    if (rows.ceiling) priceNote(box, "These grades are best-case ceilings, so the graded prices are the most this card could sell for at those grades, not what it's worth. The real grade may be lower.", "warn");
+    const ladder = document.createElement("details");
+    ladder.className = "pr-ladder";
+    ladder.innerHTML = "<summary>All grades</summary>";
+    const lt = document.createElement("table");
+    lt.className = "pr-table";
+    for (const l of Prices.ladder(prod)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = l.label;
+      $("td", tr).textContent = Prices.money(l.cents);
+      lt.append(tr);
+    }
+    ladder.append(lt);
+    box.append(ladder);
+    priceNote(box, `Prices from PriceCharting, fetched ${new Date(prod.fetched_at).toLocaleDateString()}. Grades 1-9.5 are PriceCharting's prices for any grading company.`);
+  }
+  if (p.status !== "ok" || stale) renderMarket(box);
+  const links = document.createElement("div");
+  links.className = "pr-links";
+  if (!stale && p.status === "ok" && p.product) priceLink(links, Prices.productUrl(p.product), "Open on PriceCharting");
+  else priceLink(links, Prices.searchUrl(card), "See prices on PriceCharting");
+  if (state.tcgplayerId && /^\d+$/.test(state.tcgplayerId)) priceLink(links, `https://www.tcgplayer.com/product/${state.tcgplayerId}`, "TCGplayer");
+  box.append(links);
+}
+
+function savePriceToken() {
+  const t = $("#pc-token").value.trim();
+  if (!Prices.validToken(t)) { $("#pc-status").textContent = "That doesn't look like a PriceCharting token (40 letters and digits)."; return; }
+  try { pcStorage().setItem(PC_TOKEN_KEY, t); } catch (_) { $("#pc-status").textContent = "This browser won't store it (private mode?)."; return; }
+  $("#pc-token").value = "";
+  $("#pc-settings").open = false;
+  loadPrices({ force: true });
+}
+
+function removePriceToken() {
+  try { pcStorage().removeItem(PC_TOKEN_KEY); } catch (_) { /* blocked */ }
+  Prices.clearCache(pcStorage());  // PriceCharting data may only be kept while subscribed
+  $("#pc-token").value = "";
+  state.price = { key: "", status: "no-token" };
+  renderPrices();
 }
 
 /* ---------------------------------------------------------------- grading + report */
@@ -1474,6 +1729,7 @@ function renderReport() {
   renderDefects();
   renderScanCheck();
   renderCompanies(report);
+  renderPrices();
   viewer.render();
   $("#disclaimer").textContent = report.disclaimer;
 }
@@ -1587,6 +1843,13 @@ function setView(view, { animate = true } = {}) {
     renderCentering();
     renderDefects();
     runGrade();
+    const s = state.scans.front;
+    if (!state.example && !state.autoRead && s && s.photo && !$("#card-name").value.trim() && !$("#card-number").value.trim() && navigator.onLine !== false) {
+      state.autoRead = true;   // once per card: reading downloads the text reader the first time
+      readFromPhoto({ auto: true });
+    } else if (!state.example) {
+      loadPrices();
+    }
   } else {
     renderSlots();
     renderResume();
@@ -1606,6 +1869,10 @@ function resetCard() {
   state.example = false;
   state.report = null;
   state.savedId = null;
+  state.market = null;
+  state.tcgplayerId = "";
+  state.price = { key: "", status: "idle" };
+  state.autoRead = false;
   clearReference();
   $("#id-results").hidden = true;
   $("#card-name").value = "";
@@ -1878,6 +2145,10 @@ function init() {
     saveDraft();
   });
   $("#find-card").addEventListener("click", findCard);
+  $("#read-card").addEventListener("click", () => readFromPhoto());
+  $("#refresh-prices").addEventListener("click", () => loadPrices({ force: true }));
+  $("#pc-save").addEventListener("click", savePriceToken);
+  $("#pc-remove").addEventListener("click", removePriceToken);
   $("#clear-reference").addEventListener("click", () => { clearReference(); setStatus("Reference removed."); });
   // A reference only belongs to the card it was confirmed for: changing what identifies the card drops it.
   for (const id of ["card-set-code", "card-number", "card-language"]) {
