@@ -10,9 +10,16 @@
         which areas were looked at), with the same rules as the app.
 
 OBS.json: {"inspected": {"front": ["corners","edges","surface"], "back": [...]},
+           "inspected_in_hand": {"front": ["corners"]},
            "defects": [{"side": "front", "location": "top_left", "type": "corner_softening",
                         "severity": "minor", "note": "..."}]}
 An area that is not listed as inspected is unassessed and makes the grade an incomplete ceiling.
+
+The photo check wins over "inspected": an area the scan says its photo can't show (scan.json
+"photo_limits", from the photo-quality check) stays unassessed even when it is listed as inspected, and
+defects logged there only lower the ceiling. Only "inspected_in_hand" (a person examined the physical card
+under good light, not the photo) lifts it. Each defect's location must be one its type allows
+(`photo_grade.py vocab`).
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ sys.path.insert(0, str(ROOT))
 
 from cardgrader import criteria_loader  # noqa: E402
 from cardgrader.engine import grade_all  # noqa: E402
-from cardgrader.models import CardAssessment  # noqa: E402
+from cardgrader.models import CardAssessment, Defect, allowed_locations, photo_limit_components  # noqa: E402
 
 MAX_SIDE = 2400  # the app downsizes photos to this before scanning
 NODE_SCRIPT = """
@@ -156,16 +163,24 @@ def cmd_scan(args) -> None:
         cv2.imwrite(str(out / f"{side}_edges.jpg"), edges_image(card), [cv2.IMWRITE_JPEG_QUALITY, 92])
         cv2.imwrite(str(out / f"{side}_overlay.jpg"), overlay_image(warped, r), [cv2.IMWRITE_JPEG_QUALITY, 92])
         axes = measured_axes(sc)
+        blocked = r["quality"]["blocked"]
+        limits = photo_limit_components(blocked)
         summary["sides"][side] = {"centering": {a: v[0] for a, v in axes.items()}, "evidence": {a: v[1] for a, v in axes.items()},
-                                  "quality": r["quality"]["verdict"], "blocked": r["quality"]["blocked"]}
+                                  "quality": r["quality"]["verdict"], "blocked": blocked,
+                                  "blocked_reasons": r["quality"]["blocked_reasons"],
+                                  # what `grade` treats as unassessed on this side, whatever is ticked as inspected
+                                  "photo_limits": limits}
         print(f"=== {side.upper()} ===")
         print(f"centering  left/right {axes['lr'][0]:.1f} ({axes['lr'][1]})   top/bottom {axes['tb'][0]:.1f} ({axes['tb'][1]})")
         print(f"photo quality: {r['quality']['verdict']}")
         for name, c in r["quality"]["checks"].items():
             if c["status"] != "ok":
                 print(f"  - [{c['status']}] {c['note']}")
-        if r["quality"]["blocked"]:
-            print(f"  cannot be assessed from this photo: {', '.join(r['quality']['blocked'])}")
+        if blocked:
+            print(f"  cannot be assessed from this photo: {', '.join(blocked)}")
+        if limits:
+            print(f"  -> {side} {', '.join(limits)} will count as NOT ASSESSED in `grade`, even if listed as inspected,"
+                  " unless checked on the card in hand (inspected_in_hand)")
         print(f"edge/corner check: {r['check']['summary']}")
         for d in r["check"]["defects"]:
             print(f"  candidate: {d['type']} {d['severity']} at {d['location']}: {d['note']}")
@@ -174,29 +189,121 @@ def cmd_scan(args) -> None:
     (out / "scan.json").write_text(json.dumps(summary, indent=1))
 
 
+SIDES = ("front", "back")
+COMPONENTS = ("corners", "edges", "surface")
+
+
+def side_limits(side_scan: dict) -> list[str]:
+    """Components the photo of one side can't show. Older scan.json files only have "blocked"."""
+    if "photo_limits" in side_scan:
+        return photo_limit_components(side_scan["photo_limits"])
+    return photo_limit_components(side_scan.get("blocked", []))
+
+
+def limit_reasons(side_scan: dict, comp: str) -> list[str]:
+    """Why the photo can't show a component: the photo checks that blocked any of its items."""
+    out: list[str] = []
+    for item, why in (side_scan.get("blocked_reasons") or {}).items():
+        if item == comp or item.startswith(comp + ":"):
+            out += [w for w in why if w not in out]
+    return out
+
+
+def check_defects(defects: list) -> None:
+    """Exit with a clear message if a defect has an unknown type or a location its type doesn't allow."""
+    types = criteria_loader.defects()["types"]
+    for i, d in enumerate(defects, 1):
+        if not isinstance(d, dict):
+            sys.exit(f"defect #{i} must be an object, got {d!r}")
+        if d.get("type") not in types:
+            sys.exit(f"defect #{i}: unknown defect type {d.get('type')!r}; use one of: {', '.join(types)}")
+        try:
+            Defect.model_validate(d)
+        except ValueError as exc:
+            spec = types[d["type"]]
+            detail = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors()) if hasattr(exc, "errors") else str(exc)
+            sys.exit(
+                f"defect #{i} ({d.get('type')} at {d.get('location')!r} on the {d.get('side')}): {detail}.\n"
+                f"  {d['type']} ({spec['label']}) applies to {', '.join(spec['applies_to'])}; "
+                f"allowed locations: {', '.join(allowed_locations(spec['applies_to']))}"
+            )
+
+
+def why_unassessed(area: str, assessment: CardAssessment, scan: dict) -> str:
+    """One line on why an area in `report.unassessed` wasn't assessed."""
+    words = area.split(" ")
+    side = words[0]
+    if words[1] == "centering":
+        return "the border wasn't read on the photo (measure it by hand to fill this in)"
+    comp = words[1]
+    if assessment.is_photo_limited(side, comp):  # type: ignore[arg-type]
+        reasons = limit_reasons(scan[side], comp)
+        why = f"the photo can't show {'it' if comp == 'surface' else 'them'}" + (f" ({', '.join(reasons)})" if reasons else "")
+        if assessment.is_inspected(side, comp):  # type: ignore[arg-type]
+            why += "; listed as inspected, but the photo check wins"
+        return why + " -> check the card in hand (inspected_in_hand)"
+    return "not listed as inspected"
+
+
 def cmd_grade(args) -> None:
     scan = json.loads(Path(args.scan).read_text())["sides"]
     obs = json.loads(Path(args.obs).read_text())
-    types = criteria_loader.defects()["types"]
-    for d in obs.get("defects", []):
-        if d.get("type") not in types:
-            sys.exit(f"unknown defect type {d.get('type')!r}; use one of: {', '.join(types)}")
-    assessment = CardAssessment.model_validate({
-        "centering": {s: {"lr": scan[s]["centering"]["lr"], "tb": scan[s]["centering"]["tb"]} for s in ("front", "back")},
-        "centering_evidence": {s: scan[s]["evidence"] for s in ("front", "back")},
-        "defects": obs.get("defects", []),
-        "inspected": obs.get("inspected", {}),
-    })
+    check_defects(obs.get("defects", []))
+    limits = {s: side_limits(scan[s]) for s in SIDES}
+    try:
+        assessment = CardAssessment.model_validate({
+            "centering": {s: {"lr": scan[s]["centering"]["lr"], "tb": scan[s]["centering"]["tb"]} for s in SIDES},
+            "centering_evidence": {s: scan[s]["evidence"] for s in SIDES},
+            "defects": obs.get("defects", []),
+            "inspected": obs.get("inspected", {}),
+            "inspected_in_hand": obs.get("inspected_in_hand", {}),
+            "photo_limits": limits,
+        })
+    except ValueError as exc:
+        sys.exit(f"invalid observations: {exc}")
     report = grade_all(assessment)
-    print(report.summary)
+
+    print("Photo limits from the scan (areas the photo can't show):")
+    for s in SIDES:
+        if not limits[s]:
+            print(f"  {s}: none")
+            continue
+        parts = []
+        for comp in limits[s]:
+            reasons = limit_reasons(scan[s], comp)
+            in_hand = " -> checked in hand" if comp in assessment.inspected_in_hand.get(s, []) else ""
+            parts.append(comp + (f" ({', '.join(reasons)})" if reasons else "") + in_hand)
+        print(f"  {s}: {'; '.join(parts)}")
+    print()
+    if report.complete:
+        print("COMPLETE — every area was assessed")
+    else:
+        print("INCOMPLETE — best case only, not a grade")
+        print("Not assessed:")
+        for area in report.unassessed:
+            name = area.split(" (photo")[0]
+            print(f"  - {name}: {why_unassessed(name, assessment, scan)}")
+        print("The numbers below are ceilings: what the card would get if every unassessed area were perfect.")
+    print()
     for name, g in report.grades.items():
-        extra = f"  (incomplete: {', '.join(g.unassessed)})" if not g.complete else ""
-        print(f"{name}: {g.label} [{g.grade}]{extra}")
+        value = f"{'at most ' if not g.complete else ''}{g.grade:g}"
+        if g.score is not None:
+            value += f", score {'at most ' if not g.complete else ''}{g.score}"
+        print(f"{name}: {g.label}  [{value}]")
+    print()
+    print(report.summary)
     if args.json:
         psa = report.grades["PSA"]
+        photo_limited = [f"{s} {c}" for s in SIDES for c in COMPONENTS if assessment.is_photo_limited(s, c)]  # type: ignore[arg-type]
         Path(args.json).write_text(json.dumps({
+            # psa_grade is the number shown; when complete is false it is a ceiling (best case), not a grade.
             "psa_grade": psa.grade, "psa_label": psa.label, "complete": report.complete,
-            "grades": {n: {"grade": g.grade, "label": g.label, "complete": g.complete} for n, g in report.grades.items()},
+            "psa_grade_is_ceiling": not report.complete,
+            "unassessed": report.unassessed,
+            "photo_limited": photo_limited,
+            "inspected_in_hand": {s: assessment.inspected_in_hand.get(s, []) for s in SIDES},
+            "grades": {n: {"grade": g.grade, "label": g.label, "complete": g.complete, "unassessed": g.unassessed}
+                       for n, g in report.grades.items()},
         }, indent=1))
 
 

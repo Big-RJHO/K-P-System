@@ -8,6 +8,11 @@
  * not a grading company's rule):
  *   inspected:          {front: ["corners", ...], back: [...]}  components looked at; defects found are listed
  *   centering_evidence: {front: {lr, tb}, back: {lr, tb}}       "measured" | "typed" | "unread"
+ *   photo_limits:       {front: ["edges:top", "corners", ...]}   what the photo can't show (the scan's
+ *                       quality.blocked items, or whole components); "centering" entries are ignored
+ *   inspected_in_hand:  {front: ["corners", ...], back: [...]}  checked on the physical card, not the photo
+ * The photo check wins over a claim: a photo-limited component is unassessed even if it is listed in
+ * `inspected` or has defects listed (those still set its ceiling). Only `inspected_in_hand` overrides it.
  * A component with no defects that wasn't inspected is unassessed (never assumed flawless); an unread
  * centering axis counts as at least 55/45 and is unassessed too. Then every company grade has
  * complete: false, unassessed: [...], tier: null and a ceiling grade/score labelled
@@ -81,6 +86,27 @@
   const isInspected = (a, side, comp) =>
     (a.inspected[side] || []).includes(comp) ||
     a.defects.some((d) => d.side === side && locationComponent(d.location) === comp);
+
+  // CardAssessment.is_photo_limited / is_assessed: the photo check wins unless checked in hand.
+  const inHand = (a, side, comp) => (a.inspected_in_hand[side] || []).includes(comp);
+  const isPhotoLimited = (a, side, comp) => (a.photo_limits[side] || []).includes(comp) && !inHand(a, side, comp);
+  const isAssessed = (a, side, comp) => inHand(a, side, comp) || (!isPhotoLimited(a, side, comp) && isInspected(a, side, comp));
+
+  // models.photo_limit_components: "edges:top" -> edges, "corners:x" -> corners, whole components as they
+  // are, "centering" dropped. Returned in component order.
+  function photoLimitComponents(items) {
+    const found = new Set();
+    for (const item of items || []) {
+      if (typeof item !== "string") throw new Error(`photo limit must be a string, got ${item}`);
+      const i = item.indexOf(":");
+      const comp = i < 0 ? item : item.slice(0, i), where = i < 0 ? "" : item.slice(i + 1);
+      if (comp === "centering" && i < 0) continue;
+      const allowed = { corners: CORNERS, edges: EDGES, surface: [] }[comp];
+      if (!allowed || (i >= 0 && !allowed.includes(where))) throw new Error(`unknown photo limit '${item}'`);
+      found.add(comp);
+    }
+    return COMPONENTS.filter((c) => found.has(c));
+  }
 
   const worst = (s) => Math.max(s.lr, s.tb);
   const best = (s) => Math.min(s.lr, s.tb);
@@ -203,7 +229,7 @@
     for (const comp of COMPONENTS) {
       out[comp] = condition(
         criteria, a.defects.filter((d) => locationComponent(d.location) === comp), company,
-        SIDES.every((side) => isInspected(a, side, comp)),
+        SIDES.every((side) => isAssessed(a, side, comp)),
       );
     }
     return out;
@@ -217,18 +243,22 @@
           criteria,
           a.defects.filter((d) => d.side === side && locationComponent(d.location) === comp),
           company,
-          isInspected(a, side, comp),
+          isAssessed(a, side, comp),
         );
       }
     }
     return out;
   }
 
+  // condition.area_name
+  const areaName = (a, side, comp) =>
+    isPhotoLimited(a, side, comp) ? `${side} ${comp} (photo can't show ${comp === "surface" ? "it" : "them"})` : `${side} ${comp}`;
+
   function unassessedAreas(a) {
     const out = [];
     for (const side of SIDES) {
       for (const axis of AXES) if (a.centering_evidence[side][axis] === "unread") out.push(`${side} centering (${axisName(axis)})`);
-      for (const comp of COMPONENTS) if (!isInspected(a, side, comp)) out.push(`${side} ${comp}`);
+      for (const comp of COMPONENTS) if (!isAssessed(a, side, comp)) out.push(areaName(a, side, comp));
     }
     return out;
   }
@@ -499,13 +529,19 @@
 
   function validate(criteria, a) {
     for (const d of a.defects) {
-      locationComponent(d.location);
-      defectType(criteria, d.type);
-      if (!(d.severity in defectType(criteria, d.type).caps)) throw new Error(`unknown severity '${d.severity}'`);
+      const comp = locationComponent(d.location);
+      const spec = defectType(criteria, d.type);
+      if (!(d.severity in spec.caps)) throw new Error(`unknown severity '${d.severity}'`);
+      // models.Defect: each type only occurs in the areas defects.yaml allows.
+      if (!spec.applies_to.includes(comp)) {
+        throw new Error(`'${d.type}' can't be at '${d.location}' (${comp}); it applies to: ${spec.applies_to.join(", ")}`);
+      }
     }
-    for (const [side, comps] of Object.entries(a.inspected)) {
-      if (!SIDES.includes(side)) throw new Error(`unknown side '${side}'`);
-      for (const c of comps) if (!COMPONENTS.includes(c)) throw new Error(`unknown component '${c}'`);
+    for (const field of ["inspected", "inspected_in_hand", "photo_limits"]) {
+      for (const [side, comps] of Object.entries(a[field])) {
+        if (!SIDES.includes(side)) throw new Error(`unknown side '${side}'`);
+        for (const c of comps) if (!COMPONENTS.includes(c)) throw new Error(`unknown component '${c}'`);
+      }
     }
     for (const side of SIDES) {
       for (const axis of AXES) if (!EVIDENCE.includes(a.centering_evidence[side][axis])) throw new Error("unknown centering evidence");
@@ -530,8 +566,11 @@
       centering: assessment.centering || { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } },
       defects: assessment.defects || [],
       inspected: assessment.inspected || {},
+      inspected_in_hand: assessment.inspected_in_hand || {},
+      photo_limits: {},
       centering_evidence: fillEvidence(assessment),
     };
+    for (const [side, items] of Object.entries(assessment.photo_limits || {})) a.photo_limits[side] = photoLimitComponents(items);
     validate(criteria, a);
     a.centering = gradedCentering(a);  // graders/base.py prepare(): unread axes count as 55/45
     const grades = { PSA: gradePSA(criteria, a), BGS: gradeBGS(criteria, a), CGC: gradeCGC(criteria, a), TAG: gradeTAG(criteria, a) };
@@ -553,5 +592,5 @@
     return { grades, complete, unassessed: missing, best_fit: bestFit, summary, disclaimer: DISCLAIMER };
   }
 
-  return { gradeAll, centeringGrade, interpolate, pyRound, pyFixed, FLAWLESS, UNREAD_SHARE };
+  return { gradeAll, photoLimitComponents, centeringGrade, interpolate, pyRound, pyFixed, FLAWLESS, UNREAD_SHARE };
 });

@@ -56,6 +56,18 @@ def test_scan_grade_save_list(client):
     assert client.delete(f"/api/cards/{saved['id']}").status_code == 200
     assert client.get(f"/api/cards/{saved['id']}").status_code == 404
 
+    # The photo check wins over "inspected"; only checks done on the card in hand lift it.
+    assessment["photo_limits"] = {"front": ["edges:top", "corners:top_left", "centering"]}
+    report = client.post("/api/grade", json=assessment).json()
+    assert report["complete"] is False and report["grades"]["PSA"]["label"] == "Up to MINT 9 · incomplete"
+    assert report["unassessed"] == ["front corners (photo can't show them)", "front edges (photo can't show them)"]
+    assessment["inspected_in_hand"] = {"front": ["corners", "edges"]}
+    assert client.post("/api/grade", json=assessment).json()["complete"] is True
+    saved = client.post("/api/cards", json={"assessment": assessment}).json()
+    full = client.get(f"/api/cards/{saved['id']}").json()
+    assert full["assessment"]["photo_limits"] == {"front": ["corners", "edges"]}
+    assert full["assessment"]["inspected_in_hand"] == {"front": ["corners", "edges"]}
+
 
 def test_bad_inputs(client):
     assert client.post("/api/scan", files={"file": ("x.png", b"not an image", "image/png")}).status_code == 422
@@ -64,6 +76,9 @@ def test_bad_inputs(client):
     bad_loc = {"defects": [{"side": "front", "location": "middle", "type": "stain", "severity": "minor"}]}
     assert client.post("/api/grade", json=bad_loc).status_code == 422
     assert client.post("/api/grade", json={"inspected": {"front": ["gloss"]}}).status_code == 422
+    wrong_area = {"defects": [{"side": "front", "location": "top", "type": "print_spot", "severity": "minor"}]}
+    assert client.post("/api/grade", json=wrong_area).status_code == 422
+    assert client.post("/api/grade", json={"photo_limits": {"front": ["edges:middle"]}}).status_code == 422
     assert client.post("/api/grade", json={"centering_evidence": {"front": {"lr": "guessed"}}}).status_code == 422
 
 

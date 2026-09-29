@@ -3,9 +3,12 @@
 The condition scale is shared by all graders: 10.5 = flawless (Pristine),
 10 = Gem Mint, 9 = Mint, ... 1 = Poor. Each company converts it to its own scale.
 
-A component with no defects listed is flawless only if it was inspected (``CardAssessment.inspected``).
-Otherwise its condition is *unassessed* (``grade is None``); graders then use ``ceiling`` (the best case,
-10.5) and mark their grade incomplete. That is this project's convention, not a grading company's rule.
+A component with no defects listed is flawless only if it was assessed (``CardAssessment.is_assessed``:
+inspected where the photo can show it, or checked on the card in hand). Otherwise its condition is
+*unassessed* (``grade is None``); graders then use ``ceiling`` (the best case, 10.5) and mark their grade
+incomplete. A component the photo can't show (``CardAssessment.photo_limits``) stays unassessed even when
+it is listed as inspected or has defects listed: the defects still set its ceiling, but more wear may be
+hidden, so the grade stays incomplete. These are this project's conventions, not a grading company's rules.
 """
 
 from __future__ import annotations
@@ -89,7 +92,7 @@ def component_conditions(
             (side, comp): _condition(
                 [d for d in assessment.defects if d.side == side and d.component == comp],
                 company,
-                assessment.is_inspected(side, comp),
+                assessment.is_assessed(side, comp),
             )
             for side in SIDES
             for comp in COMPONENTS
@@ -98,21 +101,28 @@ def component_conditions(
         comp: _condition(
             [d for d in assessment.defects if d.component == comp],
             company,
-            all(assessment.is_inspected(side, comp) for side in SIDES),
+            all(assessment.is_assessed(side, comp) for side in SIDES),
         )
         for comp in COMPONENTS
     }
 
 
+def area_name(assessment: CardAssessment, side: Side, comp: Component) -> str:
+    """'front corners', or 'front corners (photo can't show them)' when the photo is the reason."""
+    if assessment.is_photo_limited(side, comp):
+        return f"{side} {comp} (photo can't show {'it' if comp == 'surface' else 'them'})"
+    return f"{side} {comp}"
+
+
 def unassessed_areas(assessment: CardAssessment) -> list[str]:
-    """Areas that weren't assessed, front first: unread centering axes, then uninspected components."""
+    """Areas that weren't assessed, front first: unread centering axes, then unassessed components."""
     out: list[str] = []
     for side in SIDES:
         evidence = assessment.centering_evidence.get(side, {})
         for axis in ("lr", "tb"):
             if evidence.get(axis) == "unread":
                 out.append(f"{side} centering ({axis_name(axis)})")
-        out += [f"{side} {comp}" for comp in COMPONENTS if not assessment.is_inspected(side, comp)]
+        out += [area_name(assessment, side, comp) for comp in COMPONENTS if not assessment.is_assessed(side, comp)]
     return out
 
 

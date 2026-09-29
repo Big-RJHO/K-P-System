@@ -2,7 +2,10 @@ from cardgrader.engine import grade_all
 from cardgrader.graders import bgs
 from cardgrader.criteria_loader import company
 from cardgrader.models import CardAssessment
-from helpers import card, defect
+import pytest
+from pydantic import ValidationError
+
+from helpers import ALL, card, defect
 
 
 def grades(a):
@@ -175,3 +178,77 @@ def test_unread_centering_counts_as_55_and_is_unassessed():
 def test_altered_card_is_complete_even_if_not_inspected():
     report = grade_all(card(inspected={}, defects=[defect("altered", "major")]))
     assert report.complete is True and all(g.tier == 99 for g in report.grades.values())
+
+
+# ---- photo limits: the photo check wins over a claim that an area was inspected ----
+
+# What the scan reported for the slab photos of the PSA blind test: no edge or corner can be judged.
+SLAB_BLOCKED = [f"edges:{e}" for e in ("top", "right", "bottom", "left")] + [
+    f"corners:{c}" for c in ("top_left", "top_right", "bottom_right", "bottom_left")
+]
+
+
+def test_photo_limits_accept_scan_blocked_items():
+    a = card(photo_limits={"front": SLAB_BLOCKED + ["centering"], "back": ["surface", "edges"]})
+    assert a.photo_limits == {"front": ["corners", "edges"], "back": ["edges", "surface"]}
+    with pytest.raises(ValidationError):
+        card(photo_limits={"front": ["edges:middle"]})
+    with pytest.raises(ValidationError):
+        card(photo_limits={"front": ["gloss"]})
+
+
+def test_photo_limited_areas_claimed_as_inspected_stay_incomplete():
+    # Every area ticked as inspected, no defects, but the photos can't show corners or edges.
+    report = grade_all(card(photo_limits={"front": SLAB_BLOCKED, "back": SLAB_BLOCKED}))
+    assert report.complete is False and report.best_fit is None
+    assert report.unassessed == [
+        "front corners (photo can't show them)",
+        "front edges (photo can't show them)",
+        "back corners (photo can't show them)",
+        "back edges (photo can't show them)",
+    ]
+    psa = report.grades["PSA"]
+    assert psa.complete is False and psa.tier is None
+    assert psa.label == "Up to GEM MT 10 · incomplete"
+    assert psa.subgrades["corners"] is None and psa.subgrades["surface"] == 10
+    assert report.grades["TAG"].subgrades["front edges"] is None
+    assert report.grades["TAG"].subgrades["front surface"] == 1000
+
+
+def test_defects_in_photo_limited_area_lower_the_ceiling_but_stay_unassessed():
+    a = card(
+        defects=[defect("corner_whitening", "moderate", "back", "top_left")],
+        photo_limits={"back": ["corners:top_left"]},
+    )
+    report = grade_all(a)
+    assert report.complete is False
+    assert report.unassessed == ["back corners (photo can't show them)"]
+    psa = report.grades["PSA"]
+    assert psa.grade == 8 and psa.label == "Up to NM-MT 8 · incomplete"
+    assert report.grades["TAG"].subgrades["back corners"] == 820  # a ceiling from what was found
+    # The same defect on a photo that shows the corners gives a complete grade.
+    assert grade_all(card(defects=[defect("corner_whitening", "moderate", "back", "top_left")])).complete is True
+
+
+def test_inspected_in_hand_overrides_photo_limits():
+    limits = {"front": SLAB_BLOCKED, "back": SLAB_BLOCKED}
+    report = grade_all(card(photo_limits=limits, in_hand=ALL))
+    assert report.complete is True and report.best_fit == "PSA"
+    assert report.grades["PSA"].label == "GEM MT 10"
+    # Only the areas checked in hand are lifted.
+    partial = grade_all(card(photo_limits=limits, in_hand={"front": ["corners", "edges"], "back": ["corners"]}))
+    assert partial.unassessed == ["back edges (photo can't show them)"]
+    # Checked in hand counts even when nothing is listed in `inspected`.
+    assert grade_all(card(inspected={}, in_hand=ALL)).complete is True
+
+
+def test_defect_location_must_match_its_type():
+    with pytest.raises(ValidationError, match="print_spot"):
+        card(defects=[defect("print_spot", "minor", "front", "top")])
+    with pytest.raises(ValidationError):
+        card(defects=[defect("corner_whitening", "minor", "front", "left")])
+    with pytest.raises(ValidationError):
+        card(defects=[defect("edge_whitening", "minor", "front", "surface")])
+    # Types with several areas accept each of them.
+    card(defects=[defect("crease", "minor", "front", "top_left"), defect("crease", "minor", "front", "surface")])
+    card(defects=[defect("hole", "minor", "back", "left"), defect("hole", "minor", "back", "bottom_right")])

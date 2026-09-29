@@ -56,13 +56,6 @@
     return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
   }
 
-  // numpy.percentile with linear interpolation, on a sorted array
-  function percentileSorted(s, p) {
-    const pos = (s.length - 1) * (p / 100);
-    const lo = Math.floor(pos), hi = Math.ceil(pos);
-    return s[lo] + (s[hi] - s[lo]) * (pos - lo);
-  }
-
   /* ---------------------------------------------------------------- image ops */
 
   function downscale(img, maxSide) {
@@ -950,12 +943,24 @@
       outer.push(margin);
     }
     if (found < Math.max(5, lines * 0.2)) return { outer: margin, inner: NaN, confidence: 0 };
-    const widths = inner.map((v, i) => v - outer[i]);
-    const sorted = Float64Array.from(widths).sort();
-    const med = median(widths);
-    const iqr = percentileSorted(sorted, 75) - percentileSorted(sorted, 25);
-    const consistency = Math.max(0, 1 - iqr / Math.max(4, med * 0.25));
-    return { outer: median(outer), inner: median(inner), confidence: (found / lines) * consistency };
+    // The frame's inner edge is where most rows first change colour: the densest window of positions.
+    // A row that changes colour only *later* saw artwork that matches the border there (the dark-blue swirl
+    // along the left and right of the WOTC Pokémon back does this on a third of the rows or more): it didn't
+    // see the frame edge, but it doesn't contradict it either. A row that changes colour *earlier* does
+    // contradict it. So confidence comes from how many rows agree, minus the contradicting ones; a spread
+    // of late rows no longer counts against the reading (it used to, through the interquartile range).
+    const sorted = Float64Array.from(inner).sort();
+    const win = Math.max(4, extent * 0.006);
+    let best = 0, lo = 0;
+    for (let i = 0, j = 0; i < found; i++) {
+      while (sorted[j] < sorted[i] - win) j++;
+      if (i - j + 1 > best) { best = i - j + 1; lo = sorted[j]; }
+    }
+    const agree = inner.filter((v) => v >= lo && v <= lo + win);
+    const early = inner.filter((v) => v < lo).length;
+    const support = Math.min(1, Math.max(0, (best / found - 0.2) / 0.5));  // 20% agreeing: nothing; 70%: full
+    const contradiction = Math.max(0, 1 - early / found / 0.3);           // 30% crossing earlier: nothing
+    return { outer: median(outer), inner: median(agree), confidence: (found / lines) * support * contradiction };
   }
 
   function measureBorders(card, margin = MARGIN) {

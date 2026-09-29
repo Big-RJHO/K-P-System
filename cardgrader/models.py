@@ -22,7 +22,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from . import criteria_loader
 
 Side = Literal["front", "back"]
 Component = Literal["corners", "edges", "surface"]
@@ -35,6 +37,9 @@ EDGE_LOCATIONS = ("top", "right", "bottom", "left")
 SURFACE_LOCATIONS = ("surface",)
 
 
+COMPONENTS: tuple[Component, ...] = ("corners", "edges", "surface")
+
+
 def location_component(location: str) -> Component:
     if location in CORNER_LOCATIONS:
         return "corners"
@@ -43,6 +48,26 @@ def location_component(location: str) -> Component:
     if location in SURFACE_LOCATIONS:
         return "surface"
     raise ValueError(f"unknown location {location!r}")
+
+
+def photo_limit_components(items) -> list[Component]:
+    """Components a photo can't show, from the scan's ``quality.blocked`` items or plain component names.
+
+    ``"edges:top"`` -> ``edges``, ``"corners:top_left"`` -> ``corners``, ``"surface"``/``"edges"``/``"corners"``
+    as they are; ``"centering"`` is dropped (centering has its own evidence). Returned in component order.
+    """
+    found: set[str] = set()
+    for item in items or []:
+        if not isinstance(item, str):
+            raise ValueError(f"photo limit must be a string, got {item!r}")
+        comp, _, where = item.partition(":")
+        if comp == "centering" and not where:
+            continue
+        allowed = {"corners": CORNER_LOCATIONS, "edges": EDGE_LOCATIONS, "surface": ()}.get(comp)
+        if allowed is None or (where and where not in allowed):
+            raise ValueError(f"unknown photo limit {item!r}")
+        found.add(comp)
+    return [c for c in COMPONENTS if c in found]
 
 
 def split_ratio(a: float, b: float) -> float:
@@ -113,8 +138,21 @@ class Defect(BaseModel):
 
     @model_validator(mode="after")
     def _check_location(self) -> "Defect":
-        location_component(self.location)
+        component = location_component(self.location)
+        # Each defect type only occurs in the areas defects.yaml allows (e.g. a print spot is on the surface,
+        # not at an edge). An unknown type is reported by the graders (KeyError), as before.
+        spec = criteria_loader.defects()["types"].get(self.type)
+        if spec is not None and component not in spec["applies_to"]:
+            raise ValueError(
+                f"{self.type!r} can't be at {self.location!r} ({component}); it applies to: "
+                f"{', '.join(spec['applies_to'])} (locations: {', '.join(allowed_locations(spec['applies_to']))})"
+            )
         return self
+
+
+def allowed_locations(components) -> list[str]:
+    by_comp = {"corners": CORNER_LOCATIONS, "edges": EDGE_LOCATIONS, "surface": SURFACE_LOCATIONS}
+    return [loc for comp in COMPONENTS if comp in components for loc in by_comp[comp]]
 
 
 class CardInfo(BaseModel):
@@ -145,6 +183,25 @@ class CardAssessment(BaseModel):
         default_factory=dict,
         description="Where each centering share came from: measured, typed or unread",
     )
+    photo_limits: dict[Side, list[Component]] = Field(
+        default_factory=dict,
+        description="Components the photo of each side can't show (from the scan's quality.blocked). "
+        "They stay unassessed even if listed in `inspected`",
+    )
+    inspected_in_hand: dict[Side, list[Component]] = Field(
+        default_factory=dict,
+        description="Components a person examined on the physical card under good light, not on the photo. "
+        "They count as inspected whatever the photo showed",
+    )
+
+    @field_validator("photo_limits", mode="before")
+    @classmethod
+    def _limits_from_blocked(cls, value):
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return {side: photo_limit_components(items) for side, items in value.items()}
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -163,10 +220,20 @@ class CardAssessment(BaseModel):
         return data
 
     def is_inspected(self, side: Side, component: Component) -> bool:
-        """Was this component looked at on this side? A listed defect counts as having looked."""
+        """Was this component said to be looked at on this side? A listed defect counts as having looked."""
         return component in self.inspected.get(side, []) or any(
             d.side == side and d.component == component for d in self.defects
         )
+
+    def is_photo_limited(self, side: Side, component: Component) -> bool:
+        """Can't the photo show this component, with nobody having checked it on the card in hand?"""
+        return component in self.photo_limits.get(side, []) and component not in self.inspected_in_hand.get(side, [])
+
+    def is_assessed(self, side: Side, component: Component) -> bool:
+        """Is there evidence for this component? Checked in hand, or inspected where the photo can show it."""
+        if component in self.inspected_in_hand.get(side, []):
+            return True
+        return not self.is_photo_limited(side, component) and self.is_inspected(side, component)
 
 
 class CompanyGrade(BaseModel):

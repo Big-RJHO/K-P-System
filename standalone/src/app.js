@@ -97,6 +97,10 @@ const state = {
   // Assessment evidence (see grading.js): which components were looked at, and where each centering
   // share came from. Nothing counts as flawless or centered until there's evidence for it.
   inspected: { front: [], back: [] },
+  // What each side's photo can't show (from the scan's quality check). The photo check wins over a tick in
+  // `inspected`; only a check on the card in hand (`inHand`) counts for those areas.
+  photoLimits: { front: [], back: [] },
+  inHand: { front: [], back: [] },
   evidence: { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } },
   activeSide: "front",
   reference: null,  // {image_url|image, source, source_url, name, rgba, mask}: only set once the user confirms the card
@@ -345,6 +349,7 @@ function applyScan(side, scan, photo = null) {
     result: scan, quality: null, check: null,  // full scan, photo-quality gate, edge/corner candidates
   };
   state.evidence[side] = { lr: unmeasured.lr ? "unread" : "measured", tb: unmeasured.tb ? "unread" : "measured" };
+  state.photoLimits[side] = [];  // set from the new photo's quality check below
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
   runInspection(side);
@@ -760,9 +765,12 @@ function renderDefects() {
 
 /* ---------------------------------------------------------------- inspection checklist */
 
-// Same rule as the engine: a component with a DING logged on that side has been looked at.
+// Same rules as the engine: a component with a DING logged on that side has been looked at, unless the
+// photo can't show it; then only a check on the card in hand counts.
 const hasDefect = (side, comp) => state.defects.some((d) => d.side === side && COMPONENT_OF[d.location] === comp);
-const isInspected = (side, comp) => state.inspected[side].includes(comp) || hasDefect(side, comp);
+const photoLimited = (side, comp) => state.photoLimits[side].includes(comp);
+const isInspected = (side, comp) =>
+  state.inHand[side].includes(comp) || (!photoLimited(side, comp) && (state.inspected[side].includes(comp) || hasDefect(side, comp)));
 
 function markInspected(side, comp) {
   if (!state.inspected[side].includes(comp)) state.inspected[side] = COMPONENTS.filter((c) => c === comp || state.inspected[side].includes(c));
@@ -770,7 +778,10 @@ function markInspected(side, comp) {
 
 function setInspected(side, comp, on) {
   leaveExample();
-  if (on) markInspected(side, comp);
+  if (photoLimited(side, comp)) {
+    // The photo can't show this area, so ticking it means "checked on the card in hand".
+    state.inHand[side] = on ? COMPONENTS.filter((c) => c === comp || state.inHand[side].includes(c)) : state.inHand[side].filter((c) => c !== comp);
+  } else if (on) markInspected(side, comp);
   else state.inspected[side] = state.inspected[side].filter((c) => c !== comp);
   runGrade();
 }
@@ -779,10 +790,15 @@ function renderInspect() {
   let all = true;
   for (const box of $$("#inspect input[type=checkbox]")) {
     const { side, comp } = box.dataset;
-    const locked = hasDefect(side, comp);  // can't be unchecked while a DING is logged there
+    const limited = photoLimited(side, comp);
+    const locked = !limited && hasDefect(side, comp);  // can't be unchecked while a DING is logged there
     box.checked = isInspected(side, comp);
     box.disabled = locked;
-    box.closest(".check").classList.toggle("locked", locked);
+    const row = box.closest(".check");
+    row.classList.toggle("locked", locked);
+    row.classList.toggle("limited", limited);
+    $("span", row).textContent = `${cap(comp)} ${limited ? "checked in hand" : "checked"}`;
+    row.title = limited ? "The photo can't show these. Check the card in hand under good light, then tick." : "";
     all = all && box.checked;
   }
   $("#inspect").classList.toggle("incomplete", !all);
@@ -921,6 +937,7 @@ function runInspection(side) {
   if (!s || !s.photo || !s.result) return;
   try {
     s.quality = Inspect.quality(s.photo, s.result);
+    state.photoLimits[side] = Grading.photoLimitComponents(s.quality.blocked);
     const opts = { quality: s.quality, face: side };
     if (side === "front" && state.reference && state.reference.rgba && state.reference.usable) {
       opts.printedMask = Identify.printedMask(state.reference.rgba, s.result.warped, s.margin);
@@ -1233,6 +1250,8 @@ function assessment() {
     centering_evidence: { front: { ...state.evidence.front }, back: { ...state.evidence.back } },
     defects: state.defects,
     inspected: { front: [...state.inspected.front], back: [...state.inspected.back] },
+    photo_limits: { front: [...state.photoLimits.front], back: [...state.photoLimits.back] },
+    inspected_in_hand: { front: [...state.inHand.front], back: [...state.inHand.back] },
   };
 }
 
@@ -1571,6 +1590,8 @@ function resetCard() {
   state.centering = { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } };
   state.defects = [];
   state.inspected = { front: [], back: [] };
+  state.photoLimits = { front: [], back: [] };
+  state.inHand = { front: [], back: [] };
   state.evidence = { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } };
   state.activeSide = "front";
   state.example = false;
@@ -1601,8 +1622,9 @@ function showExample() {
     applyScan(side, Vision.scan(photo), photo);
   }
   state.defects = ex.defects.map((d) => ({ ...d }));
-  // The example card was fully inspected, so it shows a complete grade.
+  // The example card was fully inspected (in hand too), so it shows a complete grade.
   state.inspected = { front: [...COMPONENTS], back: [...COMPONENTS] };
+  state.inHand = { front: [...COMPONENTS], back: [...COMPONENTS] };
   $("#card-name").value = ex.name;
   fillDetails({ ...ex.details, set_name: ex.set, number: ex.number });
   state.example = true;
@@ -1637,7 +1659,10 @@ function loadAssessment(a, thumbs) {
   state.defects = (a.defects || []).map((d) => ({ ...d }));
   // Older saves have no inspection record: their areas start unchecked. Their centering was typed or
   // measured before saving (the grading engine's default when evidence is missing).
-  state.inspected = { front: [...((a.inspected || {}).front || [])], back: [...((a.inspected || {}).back || [])] };
+  const bySide = (x) => ({ front: [...((x || {}).front || [])], back: [...((x || {}).back || [])] });
+  state.inspected = bySide(a.inspected);
+  state.photoLimits = { front: Grading.photoLimitComponents(bySide(a.photo_limits).front), back: Grading.photoLimitComponents(bySide(a.photo_limits).back) };
+  state.inHand = bySide(a.inspected_in_hand);
   const ev = a.centering_evidence || {};
   state.evidence = {
     front: { lr: "typed", tb: "typed", ...(ev.front || {}) },
