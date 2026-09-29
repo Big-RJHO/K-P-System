@@ -1,5 +1,7 @@
 # Reading the card from the photo, and its prices
 
+Price sources in the app: CardSight sales for Pokémon (section 4); Gemini web search for Riftbound, and optionally for Pokémon (section 3); PriceCharting only with your own subscription token (section 2); TCGdex's free ungraded prices as a fallback.
+
 Two steps run after a scan:
 
 1. **Read.** The app reads the card's name and collector number from the front photo.
@@ -150,3 +152,35 @@ Checked on the Gemini API pricing and model pages, 2026-09-29.
 - **Offline:** `tests/test_standalone_webprices.py` covers the request shape, the key only in a header, price checks, dropping PriceCharting, flagging unconfirmed sources, empty or unsearched answers, and the error messages.
 - **In a browser:** a phone-sized Chromium with a stand-in Gemini reply showed the results, sources and suggestions, stored nothing, and kept the key out of backups.
 - **Not tested against the real Gemini API:** no Gemini key was available here.
+
+## 4. Recent sales from CardSight (`cardsight.js`, Pokémon)
+
+CardSight AI (cardsight.ai) sells access to trading-card data, including sale prices and graded prices from eBay, Fanatics Collect, COMC and other marketplaces. Pokémon is covered; Riftbound isn't, so Riftbound cards use the Gemini web search instead.
+
+### How it works
+- **When it runs:** automatically when you confirm a Pokémon card, and again when you tap **Update**.
+- **Two calls:**
+  1. `GET /v1/catalog/search?q=<name number set>&type=card` finds the card. Results are ranked by number, name and set; entries outside the Pokémon segment are left out; and a picker is offered when several entries look alike.
+  2. `GET /v1/pricing/{card_id}?period=1y&listing_type=auction` fetches completed auction sales from the last year, raw and graded, grouped by company and grade.
+- **What's shown:**
+  - for the ungraded card and for each company at this report's grade: the median sale, the number of sales, the price range, and the latest sale with a link to the listing;
+  - an "All graded sales" list;
+  - a version picker when parallels (1st Edition, reverse holo, …) appear in the sales. The base card is shown by default.
+- **Labelling:** grades that are only a ceiling are marked "up to", with the same warning as the other prices. Pristine or Black Label 10s can't be told apart from a plain 10 in the sales data, and the panel says so.
+
+### Access and terms
+Checked on CardSight's OpenAPI spec, pricing page and terms, 2026-09-29.
+- **API:** `https://api.cardsight.ai`, with the key in the `X-API-Key` header. Browser calls are allowed (`Access-Control-Allow-Origin: *`).
+- **Free plan:** 750 calls a month and 4 a second. Usage stops at the cap, so it never charges. Paid plans start at $14.95 a month for 5,000 calls.
+- **Calls used:** about 2 per card, and answers are cached for 24 hours.
+- **Terms on the key:** it is personal and must not be shared. So each person enters their own, it stays on their phone, and it is never in backups, drafts, History or the published app.
+- **Terms on caching:** only short-term caching is allowed. Answers are kept 24 hours, and all cached CardSight data is deleted when the key is removed.
+
+### Tested
+- **Offline:** `tests/test_standalone_cardsight.py` uses stand-in responses built from the spec. It covers the request shape, the key only in a header, card ranking (other segments dropped), the grade summaries and version split, 24-hour caching and purging, and the error messages.
+- **In a browser:** a phone-sized Chromium with a stand-in CardSight showed the sales table, made two calls, kept the key out of backups, and cleared the cache on **Remove**. It also hid the section for Riftbound.
+- **Not tested against the real CardSight API:** no key was used here.
+
+### Not used yet
+- **Photo identification:** CardSight can identify a card from the photo (`POST /v1/identify/card`, 1 call). That would likely beat the on-phone text reading for Pokémon, but it isn't wired in.
+- **Population reports:** CardSight also offers free PSA population reports.

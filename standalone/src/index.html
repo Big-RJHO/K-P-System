@@ -177,6 +177,10 @@
           <h2 id="prices-title">Prices</h2>
           <button type="button" class="link-btn strong" id="refresh-prices">Update</button>
         </div>
+        <div class="cs-prices" id="cs-prices">
+          <h3 class="sc-sub">Recent sales (CardSight)</h3>
+          <div id="cs-body"></div>
+        </div>
         <div id="prices-body"></div>
         <div class="web-prices" id="web-prices">
           <h3 class="sc-sub">Web search (Gemini)</h3>
@@ -186,6 +190,16 @@
           </div>
           <div id="web-results"></div>
         </div>
+        <details class="pc-settings" id="cs-settings">
+          <summary>Sales data access (CardSight, Pokémon)</summary>
+          <p class="hint">Recent sales come from CardSight AI with your own API key (free plan: 750 calls a month, no charges; each card lookup uses 2, and answers are kept for a day). The key stays on this phone only, is only sent to CardSight, and isn't included in backups. CardSight's terms don't allow sharing the key.</p>
+          <label for="cs-key" class="note-label">CardSight API key<input id="cs-key" type="password" autocomplete="off" spellcheck="false" placeholder="Your CardSight key"></label>
+          <div class="row-actions">
+            <button type="button" class="btn small" id="cs-save">Save key</button>
+            <button type="button" class="btn small ghost" id="cs-remove">Remove</button>
+            <span class="hint-inline" id="cs-status"></span>
+          </div>
+        </details>
         <details class="pc-settings" id="gm-settings">
           <summary>Web search access (Gemini)</summary>
           <p class="hint">Web search asks Google's Gemini to search the web for what this card recently sold for, and shows the sources. It uses your own Gemini API key: get one free at aistudio.google.com (Get API key). The key stays on this phone only and is only sent to Google. Results aren't saved, as Google's terms require.</p>

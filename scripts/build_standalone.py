@@ -80,7 +80,7 @@ def _parts(env: str) -> tuple[str, str, str]:
     css = (SRC / "style.css").read_text(encoding="utf-8")
     criteria = json.dumps(criteria_json(), separators=(",", ":"), ensure_ascii=False)
     scripts = [f"window.GRADING_LAB_ENV={json.dumps(env)};window.GRADING_CRITERIA={criteria};"]
-    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("grading.js", "vision.js", "inspect.js", "identify.js", "ocr.js", "prices.js", "webprices.js", "app.js")]
+    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("grading.js", "vision.js", "inspect.js", "identify.js", "ocr.js", "prices.js", "webprices.js", "cardsight.js", "app.js")]
     script_tags = "\n".join(f"<script>{_inline_script(code)}</script>" for code in scripts)
     return body, css, script_tags
 

@@ -109,6 +109,7 @@ const state = {
   tcgplayerId: "",  // TCGplayer product id Riftcodex returned for the confirmed card
   price: { key: "", status: "idle" },  // PriceCharting lookup for the current card: see loadPrices()
   web: { key: "", status: "idle" },    // Gemini web price search for the current card (on screen only, never stored)
+  cs: { key: "", status: "idle" },     // CardSight sales for the current card (Pokemon): see loadCardSight()
   autoRead: false,  // the card has been read from the photo once already (automatic runs only)
   showSuspects: true,
   sheet: { side: null, location: null, type: null, severity: null },
@@ -1170,6 +1171,7 @@ function confirmCandidate(c) {
   state.market = c.market || null;
   state.tcgplayerId = c.tcgplayer_id || "";
   loadPrices({ force: true });
+  loadCardSight({ force: true });
 }
 
 function idNote(box, text) {
@@ -1398,6 +1400,7 @@ function renderMarket(box) {
 function renderPrices() {
   const box = $("#prices-body");
   if (!box) return;
+  renderCardSight();
   box.innerHTML = "";
   const card = priceCard();
   const has = !!(card.name && card.number);
@@ -1413,7 +1416,7 @@ function renderPrices() {
   if (stale && p.status !== "idle") priceNote(box, "The card details changed. Tap Update for this card's prices.");
   if (!stale && p.status === "loading") priceNote(box, "Looking up prices…");
   if (!stale && p.status === "error") priceNote(box, p.error, "warn");
-  if (p.status === "no-token" || !pcToken()) priceNote(box, "Graded prices need PriceCharting access (below). Without it, open the card on PriceCharting to see every grade.");
+  if ((p.status === "no-token" || !pcToken()) && !(state.game === "pokemon" && csKey())) priceNote(box, state.game === "pokemon" ? "For graded prices, add a CardSight key (Sales data access, below), or open the card on PriceCharting to see every grade." : "For graded prices, use Web search below, or open the card on PriceCharting to see every grade.");
   if (!stale && p.status === "ok" && p.product) {
     const prod = p.product;
     const head = document.createElement("div");
@@ -1482,6 +1485,163 @@ function renderPrices() {
   if (state.tcgplayerId && /^\d+$/.test(state.tcgplayerId)) priceLink(links, `https://www.tcgplayer.com/product/${state.tcgplayerId}`, "TCGplayer");
   box.append(links);
   renderWebPrices();
+}
+
+/* ---------------------------------------------------------------- recent sales (CardSight, Pokemon) */
+
+const CS_KEY = "cardGradingLab.cardsight.key";  // never in backups, drafts or History
+const csKey = () => { try { return (pcStorage() && pcStorage().getItem(CS_KEY)) || ""; } catch (_) { return ""; } };
+const money2 = (v) => (v == null ? "—" : `$${Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+
+async function loadCardSight({ force = false, chooseId = null } = {}) {
+  const card = priceCard();
+  const key = priceKey(card);
+  if (state.game !== "pokemon" || !card.name) { state.cs = { key, status: "idle" }; renderCardSight(); return; }
+  if (!csKey()) { state.cs = { key, status: "no-key" }; renderCardSight(); return; }
+  if (!force && !chooseId && state.cs.key === key && ["loading", "ok"].includes(state.cs.status)) return;
+  const prev = state.cs;
+  state.cs = { ...(chooseId ? prev : {}), key, status: "loading" };
+  renderCardSight();
+  const opts = { apiKey: csKey(), fetch: (...a) => window.fetch(...a), storage: pcStorage() };
+  try {
+    const find = chooseId && prev.find ? prev.find : await CardSight.findCard(card, opts);
+    if (state.cs.key !== key) return;
+    if (!find.matches.length) throw new Error("CardSight has no card matching these details.");
+    const chosen = chooseId ? find.matches.find((m) => m.id === chooseId) : find.best || find.matches[0];
+    const data = await CardSight.sales(chosen.id, opts);
+    if (state.cs.key !== key) return;
+    state.cs = { key, status: "ok", find, chosenId: chosen.id, data: data || { raw: [], graded: [], messages: [] }, version: "" };
+  } catch (err) {
+    if (state.cs.key === key) state.cs = { key, status: "error", error: (err && err.message) || "The sales lookup failed." };
+  }
+  renderCardSight();
+}
+
+function renderCardSight() {
+  const wrap = $("#cs-prices"), box = $("#cs-body");
+  if (!box) return;
+  const pokemon = state.game === "pokemon";
+  wrap.hidden = !pokemon;
+  $("#cs-settings").hidden = !pokemon;
+  $("#cs-status").textContent = csKey() ? "A key is saved on this phone." : "";
+  if (!pokemon) return;
+  box.innerHTML = "";
+  const card = priceCard();
+  const c = state.cs;
+  const stale = c.key && c.key !== priceKey(card);
+  if (!card.name) { priceNote(box, "Confirm which card this is first."); return; }
+  if (!csKey() || c.status === "no-key") { priceNote(box, "Add your CardSight API key (Sales data access, below) to see recent sales, raw and graded."); return; }
+  if (stale) { priceNote(box, "The card details changed. Tap Update for this card's sales."); return; }
+  if (c.status === "loading") { priceNote(box, "Looking up recent sales…"); return; }
+  if (c.status === "error") { priceNote(box, c.error, "warn"); return; }
+  if (c.status !== "ok") return;
+  const m = c.find.matches.find((x) => x.id === c.chosenId) || c.find.matches[0];
+  const head = document.createElement("div");
+  head.className = "pr-product";
+  head.innerHTML = "<b></b><span></span>";
+  $("b", head).textContent = `${m.name}${m.number ? ` #${m.number}` : ""}`;
+  $("span", head).textContent = [m.set, m.release !== m.set && m.release, m.year].filter(Boolean).join(" · ");
+  box.append(head);
+  const options = c.find.matches.filter((x) => x.score > 0).slice(0, 8);
+  if (options.length > 1) {
+    const sel = document.createElement("select");
+    sel.className = "pr-choose";
+    sel.setAttribute("aria-label", "CardSight card");
+    for (const x of options) {
+      const o = document.createElement("option");
+      o.value = x.id;
+      o.textContent = [`${x.name}${x.number ? ` #${x.number}` : ""}`, x.set || x.release, x.year].filter(Boolean).join(" · ");
+      sel.append(o);
+    }
+    sel.value = c.chosenId;
+    sel.addEventListener("change", () => loadCardSight({ chooseId: sel.value }));
+    box.append(sel);
+  }
+  if (c.find.needs_choice) priceNote(box, "Check this is your exact card: several catalog entries look alike.", "warn");
+  const vers = CardSight.versions(c.data);
+  if (vers.length > 1) {
+    const sel = document.createElement("select");
+    sel.className = "pr-choose";
+    sel.setAttribute("aria-label", "Version");
+    for (const v of vers) {
+      const o = document.createElement("option");
+      o.value = v.id;
+      o.textContent = v.id ? `${v.name} (${v.count} sales)` : "Base card";
+      sel.append(o);
+    }
+    sel.value = c.version;
+    sel.addEventListener("change", () => { state.cs = { ...state.cs, version: sel.value }; renderCardSight(); });
+    box.append(sel);
+  }
+  const res = CardSight.forReport(c.data, state.report, c.version);
+  const table = document.createElement("table");
+  table.className = "pr-table";
+  const row = (label, st, extra = "", cls = "") => {
+    const tr = document.createElement("tr");
+    if (cls) tr.className = cls;
+    tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+    $("th", tr).textContent = label;
+    const sm = document.createElement("small");
+    if (st) {
+      sm.append(`${st.count} sale${st.count === 1 ? "" : "s"}, ${money2(st.low)}–${money2(st.high)}. Last `);
+      if (httpsUrl(st.last.url)) {
+        const a = document.createElement("a");
+        a.href = st.last.url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = `${money2(st.last.price)} on ${st.last.date}`;
+        sm.append(a);
+      } else sm.append(`${money2(st.last.price)} on ${st.last.date}`);
+      if (st.last.source) sm.append(` (${st.last.source})`);
+      sm.append(".");
+    }
+    if (extra) sm.append(`${st ? " " : ""}${extra}`);
+    if (sm.textContent) $("th", tr).append(sm);
+    $("td", tr).textContent = st ? money2(st.median) : "—";
+    table.append(tr);
+  };
+  row("Ungraded", res.ungraded, res.ungraded ? "" : "No ungraded sales in the last year.");
+  for (const r of res.rows) row(`${r.company} ${r.ceiling ? "up to " : ""}${r.label}`, r.stats, r.note, r.ceiling ? "pr-ceiling" : "");
+  box.append(table);
+  if (res.ceiling) priceNote(box, "These grades are best-case ceilings, so the graded prices are the most this card could sell for at those grades, not what it's worth. The real grade may be lower.", "warn");
+  if (res.all.length) {
+    const d = document.createElement("details");
+    d.className = "pr-ladder";
+    d.innerHTML = "<summary>All graded sales</summary>";
+    const t = document.createElement("table");
+    t.className = "pr-table";
+    for (const a of res.all) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = `${a.company} ${a.grade}`;
+      const sm = document.createElement("small");
+      sm.textContent = `${a.stats.count} sale${a.stats.count === 1 ? "" : "s"}, last ${money2(a.stats.last.price)} on ${a.stats.last.date}`;
+      $("th", tr).append(sm);
+      $("td", tr).textContent = money2(a.stats.median);
+      t.append(tr);
+    }
+    d.append(t);
+    box.append(d);
+  }
+  priceNote(box, `Median of completed auction sales in the last year, from CardSight (fetched ${new Date(c.data.fetched_at || Date.now()).toLocaleDateString()}). Open the listings to check they're your version.${(c.data.messages || []).length ? ` CardSight: ${c.data.messages.join(" ")}` : ""}`);
+}
+
+function saveCardSightKey() {
+  const k = $("#cs-key").value.trim();
+  if (!CardSight.validKey(k)) { $("#cs-status").textContent = "That doesn't look like a CardSight API key."; return; }
+  try { pcStorage().setItem(CS_KEY, k); } catch (_) { $("#cs-status").textContent = "This browser won't store it (private mode?)."; return; }
+  $("#cs-key").value = "";
+  $("#cs-settings").open = false;
+  renderPrices();
+  loadCardSight({ force: true });
+}
+
+function removeCardSightKey() {
+  try { pcStorage().removeItem(CS_KEY); } catch (_) { /* blocked */ }
+  CardSight.clearCache(pcStorage());  // cached CardSight data goes with the key
+  $("#cs-key").value = "";
+  state.cs = { key: "", status: "no-key" };
+  renderPrices();
 }
 
 /* ---------------------------------------------------------------- web price search (Gemini) */
@@ -1957,6 +2117,7 @@ function setView(view, { animate = true } = {}) {
       readFromPhoto({ auto: true });
     } else if (!state.example) {
       loadPrices();
+      loadCardSight();
     }
   } else {
     renderSlots();
@@ -1981,6 +2142,7 @@ function resetCard() {
   state.tcgplayerId = "";
   state.price = { key: "", status: "idle" };
   state.web = { key: "", status: "idle" };
+  state.cs = { key: "", status: "idle" };
   state.autoRead = false;
   clearReference();
   $("#id-results").hidden = true;
@@ -2255,7 +2417,9 @@ function init() {
   });
   $("#find-card").addEventListener("click", findCard);
   $("#read-card").addEventListener("click", () => readFromPhoto());
-  $("#refresh-prices").addEventListener("click", () => loadPrices({ force: true }));
+  $("#refresh-prices").addEventListener("click", () => { loadPrices({ force: true }); loadCardSight({ force: true }); });
+  $("#cs-save").addEventListener("click", saveCardSightKey);
+  $("#cs-remove").addEventListener("click", removeCardSightKey);
   $("#pc-save").addEventListener("click", savePriceToken);
   $("#pc-remove").addEventListener("click", removePriceToken);
   $("#web-search").addEventListener("click", webSearch);
