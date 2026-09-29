@@ -2,6 +2,10 @@
 
 The condition scale is shared by all graders: 10.5 = flawless (Pristine),
 10 = Gem Mint, 9 = Mint, ... 1 = Poor. Each company converts it to its own scale.
+
+A component with no defects listed is flawless only if it was inspected (``CardAssessment.inspected``).
+Otherwise its condition is *unassessed* (``grade is None``); graders then use ``ceiling`` (the best case,
+10.5) and mark their grade incomplete. That is this project's convention, not a grading company's rule.
 """
 
 from __future__ import annotations
@@ -9,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from . import criteria_loader
+from .centering import UNREAD_SHARE, axis_name
 from .models import CardAssessment, Component, Defect, Side
 
 FLAWLESS = 10.5
@@ -18,8 +23,13 @@ SIDES: tuple[Side, ...] = ("front", "back")
 
 @dataclass
 class ComponentCondition:
-    grade: float = FLAWLESS
+    grade: float | None = FLAWLESS  # None: unassessed (nothing listed, not inspected)
     reasons: list[str] = field(default_factory=list)
+
+    @property
+    def ceiling(self) -> float:
+        """Best grade this component could have: an unassessed one might turn out flawless."""
+        return FLAWLESS if self.grade is None else self.grade
 
 
 def defect_cap(defect: Defect, company: str | None = None) -> float:
@@ -41,9 +51,10 @@ def describe(defect: Defect) -> str:
     return f"{defect.severity} {spec['label'].lower()} ({where})"
 
 
-def _condition(defects: list[Defect], company: str | None) -> ComponentCondition:
+def _condition(defects: list[Defect], company: str | None, inspected: bool) -> ComponentCondition:
     if not defects:
-        return ComponentCondition()
+        # Nothing listed means flawless only if someone looked; otherwise we don't know.
+        return ComponentCondition() if inspected else ComponentCondition(grade=None)
     rules = criteria_loader.defects()["component_rules"]
     capped = sorted(((defect_cap(d, company), d) for d in defects), key=lambda cd: cd[0])
     worst_cap, worst = capped[0]
@@ -69,21 +80,56 @@ def component_conditions(
 ) -> dict:
     """Condition of each component.
 
-    With ``per_side=False`` this returns ``{component: ComponentCondition}`` using defects from both sides.
+    With ``per_side=False`` this returns ``{component: ComponentCondition}`` using defects from both sides;
+    a component with no defects is flawless only if it was inspected on both sides.
     With ``per_side=True`` it returns ``{(side, component): ComponentCondition}``.
     """
     if per_side:
         return {
             (side, comp): _condition(
-                [d for d in assessment.defects if d.side == side and d.component == comp], company
+                [d for d in assessment.defects if d.side == side and d.component == comp],
+                company,
+                assessment.is_inspected(side, comp),
             )
             for side in SIDES
             for comp in COMPONENTS
         }
     return {
-        comp: _condition([d for d in assessment.defects if d.component == comp], company)
+        comp: _condition(
+            [d for d in assessment.defects if d.component == comp],
+            company,
+            all(assessment.is_inspected(side, comp) for side in SIDES),
+        )
         for comp in COMPONENTS
     }
+
+
+def unassessed_areas(assessment: CardAssessment) -> list[str]:
+    """Areas that weren't assessed, front first: unread centering axes, then uninspected components."""
+    out: list[str] = []
+    for side in SIDES:
+        evidence = assessment.centering_evidence.get(side, {})
+        for axis in ("lr", "tb"):
+            if evidence.get(axis) == "unread":
+                out.append(f"{side} centering ({axis_name(axis)})")
+        out += [f"{side} {comp}" for comp in COMPONENTS if not assessment.is_inspected(side, comp)]
+    return out
+
+
+def unread_centering_note(assessment: CardAssessment) -> str | None:
+    unread = [
+        f"{side} {axis_name(axis)}"
+        for side in SIDES
+        for axis in ("lr", "tb")
+        if assessment.centering_evidence.get(side, {}).get(axis) == "unread"
+    ]
+    if not unread:
+        return None
+    return (
+        f"Centering wasn't measured ({', '.join(unread)}), so it counts as "
+        f"{UNREAD_SHARE:g}/{100 - UNREAD_SHARE:g}, just making Gem Mint. That's this lab's convention, "
+        "not a grading company's rule."
+    )
 
 
 def fatal_defects(assessment: CardAssessment) -> list[Defect]:

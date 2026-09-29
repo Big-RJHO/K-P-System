@@ -1,6 +1,7 @@
 from cardgrader.engine import grade_all
 from cardgrader.graders import bgs
 from cardgrader.criteria_loader import company
+from cardgrader.models import CardAssessment
 from helpers import card, defect
 
 
@@ -101,3 +102,76 @@ def test_best_fit_prefers_top_tier():
     assert report.best_fit in report.grades
     best = report.grades[report.best_fit]
     assert best.tier == min(g.tier for g in report.grades.values())
+
+
+# ---- assessment evidence: an unassessed area is never assumed flawless ----
+
+DEFINITIVE_TOP = ("GEM MT 10", "Pristine 10", "Pristine 10 (Black Label)", "Gem Mint 10")
+
+
+def test_nothing_inspected_is_incomplete_ceiling():
+    report = grade_all(card(inspected={}))
+    assert report.complete is False and report.best_fit is None
+    assert "not assessed yet" in report.summary and "front corners" in report.summary
+    for g in report.grades.values():
+        assert g.complete is False
+        assert g.tier is None
+        assert g.label not in DEFINITIVE_TOP
+        assert g.label.startswith("Up to ") and g.label.endswith(" · incomplete")
+        assert len(g.unassessed) == 6
+        assert g.limiting_factors[0].startswith("Not assessed yet:")
+    # The ceiling is what the card would get if every unchecked area were perfect.
+    assert report.grades["PSA"].label == "Up to GEM MT 10 · incomplete"
+    assert report.grades["BGS"].label == "Up to Pristine 10 (Black Label) · incomplete"
+    assert report.grades["BGS"].subgrades["corners"] is None
+    assert report.grades["TAG"].subgrades["back surface"] is None
+    assert report.grades["TAG"].subgrades["front centering"] == 1000
+
+
+def test_fully_inspected_clean_card_is_complete():
+    report = grade_all(card())
+    assert report.complete is True and report.unassessed == [] and report.best_fit == "PSA"
+    for g in report.grades.values():
+        assert g.complete is True and g.unassessed == [] and g.tier == 0
+        assert "Up to" not in g.label and not any("Not assessed" in f for f in g.limiting_factors)
+
+
+def test_partial_inspection_lists_missing_areas():
+    a = card(
+        inspected={"front": ["corners", "edges", "surface"], "back": ["edges"]},
+        defects=[defect("corner_whitening", "minor", "back", "top_left")],  # a listed defect implies inspection
+    )
+    report = grade_all(a)
+    assert report.unassessed == ["back surface"]
+    for g in report.grades.values():
+        assert g.complete is False and g.unassessed == ["back surface"]
+    # The corner defect still caps the ceiling.
+    assert report.grades["PSA"].grade == 9 and report.grades["PSA"].label == "Up to MINT 9 · incomplete"
+    assert report.grades["BGS"].subgrades["corners"] == 9 and report.grades["BGS"].subgrades["surface"] is None
+
+
+def test_defects_found_still_cap_an_incomplete_ceiling():
+    g = grades(card(inspected={}, defects=[defect("corner_whitening", "moderate", "back", "top_left")]))
+    assert g["PSA"].grade == 8 and g["PSA"].complete is False
+    assert "front corners" in g["PSA"].unassessed and "back corners" not in g["PSA"].unassessed
+    assert g["PSA"].subgrades["corners"] == 8  # the pooled corners grade is a ceiling from what was found
+    assert g["TAG"].subgrades["back corners"] == 820 and g["TAG"].subgrades["front corners"] is None
+
+
+def test_unread_centering_counts_as_55_and_is_unassessed():
+    report = grade_all(card(evidence={"front": {"lr": "unread", "tb": "unread"}}))
+    assert report.complete is False
+    assert report.unassessed == ["front centering (left/right)", "front centering (top/bottom)"]
+    psa = report.grades["PSA"]
+    assert psa.label == "Up to GEM MT 10 · incomplete"          # 55/45 still makes PSA 10 centering
+    assert report.grades["BGS"].subgrades["centering"] == 9.5   # but not BGS Pristine centering
+    assert report.grades["TAG"].subgrades["front centering"] == 950
+    assert psa.notes[0].startswith("Centering wasn't measured (front left/right, front top/bottom)")
+    # The back defaults to typed because centering was given.
+    assert CardAssessment().centering_evidence["back"] == {"lr": "unread", "tb": "unread"}
+    assert card().centering_evidence["back"] == {"lr": "typed", "tb": "typed"}
+
+
+def test_altered_card_is_complete_even_if_not_inspected():
+    report = grade_all(card(inspected={}, defects=[defect("altered", "major")]))
+    assert report.complete is True and all(g.tier == 99 for g in report.grades.values())

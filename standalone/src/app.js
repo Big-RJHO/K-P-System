@@ -4,6 +4,7 @@
 const CRITERIA = window.GRADING_CRITERIA;
 const ENV = window.GRADING_LAB_ENV || "file";  // "artifact" | "site" | "file"
 const SIDES = ["front", "back"];
+const COMPONENTS = ["corners", "edges", "surface"];
 const COMPONENT_OF = {
   top_left: "corners", top_right: "corners", bottom_left: "corners", bottom_right: "corners",
   top: "edges", right: "edges", bottom: "edges", left: "edges", surface: "surface",
@@ -93,6 +94,10 @@ const state = {
   thumbs: { front: null, back: null },
   centering: { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } },
   defects: [],
+  // Assessment evidence (see grading.js): which components were looked at, and where each centering
+  // share came from. Nothing counts as flawless or centered until there's evidence for it.
+  inspected: { front: [], back: [] },
+  evidence: { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } },
   activeSide: "front",
   sheet: { side: null, location: null, type: null, severity: null },
   example: false,
@@ -124,7 +129,9 @@ function toast(msg) {
 
 /* ---------------------------------------------------------------- storage */
 
-const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v2", game: "cardGradingLab.game" };
+// Drafts v3 add the inspection record (inspected, centering_evidence). A v2 draft still resumes, but under
+// the current rules its uninspected areas leave the grade incomplete.
+const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v3", draftV2: "cardGradingLab.draft.v2", game: "cardGradingLab.game" };
 
 const localStore = {
   read(key, fallback) {
@@ -147,6 +154,7 @@ const localStore = {
     try { localStorage.removeItem(key); } catch (_) { /* ignore */ }
   },
   cards() { return this.read(KEYS.cards, []); },
+  draft() { return this.read(KEYS.draft, null) || this.read(KEYS.draftV2, null); },
   saveCards(cards) { return this.write(KEYS.cards, cards); },
 };
 
@@ -330,9 +338,10 @@ function applyScan(side, scan, photo = null) {
   const unmeasured = neutralizeUnreadSides(scan);
   state.scans[side] = {
     img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin,
-    confidence: scan.confidence.borders, unmeasured,
+    confidence: scan.confidence.borders,
     photo, corners: scan.corners,  // kept for this session so the outline can be adjusted by hand
   };
+  state.evidence[side] = { lr: unmeasured.lr ? "unread" : "measured", tb: unmeasured.tb ? "unread" : "measured" };
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
 }
@@ -346,7 +355,8 @@ async function scanFile(side, file) {
     const pixels = await readImage(file);
     await new Promise((r) => setTimeout(r, 30));  // let the busy overlay paint
     applyScan(side, Vision.scan(pixels, "auto"), pixels);
-    const um = state.scans[side].unmeasured;
+    const ev = state.evidence[side];
+    const um = { lr: ev.lr === "unread", tb: ev.tb === "unread" };
     if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In the report, line up the pink guides with the printed frame.`);
     else if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the border was hard to read. Check the guide lines in the report.`);
   } catch (err) {
@@ -471,7 +481,7 @@ const guide = {
       const vertical = edge === "left" || edge === "right";
       const max = vertical ? this.canvas.width : this.canvas.height;
       s.lines[kind][edge] = Math.max(0, Math.min(max, vertical ? p.x : p.y));
-      if (s.unmeasured) s.unmeasured[vertical ? "lr" : "tb"] = false;
+      state.evidence[state.activeSide][vertical ? "lr" : "tb"] = "measured";  // lined up by hand
       state.centering[state.activeSide] = centeringFromLines(s.lines);
       renderRatioInputs();
       scheduleGrade();
@@ -606,13 +616,15 @@ function renderRatioInputs() {
   $("#lr-other").textContent = fmtShare(100 - c.lr);
   $("#tb-other").textContent = fmtShare(100 - c.tb);
   const s = state.scans[state.activeSide];
+  const ev = state.evidence[state.activeSide];
   const conf = $("#conf");
-  const um = s && s.unmeasured && (s.unmeasured.lr || s.unmeasured.tb)
-    ? [s.unmeasured.lr && "left/right", s.unmeasured.tb && "top/bottom"].filter(Boolean).join(" and ") : "";
-  conf.textContent = !s ? "Typed in"
+  const um = [ev.lr === "unread" && "left/right", ev.tb === "unread" && "top/bottom"].filter(Boolean).join(" and ");
+  const share = `${Grading.UNREAD_SHARE}/${100 - Grading.UNREAD_SHARE}`;
+  conf.textContent = !s
+    ? (um ? `Not measured, so it counts as ${share}. Add a photo or type the ratios.` : ev.lr === "typed" || ev.tb === "typed" ? "Typed in" : "Measured from the photo")
     : um ? `Couldn't read the ${um} border: drag the pink guides onto the printed frame`
     : `Border detection ${Math.round(s.confidence * 100)}%`;
-  conf.classList.toggle("low", !!s && s.confidence < 0.6);
+  conf.classList.toggle("low", !!um || (!!s && s.confidence < 0.6));
 }
 
 function renderCentering() {
@@ -692,6 +704,7 @@ function addDefectFromSheet() {
   const { side, location, type, severity } = state.sheet;
   const note = $("#defect-note").value.trim();
   state.defects.push({ side, location, type, severity, note: note || null });
+  markInspected(side, COMPONENT_OF[location]);  // logging a DING there means you looked there
   closeSheet();
   runGrade();
 }
@@ -710,7 +723,7 @@ function renderDefects() {
   const list = $("#defect-list");
   list.innerHTML = "";
   if (!state.defects.length) {
-    list.innerHTML = '<li class="empty">No DINGS logged, so corners, edges and surface count as flawless. Tap the card above where you see wear.</li>';
+    list.innerHTML = '<li class="empty">No DINGS logged. Areas ticked as checked above count as flawless; unchecked areas leave the grade incomplete. Tap the card above where you see wear.</li>';
   }
   const areas = state.report && state.report.grades.TAG.subgrades;
   state.defects.forEach((d, i) => {
@@ -731,8 +744,40 @@ function renderDefects() {
     list.append(li);
   });
   const n = state.defects.length;
-  $("#defect-summary").textContent = n ? `${n} logged` : "None logged";
+  const checked = SIDES.reduce((k, side) => k + COMPONENTS.filter((c) => isInspected(side, c)).length, 0);
+  $("#defect-summary").textContent = `${n ? `${n} logged` : "None logged"} · ${checked}/6 checked`;
   paintZones();
+  renderInspect();
+}
+
+/* ---------------------------------------------------------------- inspection checklist */
+
+// Same rule as the engine: a component with a DING logged on that side has been looked at.
+const hasDefect = (side, comp) => state.defects.some((d) => d.side === side && COMPONENT_OF[d.location] === comp);
+const isInspected = (side, comp) => state.inspected[side].includes(comp) || hasDefect(side, comp);
+
+function markInspected(side, comp) {
+  if (!state.inspected[side].includes(comp)) state.inspected[side] = COMPONENTS.filter((c) => c === comp || state.inspected[side].includes(c));
+}
+
+function setInspected(side, comp, on) {
+  leaveExample();
+  if (on) markInspected(side, comp);
+  else state.inspected[side] = state.inspected[side].filter((c) => c !== comp);
+  runGrade();
+}
+
+function renderInspect() {
+  let all = true;
+  for (const box of $$("#inspect input[type=checkbox]")) {
+    const { side, comp } = box.dataset;
+    const locked = hasDefect(side, comp);  // can't be unchecked while a DING is logged there
+    box.checked = isInspected(side, comp);
+    box.disabled = locked;
+    box.closest(".check").classList.toggle("locked", locked);
+    all = all && box.checked;
+  }
+  $("#inspect").classList.toggle("incomplete", !all);
 }
 
 /* ---------------------------------------------------------------- card viewer */
@@ -859,26 +904,6 @@ const viewer = {
 
 /* ---------------------------------------------------------------- grading + report */
 
-// A border the photo couldn't show (full-art card, glare) can't earn a Pristine or Black Label grade:
-// until the guides are lined up by hand it counts as just making Gem Mint (55/45).
-const UNREAD_SHARE = 55;
-
-function unreadAxes() {
-  const out = [];
-  for (const side of ["front", "back"]) {
-    const um = state.scans[side] && state.scans[side].unmeasured;
-    if (um && um.lr) out.push([side, "lr"]);
-    if (um && um.tb) out.push([side, "tb"]);
-  }
-  return out;
-}
-
-function gradedCentering() {
-  const c = { front: { ...state.centering.front }, back: { ...state.centering.back } };
-  for (const [side, axis] of unreadAxes()) c[side][axis] = Math.max(c[side][axis], UNREAD_SHARE);
-  return c;
-}
-
 function assessment() {
   return {
     card: {
@@ -888,8 +913,11 @@ function assessment() {
       holo: ["Holo", "Reverse holo", "Foil", "Etched / textured", "Metal"].includes($("#card-finish").value),
       notes: "",
     },
-    centering: gradedCentering(),
+    // Raw shares plus where they came from: the engine counts an unread axis as 55/45.
+    centering: { front: { ...state.centering.front }, back: { ...state.centering.back } },
+    centering_evidence: { front: { ...state.evidence.front }, back: { ...state.evidence.back } },
     defects: state.defects,
+    inspected: { front: [...state.inspected.front], back: [...state.inspected.back] },
   };
 }
 
@@ -907,18 +935,17 @@ function runGrade() {
     toast(`Grading failed: ${err.message}`);
     return;
   }
-  const unread = unreadAxes();
-  if (unread.length) {
-    const what = unread.map(([side, axis]) => `${side} ${axis === "lr" ? "left/right" : "top/bottom"}`).join(", ");
-    const note = `Centering not read from the photo (${what}: full-art card or glare), so it counts as ${UNREAD_SHARE}/${100 - UNREAD_SHARE}. Line up the pink guides with the printed frame to measure it.`;
-    for (const g of Object.values(state.report.grades)) g.notes.unshift(note);
-  }
   renderReport();
   saveDraft();
 }
 
-const bigGrade = (g) => (g.tier >= 99 ? "—" : g.grade % 1 === 0 ? g.grade.toFixed(0) : g.grade.toFixed(1));
+const gradeText = (g) => (g.grade % 1 === 0 ? g.grade.toFixed(0) : g.grade.toFixed(1));
+// An incomplete grade is a ceiling (this app's convention): shown as "≤ 10", never as a plain 10.
+const bigGrade = (g) => (g.tier >= 99 ? "—" : g.complete === false ? `≤ ${gradeText(g)}` : gradeText(g));
+const bigGradeHTML = (g) => (g.tier >= 99 ? "—" : g.complete === false ? `<span class="ceil">≤</span>${gradeText(g)}` : gradeText(g) + (isPristine(g) ? "<small>P</small>" : ""));
 const isPristine = (g) => g.label.startsWith("Pristine");
+// Label without the "Up to … · incomplete" wrapper, for the short tile/score labels.
+const baseLabel = (g) => g.label.replace(/^Up to /, "").replace(/ · incomplete$/, "");
 const conditionWord = (v) => CONDITION_WORDS.find(([min]) => v >= min)[1];
 const status = (v) => (v >= 10 ? "good" : v >= 8.5 ? "warn" : "bad");
 
@@ -926,6 +953,7 @@ const status = (v) => (v >= 10 ? "good" : v >= 8.5 ? "warn" : "bad");
 const gradeRank = (g) => (g.tier >= 99 ? -1 : g.label.includes("Black Label") ? 11 : isPristine(g) ? 10.5 : g.grade);
 
 function bestCompany(report) {
+  if (report.complete === false) return null;  // a ceiling isn't a grade, so there's no best shot yet
   let best = null;
   for (const g of Object.values(report.grades)) if (!best || gradeRank(g) > gradeRank(best)) best = g;
   return best;
@@ -937,15 +965,18 @@ function renderTiles(report) {
   const top = bestCompany(report);
   for (const g of Object.values(report.grades)) {
     const best = g === top && g.tier < 99;
+    const incomplete = g.complete === false;
     const tile = document.createElement("button");
     tile.type = "button";
-    tile.className = "tile" + (best ? " best" : "");
+    tile.className = "tile" + (best ? " best" : "") + (incomplete ? " incomplete" : "");
     tile.dataset.co = g.company;
     tile.innerHTML = `<span class="tile-co">${g.company}${best ? '<span class="tile-badge">Best shot</span>' : ""}</span>
+      ${incomplete ? '<span class="tile-flag">Incomplete</span>' : ""}
       <span class="tile-grade"></span><span class="tile-label"></span><span class="tile-sub"></span>`;
-    $(".tile-grade", tile).innerHTML = bigGrade(g) + (isPristine(g) ? "<small>P</small>" : "");
-    $(".tile-label", tile).textContent = g.label.replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
-    $(".tile-sub", tile).textContent = g.company === "TAG" && g.score != null ? `${g.score} / 1000` : g.qualifiers.length ? g.qualifiers.join(" · ") : " ";
+    $(".tile-grade", tile).innerHTML = bigGradeHTML(g);
+    $(".tile-label", tile).textContent = (incomplete ? "Up to " : "") +
+      baseLabel(g).replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
+    $(".tile-sub", tile).textContent = g.company === "TAG" && g.score != null ? `${incomplete ? "≤ " : ""}${g.score} / 1000` : g.qualifiers.length ? g.qualifiers.join(" · ") : " ";
     tile.addEventListener("click", () => {
       const d = $(`.company[data-co="${g.company}"]`);
       d.open = true;
@@ -953,32 +984,42 @@ function renderTiles(report) {
     });
     box.append(tile);
   }
-  $("#best-line").textContent = top.tier >= 99
-    ? "This card looks altered, so no company would give it a number."
-    : `Your best shot is ${top.company} ${top.label}. Tap a grade for the breakdown.`;
+  const line = $("#best-line");
+  line.classList.toggle("incomplete", !top);
+  line.textContent = !top
+    ? `Incomplete: not checked yet: ${report.unassessed.join(", ")}. These are ceilings, not grades.`
+    : top.tier >= 99
+      ? "This card looks altered, so no company would give it a number."
+      : `Your best shot is ${top.company} ${top.label}. Tap a grade for the breakdown.`;
 }
 
 function renderScore(report) {
   const g = report.grades.TAG;
   const altered = g.tier >= 99;
-  $("#score-grade").innerHTML = altered ? "—" : bigGrade(g) + (isPristine(g) ? "<small>P</small>" : "");
-  $("#score-label").textContent = altered ? g.label : g.label.replace(/\s*\d+(\.\d)?$/, "");
-  $("#score-num").textContent = altered ? "—" : g.score;
+  const incomplete = report.complete === false;
+  $(".score-block").classList.toggle("incomplete", incomplete);
+  $("#score-incomplete").hidden = !incomplete;
+  $("#score-missing").hidden = !incomplete;
+  $("#score-missing-list").textContent = incomplete ? report.unassessed.join(", ") : "";
+  $("#score-grade").innerHTML = bigGradeHTML(g);
+  $("#score-label").textContent = altered ? g.label : (incomplete ? "Up to " : "") + baseLabel(g).replace(/\s*\d+(\.\d)?$/, "");
+  $("#score-num").textContent = altered ? "—" : incomplete ? `≤ ${g.score}` : g.score;
   $("#score-bar").style.width = altered ? "0%" : `${Math.max(0, ((g.score - 100) / 900) * 100)}%`;
   const f = state.centering.front, b = state.centering.back;
   $("#centering-summary").textContent = `${splitText(Math.max(f.lr, f.tb))} · ${splitText(Math.max(b.lr, b.tb))}`;
 }
 
 function renderMetrics(report) {
-  const score = report.grades.TAG.score;
-  const others = localStore.cards().filter((c) => c.id !== state.savedId && c.report && c.report.grades.TAG.score != null);
-  const rank = score == null ? null : 1 + others.filter((c) => c.report.grades.TAG.score > score).length;
-  const f = state.centering.front;
+  // Rank only complete grades (re-graded with the current rules): a ceiling can't be ranked.
+  const score = report.complete === false ? null : report.grades.TAG.score;
+  const others = localStore.cards().map((c) => ({ c, r: currentReport(c) }))
+    .filter(({ c, r }) => c.id !== state.savedId && r && r.complete !== false && r.grades.TAG.score != null);
+  const rank = score == null ? null : 1 + others.filter(({ r }) => r.grades.TAG.score > score).length;
+  const f = state.centering.front, ev = state.evidence.front;
   const items = [
     [String(state.defects.length), "DINGS"],
     [rank == null ? "—" : `#${rank}/${others.length + 1}`, "Rank in History"],
-    [state.scans.front && state.scans.front.unmeasured && (state.scans.front.unmeasured.lr || state.scans.front.unmeasured.tb)
-      ? "Check guides" : splitText(Math.max(f.lr, f.tb)), "Front centering"],
+    [ev.lr === "unread" || ev.tb === "unread" ? (state.scans.front ? "Check guides" : "Not measured") : splitText(Math.max(f.lr, f.tb)), "Front centering"],
   ];
   const box = $("#metrics");
   box.innerHTML = "";
@@ -1009,6 +1050,13 @@ function renderSubgrades(report) {
     for (const side of SIDES) {
       const v = areas[`${side} ${comp}`];
       const cell = document.createElement("div");
+      if (v == null) {  // not inspected: no score, only a ceiling
+        cell.className = "sub-cell unchecked";
+        cell.innerHTML = '<b>Not checked</b><span class="sbar"></span>';
+        cell.setAttribute("aria-label", `${side} ${comp} not checked`);
+        box.append(cell);
+        continue;
+      }
       cell.className = `sub-cell ${v >= 950 ? "good" : v >= 850 ? "warn" : "bad"}`;
       cell.innerHTML = '<b></b><span class="sbar"><span></span></span>';
       $("b", cell).textContent = v;
@@ -1020,6 +1068,7 @@ function renderSubgrades(report) {
 }
 
 function subLabel(company, v) {
+  if (v == null) return "not checked";
   if (typeof v !== "number" || company === "TAG") return String(v);
   return v >= 10.5 ? "10P" : String(v);
 }
@@ -1030,7 +1079,7 @@ function renderCompanies(report) {
   box.innerHTML = "";
   for (const g of Object.values(report.grades)) {
     const d = document.createElement("details");
-    d.className = "company";
+    d.className = "company" + (g.complete === false ? " incomplete" : "");
     d.dataset.co = g.company;
     d.open = open.has(g.company);
     d.innerHTML = `<summary><span class="co-code">${g.company}</span><span class="co-label"></span><span class="co-grade"></span></summary>
@@ -1205,6 +1254,8 @@ function resetCard() {
   state.thumbs = { front: null, back: null };
   state.centering = { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } };
   state.defects = [];
+  state.inspected = { front: [], back: [] };
+  state.evidence = { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } };
   state.activeSide = "front";
   state.example = false;
   state.report = null;
@@ -1218,6 +1269,7 @@ function resetCard() {
 function newScan() {
   resetCard();
   localStore.remove(KEYS.draft);
+  localStore.remove(KEYS.draftV2);
   setView("scan");
 }
 
@@ -1231,6 +1283,8 @@ function showExample() {
     applyScan(side, Vision.scan(photo), photo);
   }
   state.defects = ex.defects.map((d) => ({ ...d }));
+  // The example card was fully inspected, so it shows a complete grade.
+  state.inspected = { front: [...COMPONENTS], back: [...COMPONENTS] };
   $("#card-name").value = ex.name;
   fillDetails({ ...ex.details, set_name: ex.set, number: ex.number });
   state.example = true;
@@ -1250,7 +1304,7 @@ function saveDraft() {
 }
 
 function renderResume() {
-  const draft = localStore.read(KEYS.draft, null);
+  const draft = localStore.draft();
   const btn = $("#resume");
   btn.hidden = !(draft && draft.centering);
   if (!btn.hidden) btn.textContent = `Resume ${draft.card && draft.card.name ? draft.card.name : "last card"}`;
@@ -1263,11 +1317,32 @@ function loadAssessment(a, thumbs) {
   fillDetails(a.card);
   state.centering = { front: { ...a.centering.front }, back: { ...a.centering.back } };
   state.defects = (a.defects || []).map((d) => ({ ...d }));
+  // Older saves have no inspection record: their areas start unchecked. Their centering was typed or
+  // measured before saving (the grading engine's default when evidence is missing).
+  state.inspected = { front: [...((a.inspected || {}).front || [])], back: [...((a.inspected || {}).back || [])] };
+  const ev = a.centering_evidence || {};
+  state.evidence = {
+    front: { lr: "typed", tb: "typed", ...(ev.front || {}) },
+    back: { lr: "typed", tb: "typed", ...(ev.back || {}) },
+  };
   state.thumbs = { front: (thumbs && thumbs.front) || null, back: (thumbs && thumbs.back) || null };
   setView("report");
 }
 
 /* ---------------------------------------------------------------- history */
+
+// Saved reports are re-graded with the current rules (so older saves show as incomplete if nothing was
+// marked as checked). Cached per saved card: the rules don't change while the page is open.
+const regradeCache = new Map();
+function currentReport(c) {
+  const key = `${c.id}|${c.created_at}`;
+  if (!regradeCache.has(key)) {
+    let r = c.report || null;
+    try { r = Grading.gradeAll(c.assessment, CRITERIA); } catch (_) { /* keep the saved report */ }
+    regradeCache.set(key, r);
+  }
+  return regradeCache.get(key);
+}
 
 function renderHistory() {
   const list = $("#history-list");
@@ -1286,7 +1361,9 @@ function renderHistory() {
     const card = c.assessment.card;
     $(".h-name", li).textContent = card.name || "Unnamed card";
     $(".h-meta", li).textContent = [gameInfo(card.game).label, card.set_name, card.number, card.rarity, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
-    $(".h-grades", li).textContent = Object.values(c.report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ");
+    const report = currentReport(c);
+    $(".h-grades", li).textContent = report ? Object.values(report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ") : "";
+    if (report && report.complete === false) $(".h-grades", li).insertAdjacentHTML("afterbegin", '<span class="h-flag">Incomplete</span> · ');
     li.addEventListener("click", () => {
       $("#history").hidden = true;
       loadAssessment(c.assessment, { front: c.front_thumb, back: c.back_thumb });
@@ -1396,7 +1473,7 @@ function init() {
   $("#front-only").addEventListener("click", () => setView("report"));
   $("#try-example").addEventListener("click", showExample);
   $("#resume").addEventListener("click", () => {
-    const draft = localStore.read(KEYS.draft, null);
+    const draft = localStore.draft();
     if (draft) loadAssessment(draft, draft.thumbs);
   });
 
@@ -1418,8 +1495,7 @@ function init() {
       if (isNaN(v)) return;
       leaveExample();
       state.centering[state.activeSide][key] = Math.min(100, Math.max(50, v));
-      const sc = state.scans[state.activeSide];
-      if (sc && sc.unmeasured) sc.unmeasured[key] = false;  // typed in by hand: now it's a measurement
+      state.evidence[state.activeSide][key] = "typed";  // typed in by hand: no longer unread
       renderRatioInputs();
       scheduleGrade();
     });
@@ -1451,6 +1527,15 @@ function init() {
   });
   $("#edit-details").addEventListener("click", () => setDetailsEditing($("#details-form").hidden));
   $("#done-details").addEventListener("click", () => setDetailsEditing(false));
+
+  // Inspection checklist
+  for (const box of $$("#inspect input[type=checkbox]")) {
+    box.addEventListener("change", () => setInspected(box.dataset.side, box.dataset.comp, box.checked));
+  }
+  $("#go-checklist").addEventListener("click", () => {
+    $("#condition-section").open = true;
+    $("#inspect").scrollIntoView({ behavior: "smooth", block: "center" });
+  });
 
   // Defect sheet
   $$("#sev-seg button").forEach((b) => b.addEventListener("click", () => { state.sheet.severity = b.dataset.sev; updateSheet(); }));

@@ -6,7 +6,7 @@ from .. import criteria_loader
 from ..centering import centering_grade
 from ..condition import FLAWLESS, component_conditions, floor_to
 from ..models import CardAssessment, CompanyGrade
-from .base import altered_grade, binding_factors
+from .base import altered_grade, binding_factors, finish, prepare, shown_subgrades
 
 
 def to_subgrade(condition: float, grades: list[float]) -> float:
@@ -40,12 +40,14 @@ def overall_grade(subs: list[float], rules: dict, grades: list[float]) -> float:
 def grade(assessment: CardAssessment) -> CompanyGrade:
     if altered := altered_grade("BGS", assessment):
         return altered
+    assessment = prepare(assessment)
     crit = criteria_loader.company("bgs")
     grades = [float(g) for g in crit["grades"]]
 
     cent = centering_grade(assessment.centering, crit)
     cond = component_conditions(assessment, "BGS")
-    subs = {"centering": cent.grade, **{c: to_subgrade(cc.grade, grades) for c, cc in cond.items()}}
+    # An unassessed component counts at its best case, so the overall grade is a ceiling.
+    subs = {"centering": cent.grade, **{c: to_subgrade(cc.ceiling, grades) for c, cc in cond.items()}}
     overall = overall_grade(list(subs.values()), crit["overall_rules"], grades)
 
     black = all(v == 10 for v in subs.values())
@@ -58,12 +60,12 @@ def grade(assessment: CardAssessment) -> CompanyGrade:
         if overall == 10:
             limiting.insert(0, "A Black Label needs all four subgrades at 10")
 
-    return CompanyGrade(
+    return finish(CompanyGrade(
         company="BGS",
         grade=overall,
         label=label,
         tier=tier,
-        subgrades=subs,
+        subgrades=shown_subgrades(subs, cond),
         limiting_factors=limiting,
         notes=["Beckett's real overall-grade formula is proprietary. This model follows its published rules."],
-    )
+    ), assessment)

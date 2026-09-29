@@ -6,18 +6,20 @@ from .. import criteria_loader
 from ..centering import centering_grade
 from ..condition import component_conditions, floor_to, qualifier_flags
 from ..models import CardAssessment, CompanyGrade
-from .base import altered_grade, binding_factors
+from .base import altered_grade, binding_factors, finish, prepare, shown_subgrades
 
 
 def _body_grade(assessment: CardAssessment, grades: list[float]) -> tuple[float, dict]:
     cond = component_conditions(assessment, "PSA")
-    parts = {c: floor_to(grades, min(10.0, cc.grade)) for c, cc in cond.items()}
+    # An unassessed component counts at its best case, so the overall grade is a ceiling.
+    parts = {c: floor_to(grades, min(10.0, cc.ceiling)) for c, cc in cond.items()}
     return min(parts.values()), {"parts": parts, "cond": cond}
 
 
 def grade(assessment: CardAssessment) -> CompanyGrade:
     if altered := altered_grade("PSA", assessment):
         return altered
+    assessment = prepare(assessment)
     crit = criteria_loader.company("psa")
     grades = [float(g) for g in crit["grades"]]
 
@@ -51,14 +53,14 @@ def grade(assessment: CardAssessment) -> CompanyGrade:
     if overall == 10 and any(v < 10 for v in parts.values()):
         notes.append("PSA 10 still allows slight printing imperfections visible under magnification.")
 
-    return CompanyGrade(
+    return finish(CompanyGrade(
         company="PSA",
         grade=overall,
         label=crit["labels"][overall],
         tier=grades.index(overall),
-        subgrades={k: v for k, v in parts.items()},
+        subgrades=shown_subgrades(parts, info["cond"]),
         qualifiers=qualifiers,
         alternatives=alternatives,
         limiting_factors=[] if overall == 10 else binding_factors(overall, parts, cent.limiting, info["cond"]),
         notes=notes + ["PSA doesn't print subgrades. The component values shown are estimates."],
-    )
+    ), assessment)

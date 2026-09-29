@@ -108,6 +108,7 @@
           </label>
         </div>
         <div class="score-block">
+          <span class="incomplete-badge" id="score-incomplete" hidden>Incomplete</span>
           <div class="score-top">
             <span class="score-grade" id="score-grade"></span>
             <span class="score-label" id="score-label"></span>
@@ -115,6 +116,10 @@
           <div class="score-num"><b id="score-num"></b><span>/ 1000</span></div>
           <div class="meter" aria-hidden="true"><span id="score-bar"></span><i style="left:94.4%"></i><i style="left:98.9%"></i></div>
           <p class="score-caption">Lab score on TAG's 1000-point scale</p>
+          <div class="score-missing" id="score-missing" hidden>
+            <p><b>Best case, not a grade.</b> Not checked yet: <span id="score-missing-list"></span>.</p>
+            <button type="button" class="link-btn strong" id="go-checklist">Open the checklist</button>
+          </div>
         </div>
       </section>
 
@@ -167,6 +172,23 @@
         <summary><h2>DINGS</h2><span class="summary-value" id="defect-summary"></span></summary>
         <div class="section-body">
           <p class="hint" id="condition-hint">Tap where you see wear. Check under a bright light, tilting the card.</p>
+          <div class="inspect" id="inspect">
+            <p class="inspect-hint">Checked means you looked under good light and listed everything you found in DINGS. Unchecked areas aren't assumed flawless.</p>
+            <div class="inspect-grid">
+              <fieldset class="inspect-side" data-side="front">
+                <legend>Front</legend>
+                <label class="check"><input type="checkbox" data-side="front" data-comp="corners"><span>Corners checked</span></label>
+                <label class="check"><input type="checkbox" data-side="front" data-comp="edges"><span>Edges checked</span></label>
+                <label class="check"><input type="checkbox" data-side="front" data-comp="surface"><span>Surface checked</span></label>
+              </fieldset>
+              <fieldset class="inspect-side" data-side="back">
+                <legend>Back</legend>
+                <label class="check"><input type="checkbox" data-side="back" data-comp="corners"><span>Corners checked</span></label>
+                <label class="check"><input type="checkbox" data-side="back" data-comp="edges"><span>Edges checked</span></label>
+                <label class="check"><input type="checkbox" data-side="back" data-comp="surface"><span>Surface checked</span></label>
+              </fieldset>
+            </div>
+          </div>
           <ol class="defect-list" id="defect-list"></ol>
           <details class="map-picker">
             <summary>Pick a spot on a card map instead</summary>

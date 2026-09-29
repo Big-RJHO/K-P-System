@@ -5,7 +5,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .models import Centering, SideCentering
+from .models import CardAssessment, Centering, SideCentering
+
+# This project's convention, not a company rule: a centering axis nobody measured (no photo, or the photo
+# didn't show that border) counts as just making Gem Mint (55/45), so it can't lift a card to Pristine.
+UNREAD_SHARE = 55.0
+
+
+def axis_name(axis: str) -> str:
+    return "left/right" if axis == "lr" else "top/bottom"
+
+
+def graded_centering(assessment: CardAssessment) -> Centering:
+    """Centering used for grading: each unread axis counts as at least UNREAD_SHARE."""
+    sides = {}
+    for side in ("front", "back"):
+        sc = getattr(assessment.centering, side)
+        evidence = assessment.centering_evidence.get(side, {})
+        sides[side] = SideCentering(
+            **{
+                axis: max(getattr(sc, axis), UNREAD_SHARE) if evidence.get(axis) == "unread" else getattr(sc, axis)
+                for axis in ("lr", "tb")
+            }
+        )
+    return Centering(**sides)
 
 
 def _fmt(share: float) -> str:

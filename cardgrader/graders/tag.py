@@ -6,7 +6,7 @@ from .. import criteria_loader
 from ..centering import centering_grade, interpolate
 from ..condition import COMPONENTS, SIDES, component_conditions, floor_to
 from ..models import CardAssessment, CompanyGrade
-from .base import altered_grade
+from .base import altered_grade, finish, prepare
 
 
 def condition_points(condition: float, table: dict) -> float:
@@ -26,6 +26,7 @@ def band_for(score: float, bands: list) -> tuple[int, float, str]:
 def grade(assessment: CardAssessment) -> CompanyGrade:
     if altered := altered_grade("TAG", assessment):
         return altered
+    assessment = prepare(assessment)
     crit = criteria_loader.company("tag")
     bands = crit["bands"]
 
@@ -35,7 +36,8 @@ def grade(assessment: CardAssessment) -> CompanyGrade:
         areas[f"{side} centering"] = interpolate(crit["centering_points"][side], split)
     cond = component_conditions(assessment, "TAG", per_side=True)
     for (side, comp), cc in cond.items():
-        areas[f"{side} {comp}"] = condition_points(cc.grade, crit["condition_points"])
+        # An unassessed area counts at its best case (1000), so the score is a ceiling.
+        areas[f"{side} {comp}"] = condition_points(cc.ceiling, crit["condition_points"])
 
     weights = {
         f"{side} {comp}": crit["side_weights"][side] / 4
@@ -71,13 +73,18 @@ def grade(assessment: CardAssessment) -> CompanyGrade:
         if cap_index > 0 and cent.limiting:
             limiting.append("Centering tolerance: " + "; ".join(cent.limiting))
 
-    return CompanyGrade(
+    subgrades: dict[str, float | None] = {k: round(v) for k, v in areas.items()}
+    for (side, comp), cc in cond.items():
+        if cc.grade is None:
+            subgrades[f"{side} {comp}"] = None  # unassessed: its 1000 is only a ceiling
+
+    return finish(CompanyGrade(
         company="TAG",
         grade=min(grade_value, 10.0),
         label=label,
         tier=tier,
         score=score,
-        subgrades={k: round(v) for k, v in areas.items()},
+        subgrades=subgrades,
         limiting_factors=limiting,
         notes=["TAG's real score comes from its own imaging. This estimate combines the eight area scores."],
-    )
+    ), assessment)
