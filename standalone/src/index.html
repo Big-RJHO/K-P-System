@@ -134,6 +134,11 @@
           <label for="collector-line">Collector line <span class="hint-inline">(bottom of the card)</span>
             <input id="collector-line" placeholder="e.g. VEN · SP3/006 · EN" autocomplete="off">
           </label>
+          <div class="id-find">
+            <button type="button" class="btn small" id="find-card">Find this card online</button>
+            <span class="hint-inline" id="id-status">Uses the set code and number above. Nothing is sent about your photos.</span>
+          </div>
+          <div id="id-results" class="id-results" hidden></div>
           <div class="form-grid">
             <label for="card-subtitle">Subtitle<input id="card-subtitle" placeholder="e.g. Inquisitive" autocomplete="off"></label>
             <label for="card-type">Card type<input id="card-type" placeholder="e.g. Champion Unit" autocomplete="off"></label>
@@ -146,6 +151,23 @@
             <label for="card-year">Year<input id="card-year" inputmode="numeric" placeholder="e.g. 2026" autocomplete="off"></label>
           </div>
           <button type="button" class="btn small" id="done-details">Done</button>
+        </div>
+      </section>
+
+      <!-- reference image of the confirmed card -->
+      <section class="card-panel reference-panel reveal" id="reference-panel" aria-labelledby="reference-title" hidden>
+        <div class="panel-head">
+          <h2 id="reference-title">Reference</h2>
+          <button type="button" class="link-btn" id="clear-reference">Remove</button>
+        </div>
+        <div class="reference-body">
+          <img id="reference-img" alt="Reference image of the identified card">
+          <div class="reference-text">
+            <p id="reference-name" class="reference-name"></p>
+            <p id="reference-source" class="hint"></p>
+            <p id="reference-checks" class="hint"></p>
+            <p class="hint">Support evidence only. A reference card can have its own wear, and its grade is never applied to yours.</p>
+          </div>
         </div>
       </section>
 
@@ -166,6 +188,19 @@
         <div class="tiles" id="tiles"></div>
         <p class="best-line" id="best-line"></p>
       </section>
+
+      <!-- photo quality and suspected edge/corner damage -->
+      <details class="card-panel section reveal" id="scancheck-section" open>
+        <summary><h2>Scan check</h2><span class="summary-value" id="scancheck-summary"></span></summary>
+        <div class="section-body">
+          <p class="hint">Automatic checks on your photos. "Nothing found" never means the card is perfect: it only covers what this photo can show.</p>
+          <div class="segmented" role="tablist" aria-label="Side">
+            <button type="button" data-side="front" aria-selected="true">Front</button>
+            <button type="button" data-side="back" aria-selected="false">Back</button>
+          </div>
+          <div id="scancheck-body"></div>
+        </div>
+      </details>
 
       <!-- defects -->
       <details class="card-panel section reveal" id="condition-section" open>

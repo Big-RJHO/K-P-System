@@ -99,6 +99,8 @@ const state = {
   inspected: { front: [], back: [] },
   evidence: { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } },
   activeSide: "front",
+  reference: null,  // {image_url|image, source, source_url, name, rgba, mask}: only set once the user confirms the card
+  showSuspects: true,
   sheet: { side: null, location: null, type: null, severity: null },
   example: false,
   report: null,
@@ -340,10 +342,12 @@ function applyScan(side, scan, photo = null) {
     img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin,
     confidence: scan.confidence.borders,
     photo, corners: scan.corners,  // kept for this session so the outline can be adjusted by hand
+    result: scan, quality: null, check: null,  // full scan, photo-quality gate, edge/corner candidates
   };
   state.evidence[side] = { lr: unmeasured.lr ? "unread" : "measured", tb: unmeasured.tb ? "unread" : "measured" };
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
+  runInspection(side);
 }
 
 async function scanFile(side, file) {
@@ -357,7 +361,10 @@ async function scanFile(side, file) {
     applyScan(side, Vision.scan(pixels, "auto"), pixels);
     const ev = state.evidence[side];
     const um = { lr: ev.lr === "unread", tb: ev.tb === "unread" };
-    if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In the report, line up the pink guides with the printed frame.`);
+    const q = state.scans[side].quality;
+    const failed = q && q.verdict === "rescan" ? Object.values(q.checks).find((c) => c.status === "fail") : null;
+    if (failed) toast(`${cap(side)}: this photo can't support a reliable check. ${failed.note}`);
+    else if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In the report, line up the pink guides with the printed frame.`);
     else if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the border was hard to read. Check the guide lines in the report.`);
   } catch (err) {
     toast(err.message || "Couldn't measure this photo.");
@@ -630,10 +637,11 @@ function renderRatioInputs() {
 function renderCentering() {
   const s = state.scans[state.activeSide];
   $("#adjust-outline").hidden = !(s && s.photo);
-  $$("#centering-section .segmented button, .viewer-side button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
+  $$("#centering-section .segmented button, #scancheck-section .segmented button, .viewer-side button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
   viewer.render();
   guide.show();
   renderRatioInputs();
+  renderScanCheck();
 }
 
 /* ---------------------------------------------------------------- defects */
@@ -872,6 +880,7 @@ const viewer = {
       }
       ctx.setLineDash([]);
     }
+    drawSuspects(ctx, scan, map ? (v) => (v - map.m) * map.kx : null, map ? (v) => (v - map.m) * map.ky : null, color);
     const sevColor = { micro: color("--good", "#178a5d"), minor: color("--warn", "#b26b00"), moderate: color("--bad", "#c2362f"), major: color("--bad", "#c2362f") };
     const seen = {};
     state.defects.forEach((d, i) => {
@@ -901,6 +910,312 @@ const viewer = {
     ctx.restore();
   },
 };
+
+/* ---------------------------------------------------------------- scan check (photo quality + edge/corner candidates) */
+
+const httpsUrl = (u) => (typeof u === "string" && /^https:\/\//i.test(u) ? u : "");  // reference URLs are untrusted data
+const QUALITY_TEXT = { ok: "Photo OK", warn: "Usable, with limits", rescan: "Retake this photo" };
+
+function runInspection(side) {
+  const s = state.scans[side];
+  if (!s || !s.photo || !s.result) return;
+  try {
+    s.quality = Inspect.quality(s.photo, s.result);
+    const opts = { quality: s.quality, face: side };
+    if (side === "front" && state.reference && state.reference.rgba && state.reference.usable) {
+      opts.printedMask = Identify.printedMask(state.reference.rgba, s.result.warped, s.margin);
+    }
+    s.check = Inspect.edgesAndCorners(s.result, opts);
+  } catch (err) {
+    s.quality = null;
+    s.check = null;
+  }
+}
+
+const blockedText = (item) => {
+  const [comp, where] = item.split(":");
+  return where ? `${pretty(where)} ${comp === "corners" ? "corner" : "edge"}` : comp;
+};
+
+function scanCheckLine(text, cls = "") {
+  const li = document.createElement("li");
+  if (cls) li.className = cls;
+  li.textContent = text;
+  return li;
+}
+
+function renderScanCheck() {
+  const body = $("#scancheck-body");
+  const parts = SIDES.map((side) => {
+    const q = state.scans[side] && state.scans[side].quality;
+    return q ? `${cap(side)}: ${QUALITY_TEXT[q.verdict].toLowerCase()}` : null;
+  }).filter(Boolean);
+  $("#scancheck-summary").textContent = parts.join(" · ") || "No photos";
+  if (!body) return;
+  body.innerHTML = "";
+  const side = state.activeSide, s = state.scans[side];
+  if (!s || !s.photo) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = s ? "The photo isn't kept after you reload the page, so it can't be checked again. Rescan it to check the photo." : `No ${side} photo, so nothing can be checked here. Photos of both sides are needed for a full assessment.`;
+    body.append(p);
+    return;
+  }
+  const q = s.quality, c = s.check;
+  if (!q || !c) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "The checks couldn't run on this photo. Try scanning it again.";
+    body.append(p);
+    return;
+  }
+  const head = document.createElement("div");
+  head.className = "sc-verdict";
+  head.innerHTML = `<span class="chip ${q.verdict}"></span>`;
+  $(".chip", head).textContent = QUALITY_TEXT[q.verdict];
+  body.append(head);
+
+  const problems = Object.entries(q.checks).filter(([, v]) => v.status !== "ok");
+  const ul = document.createElement("ul");
+  ul.className = "sc-list";
+  if (problems.length) for (const [, v] of problems) ul.append(scanCheckLine(v.note, v.status));
+  else ul.append(scanCheckLine("Sharpness, glare, resolution and framing look fine."));
+  if (q.blocked.length) ul.append(scanCheckLine(`This photo can't show: ${q.blocked.map(blockedText).join(", ")}. Rescan with better light, or check those by eye and log them in DINGS.`, "warn"));
+  body.append(ul);
+
+  const toggle = document.createElement("label");
+  toggle.className = "sc-toggle";
+  toggle.innerHTML = '<input type="checkbox"><span>Show suspected damage on the card</span>';
+  const box = $("input", toggle);
+  box.checked = state.showSuspects;
+  box.addEventListener("change", () => { state.showSuspects = box.checked; viewer.render(); });
+  body.append(toggle);
+
+  const sub = document.createElement("p");
+  sub.className = "sc-sub";
+  sub.textContent = "Edges and corners";
+  body.append(sub);
+  const sum = document.createElement("p");
+  sum.className = "sc-summary";
+  sum.textContent = c.summary;
+  body.append(sum);
+
+  for (const d of c.defects) {
+    const row = document.createElement("div");
+    row.className = "sc-cand";
+    const label = CRITERIA.defects.types[d.type] ? CRITERIA.defects.types[d.type].label : pretty(d.type);
+    row.innerHTML = "<div><b></b><small></small></div><button type=\"button\" class=\"btn small\">Add to DINGS</button>";
+    $("b", row).textContent = `${label} · ${cap(d.severity)} · ${whereText(d)}`;
+    $("small", row).textContent = d.note || "";
+    $("button", row).addEventListener("click", () => {
+      leaveExample();
+      state.defects.push({ side: d.side || side, location: d.location, type: d.type, severity: d.severity, note: `Auto-detected: ${d.note || label}`.slice(0, 200) });
+      markInspected(d.side || side, COMPONENT_OF[d.location]);
+      runGrade();
+    });
+    body.append(row);
+  }
+  const det = document.createElement("details");
+  det.innerHTML = "<summary class=\"link-btn\">What this can't tell you</summary><ul class=\"sc-limits\"></ul>";
+  for (const l of c.limitations) { const li = document.createElement("li"); li.textContent = l; $("ul", det).append(li); }
+  body.append(det);
+}
+
+// Draw the photo-check overlays on the card viewer (coordinates are in the flattened scan, margin included).
+function drawSuspects(ctx, scan, X, Y, color) {
+  if (!state.showSuspects || !scan || !X) return;
+  const sev = { micro: color("--good", "#178a5d"), minor: color("--warn", "#b26b00"), moderate: color("--bad", "#c2362f"), major: color("--bad", "#c2362f") };
+  const shapes = [...((scan.quality && scan.quality.overlays) || []), ...((scan.check && scan.check.overlays) || [])];
+  ctx.save();
+  ctx.lineWidth = 3;
+  for (const o of shapes) {
+    const likely = o.kind === "edge" || o.kind === "corner" ? o.likely : false;
+    if (o.kind === "glare") { ctx.fillStyle = "rgba(255, 214, 10, 0.35)"; ctx.strokeStyle = "transparent"; }
+    else if (o.kind === "unassessable") { ctx.fillStyle = "rgba(150, 156, 168, 0.28)"; ctx.strokeStyle = "transparent"; }
+    else { ctx.fillStyle = "transparent"; ctx.strokeStyle = likely ? sev[o.severity] || sev.minor : "rgba(190, 196, 208, 0.9)"; ctx.setLineDash(likely ? [] : [6, 5]); }
+    if (o.type === "rect") {
+      const x = X(o.x), y = Y(o.y), w = o.w * (X(1) - X(0)), h = o.h * (Y(1) - Y(0));
+      const pad = o.kind === "edge" || o.kind === "corner" ? 4 : 0;
+      ctx.fillRect(x - pad, y - pad, w + 2 * pad, h + 2 * pad);
+      if (o.kind === "edge" || o.kind === "corner") ctx.strokeRect(x - pad, y - pad, w + 2 * pad, h + 2 * pad);
+    } else if (o.type === "polyline" && o.points && o.points.length) {
+      ctx.beginPath();
+      o.points.forEach(([px, py], i) => (i ? ctx.lineTo(X(px), Y(py)) : ctx.moveTo(X(px), Y(py))));
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+/* ---------------------------------------------------------------- identify the card + reference image */
+
+function clearReference() {
+  if (state.reference && state.reference.objectUrl) URL.revokeObjectURL(state.reference.objectUrl);
+  const had = !!state.reference;
+  state.reference = null;
+  $("#reference-panel").hidden = true;
+  if (had && state.scans.front) { runInspection("front"); renderScanCheck(); viewer.render(); }
+}
+
+function showReference() {
+  const r = state.reference;
+  $("#reference-panel").hidden = !r;
+  if (!r) return;
+  $("#reference-img").src = httpsUrl(r.thumb_url) || httpsUrl(r.image_url) || r.objectUrl || "";
+  $("#reference-name").textContent = r.name || "Your reference image";
+  const src = $("#reference-source");
+  src.textContent = r.source === "user" ? "Source: an image you supplied." : `Source: ${r.source}, matched by set and number and confirmed by you. `;
+  if (httpsUrl(r.source_url)) {
+    const a = document.createElement("a");
+    a.href = r.source_url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = "Open the source";
+    src.append(a);
+  }
+  const notes = [];
+  if (r.problems && r.problems.length) notes.push(`Not used for comparison: ${r.problems.join(" ")}`);
+  else if (r.usable) notes.push(`Printed white/light areas on the front are ignored when looking for whitening (${r.coverage}% of the edge band marked).`);
+  else if (r.image_readable === false) notes.push("This image host doesn't allow reading its pixels, so it is shown for you to compare by eye only. Save the image and add it as a file to use it for printed-white masking.");
+  else notes.push("Loading the image for comparison…");
+  $("#reference-checks").textContent = notes.join(" ");
+}
+
+async function prepareReference(ref) {
+  // Decode the reference and judge whether it can be used; never throws.
+  if (ref.image_readable === false && !ref.image) return;
+  try {
+    ref.rgba = await Identify.loadReferenceRGBA(ref);
+    const chk = Identify.checkReference(ref.rgba);
+    ref.usable = chk.usable;
+    ref.problems = chk.usable ? [] : chk.reasons;
+    if (chk.usable && state.scans.front) {
+      const mask = Identify.printedMask(ref.rgba, state.scans.front.result.warped, state.scans.front.margin);
+      ref.coverage = Math.round(Identify.maskCoverage(mask, state.scans.front.width, state.scans.front.height, state.scans.front.margin) * 100);
+    }
+  } catch (err) {
+    ref.usable = false;
+    ref.problems = ["The image couldn't be loaded for comparison."];
+  }
+}
+
+async function setReference(ref) {
+  if (state.reference && state.reference.objectUrl) URL.revokeObjectURL(state.reference.objectUrl);
+  state.reference = ref;
+  showReference();
+  await prepareReference(ref);
+  if (state.reference !== ref) return;  // replaced meanwhile
+  showReference();
+  runInspection("front");
+  renderScanCheck();
+  viewer.render();
+}
+
+function setStatus(text) { $("#id-status").textContent = text; }
+
+function confirmCandidate(c) {
+  leaveExample();
+  const set = (id, v) => { if (v) $(`#${id}`).value = v; };
+  set("card-name", c.name);
+  set("card-set", c.set_name);
+  set("card-set-code", c.set_code);
+  set("card-number", c.number);
+  set("card-year", c.year);
+  if (c.rarity) {
+    const sel = $("#card-rarity");
+    if (![...sel.options].some((o) => o.value === c.rarity)) {  // the database's wording may differ from our list
+      const o = document.createElement("option");
+      o.value = o.textContent = c.rarity;
+      sel.append(o);
+    }
+    sel.value = c.rarity;
+  }
+  renderDetails();
+  saveDraft();
+  $("#id-results").hidden = true;
+  setStatus(`Confirmed: ${c.name}. Finish and language are left for you to set.`);
+  setReference({ image_url: c.image_url, thumb_url: c.thumb_url, source: c.source, source_url: c.source_url, name: `${c.name}${c.variant ? ` · ${c.variant}` : ""}`, image_readable: c.image_readable });
+}
+
+function idNote(box, text) {
+  const p = document.createElement("p");
+  p.className = "id-note";
+  p.textContent = text;
+  box.append(p);
+}
+
+function renderManualReference(box) {
+  const wrap = document.createElement("div");
+  wrap.className = "id-manual";
+  wrap.innerHTML = '<label>Use your own reference image (link or file)<input type="url" placeholder="https://… image link" autocomplete="off"></label><input type="file" accept="image/png,image/jpeg,image/webp"><button type="button" class="btn small">Use this reference</button>';
+  $("button", wrap).addEventListener("click", async () => {
+    const file = $("input[type=file]", wrap).files[0];
+    const url = $("input[type=url]", wrap).value.trim();
+    const res = Identify.manualReference(file ? { file } : { url });
+    if (!res.ok) { setStatus(res.error); return; }
+    const ref = { source: "user", name: file ? file.name : "Your reference image", image_readable: true };
+    if (file) { ref.image = file; ref.objectUrl = URL.createObjectURL(file); } else ref.image_url = res.image_url;
+    box.hidden = true;
+    setStatus("Reference added. Nothing is inferred from it beyond ignoring printed white near the edges.");
+    setReference(ref);
+  });
+  box.append(wrap);
+}
+
+function renderCandidates(res) {
+  const box = $("#id-results");
+  box.innerHTML = "";
+  box.hidden = false;
+  if (res.error || !res.candidates.length) {
+    idNote(box, res.error || "No matching card found.");
+    idNote(box, "Nothing is being used as a reference. You can fill in the details by hand, or supply a reference image yourself.");
+    renderManualReference(box);
+    setStatus("Not identified.");
+    return;
+  }
+  setStatus(res.needs_confirmation ? "Several cards could match. Pick yours, or none." : "Check this is your exact card, including the variant.");
+  idNote(box, "Look closely at the artwork, frame and any foil pattern: alternate versions of the same number look alike. Nothing is used until you confirm.");
+  for (const c of res.candidates.slice(0, 6)) {
+    const row = document.createElement("div");
+    row.className = "id-cand";
+    const img = document.createElement("img");
+    img.alt = "";
+    img.src = httpsUrl(c.thumb_url) || httpsUrl(c.image_url);
+    const info = document.createElement("div");
+    const b = document.createElement("b");
+    b.textContent = c.name;
+    const line = document.createElement("span");
+    line.textContent = [c.set_name, c.number, c.rarity, c.variant].filter(Boolean).join(" · ");
+    const ev = document.createElement("span");
+    ev.textContent = ` ${Math.round(c.confidence * 100)}% match: ${(c.evidence || []).join("; ")}`;
+    info.append(b, line, document.createElement("br"), ev);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn small";
+    btn.textContent = "This is my card";
+    btn.addEventListener("click", () => confirmCandidate(c));
+    row.append(img, info, btn);
+    box.append(row);
+  }
+  renderManualReference(box);
+}
+
+async function findCard() {
+  const btn = $("#find-card");
+  const c = assessment().card;
+  if (!c.set_code && !c.number && !c.name) { setStatus("Enter a set code and number (or a name) first."); return; }
+  btn.disabled = true;
+  setStatus("Looking it up…");
+  let res;
+  try {
+    res = await Identify.candidates({ game: state.game, set_code: c.set_code, number: c.number, name: c.name, language: c.language }, { fetch: (...a) => window.fetch(...a) });
+  } catch (err) {
+    res = { candidates: [], error: "The lookup failed (offline, or this page can't reach the card database)." };
+  }
+  btn.disabled = false;
+  renderCandidates(res);
+}
 
 /* ---------------------------------------------------------------- grading + report */
 
@@ -1129,6 +1444,7 @@ function renderReport() {
   renderSubgrades(report);
   renderTiles(report);
   renderDefects();
+  renderScanCheck();
   renderCompanies(report);
   viewer.render();
   $("#disclaimer").textContent = report.disclaimer;
@@ -1260,6 +1576,8 @@ function resetCard() {
   state.example = false;
   state.report = null;
   state.savedId = null;
+  clearReference();
+  $("#id-results").hidden = true;
   $("#card-name").value = "";
   clearDetails();
   setDetailsEditing(false);
@@ -1484,7 +1802,7 @@ function init() {
   $("#save-card").addEventListener("click", saveCard);
   for (const id of ["#open-history", "#open-history-2"]) $(id).addEventListener("click", openHistory);
   viewer.init();
-  $$("#centering-section .segmented button, .viewer-side button").forEach((b) => b.addEventListener("click", () => {
+  $$("#centering-section .segmented button, #scancheck-section .segmented button, .viewer-side button").forEach((b) => b.addEventListener("click", () => {
     if (guide.outline) setOutlineMode(false);
     state.activeSide = b.dataset.side;
     renderCentering();
@@ -1525,6 +1843,12 @@ function init() {
     renderDetails();
     saveDraft();
   });
+  $("#find-card").addEventListener("click", findCard);
+  $("#clear-reference").addEventListener("click", () => { clearReference(); setStatus("Reference removed."); });
+  // A reference only belongs to the card it was confirmed for: changing what identifies the card drops it.
+  for (const id of ["card-set-code", "card-number", "card-language"]) {
+    $(`#${id}`).addEventListener("input", () => { if (state.reference && state.reference.source !== "user") { clearReference(); setStatus("Details changed: find the card again to get its reference."); } });
+  }
   $("#edit-details").addEventListener("click", () => setDetailsEditing($("#details-form").hidden));
   $("#done-details").addEventListener("click", () => setDetailsEditing(false));
 
