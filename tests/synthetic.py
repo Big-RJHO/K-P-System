@@ -159,6 +159,20 @@ def paint_corner_whitening(card: np.ndarray, corner: str, depth: int = 6, radius
     return out
 
 
+def add_edge_lines(photo: np.ndarray, angle: float, gap: int = 0, width: int = 2, extent=(0.08, 0.92), color=(235, 238, 240)) -> np.ndarray:
+    """Thin bright lines `gap` px outside the card's left and right edges over `extent` of their length, like a
+    graded slab's inner rail or a reflection on it, on a photo made by `place_on_background(card, angle)`."""
+    bh, bw = photo.shape[:2]
+    matrix = cv2.getRotationMatrix2D((W / 2, H / 2), angle, 1.0)
+    matrix[0, 2] += bw / 2 - W / 2
+    matrix[1, 2] += bh / 2 - H / 2
+    out = photo.copy()
+    for x in (-gap - width / 2, W - 1 + gap + width / 2):
+        a, b = (matrix @ np.array([x, f * H, 1.0]) for f in extent)
+        cv2.line(out, (int(round(a[0])), int(round(a[1]))), (int(round(b[0])), int(round(b[1]))), color, width, cv2.LINE_AA)
+    return out
+
+
 def tilt_photo(img: np.ndarray, amount: float = 0.06, seed: int = 3) -> np.ndarray:
     """Simulate a phone held off-angle: a keystone (perspective) distortion of the whole photo."""
     rng = np.random.default_rng(seed)

@@ -1,9 +1,11 @@
 """Run the grading system on card photos, the way the app does, from the command line.
 
-    python scripts/photo_grade.py scan FRONT.jpg BACK.jpg --out DIR
+    python scripts/photo_grade.py scan FRONT.jpg BACK.jpg --out DIR [--angled-light]
         Finds and flattens the card, measures centering, checks photo quality, and looks for edge/corner
         wear candidates (the same vision.js / inspect.js the app uses). Writes zoomable images to DIR and
-        prints what the system found and could not assess.
+        prints what the system found and could not assess. A flat photo can't show the surface (scratches,
+        print lines, dents, creases, gloss loss), so the surface of both sides is photo-limited unless
+        --angled-light says the surface was also examined or photographed under raking (angled) light.
 
     python scripts/photo_grade.py grade DIR/scan.json OBS.json [--json RESULT.json]
         Grades the card from the measured centering plus the inspector's observations (defects found and
@@ -16,7 +18,7 @@ OBS.json: {"inspected": {"front": ["corners","edges","surface"], "back": [...]},
 An area that is not listed as inspected is unassessed and makes the grade an incomplete ceiling.
 
 The photo check wins over "inspected": an area the scan says its photo can't show (scan.json
-"photo_limits", from the photo-quality check) stays unassessed even when it is listed as inspected, and
+"photo_limits", from the photo-quality check and the surface rule above) stays unassessed even when it is listed as inspected, and
 defects logged there only lower the ceiling. Only "inspected_in_hand" (a person examined the physical card
 under good light, not the photo) lifts it. Each defect's location must be one its type allows
 (`photo_grade.py vocab`).
@@ -41,6 +43,7 @@ from cardgrader.engine import grade_all  # noqa: E402
 from cardgrader.models import CardAssessment, Defect, allowed_locations, photo_limit_components  # noqa: E402
 
 MAX_SIDE = 2400  # the app downsizes photos to this before scanning
+ANGLED_LIGHT_REASON = "surface needs angled light"
 NODE_SCRIPT = """
 const V = require(%s), I = require(%s), fs = require("fs");
 const jobs = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -145,6 +148,13 @@ def measured_axes(scan: dict) -> dict:
     return res
 
 
+def auto_unassessed(check: dict) -> dict[str, str]:
+    """{"left edge": "white border", "top-left corner": "..."}: where the automatic check couldn't look."""
+    out = {f"{s} edge": v["reason"] for s, v in check["sides"].items() if not v["assessable"]}
+    out.update({f"{c['location'].replace('_', '-')} corner": c["reason"] for c in check["corners"] if not c["assessable"]})
+    return out
+
+
 def cmd_scan(args) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -164,14 +174,21 @@ def cmd_scan(args) -> None:
         cv2.imwrite(str(out / f"{side}_overlay.jpg"), overlay_image(warped, r), [cv2.IMWRITE_JPEG_QUALITY, 92])
         axes = measured_axes(sc)
         blocked = r["quality"]["blocked"]
-        limits = photo_limit_components(blocked)
+        limits = photo_limit_components(blocked + ([] if args.angled_light else ["surface"]))
+        warnings = {name: c["note"] for name, c in r["quality"]["checks"].items() if c["status"] != "ok"}
         summary["sides"][side] = {"centering": {a: v[0] for a, v in axes.items()}, "evidence": {a: v[1] for a, v in axes.items()},
                                   "quality": r["quality"]["verdict"], "blocked": blocked,
                                   "blocked_reasons": r["quality"]["blocked_reasons"],
+                                  # the photo-quality notes that aren't "ok" (sleeve/slab, resolution, ...), for `grade`
+                                  "warnings": warnings,
+                                  # whether the surface was also seen under raking light (else it is photo-limited)
+                                  "angled_light": bool(args.angled_light),
                                   # what `grade` treats as unassessed on this side, whatever is ticked as inspected
                                   "photo_limits": limits,
                                   # the automatic edge/corner candidates, in the DING shape (suggestions only)
-                                  "auto_defects": [{**d, "side": side} for d in r["check"]["defects"]]}
+                                  "auto_defects": [{**d, "side": side} for d in r["check"]["defects"]],
+                                  # areas the automatic edge/corner check couldn't judge (to be judged by eye)
+                                  "auto_unassessed": auto_unassessed(r["check"])}
         print(f"=== {side.upper()} ===")
         print(f"centering  left/right {axes['lr'][0]:.1f} ({axes['lr'][1]})   top/bottom {axes['tb'][0]:.1f} ({axes['tb'][1]})")
         print(f"photo quality: {r['quality']['verdict']}")
@@ -180,6 +197,9 @@ def cmd_scan(args) -> None:
                 print(f"  - [{c['status']}] {c['note']}")
         if blocked:
             print(f"  cannot be assessed from this photo: {', '.join(blocked)}")
+        if not args.angled_light:
+            print(f"  surface: {ANGLED_LIGHT_REASON} (scratches, print lines, dents, creases and gloss loss don't show on a"
+                  " flat photo); examine it under raking light and rescan with --angled-light, or check it in hand")
         if limits:
             print(f"  -> {side} {', '.join(limits)} will count as NOT ASSESSED in `grade`, even if listed as inspected,"
                   " unless checked on the card in hand (inspected_in_hand)")
@@ -203,8 +223,9 @@ def side_limits(side_scan: dict) -> list[str]:
 
 
 def limit_reasons(side_scan: dict, comp: str) -> list[str]:
-    """Why the photo can't show a component: the photo checks that blocked any of its items."""
-    out: list[str] = []
+    """Why the photo can't show a component: the photo checks that blocked any of its items, and for the
+    surface, that it wasn't seen under angled light (scan.json from before --angled-light has no such key)."""
+    out: list[str] = [ANGLED_LIGHT_REASON] if comp == "surface" and side_scan.get("angled_light") is False else []
     for item, why in (side_scan.get("blocked_reasons") or {}).items():
         if item == comp or item.startswith(comp + ":"):
             out += [w for w in why if w not in out]
@@ -247,6 +268,23 @@ def why_unassessed(area: str, assessment: CardAssessment, scan: dict) -> str:
     return "not listed as inspected"
 
 
+def scan_cautions(scan: dict) -> list[str]:
+    """Everything the scan warned about that isn't a photo limit: the photo-quality notes (a sleeve or slab,
+    low resolution, ...), a retake verdict and the areas the automatic edge/corner check couldn't judge."""
+    out = []
+    for s in SIDES:
+        side = scan[s]
+        if side.get("quality") == "rescan":
+            out.append(f"{s} photo: the scan's verdict is RETAKE THIS PHOTO; nothing measured on it is reliable")
+        for note in (side.get("warnings") or {}).values():
+            out.append(f"{s} photo: {note}")
+        auto = side.get("auto_unassessed") or {}
+        if auto:
+            out.append(f"{s}: the automatic edge/corner check couldn't judge "
+                       + ", ".join(f"the {where} ({why})" for where, why in auto.items()) + "; judge those by eye")
+    return out
+
+
 def cmd_grade(args) -> None:
     scan = json.loads(Path(args.scan).read_text())["sides"]
     obs = json.loads(Path(args.obs).read_text())
@@ -265,7 +303,7 @@ def cmd_grade(args) -> None:
         sys.exit(f"invalid observations: {exc}")
     report = grade_all(assessment)
 
-    print("Photo limits from the scan (areas the photo can't show):")
+    print("Photo limits from the scan (areas the photo can't show; they count only if checked in hand):")
     for s in SIDES:
         if not limits[s]:
             print(f"  {s}: none")
@@ -276,8 +314,17 @@ def cmd_grade(args) -> None:
             in_hand = " -> checked in hand" if comp in assessment.inspected_in_hand.get(s, []) else ""
             parts.append(comp + (f" ({', '.join(reasons)})" if reasons else "") + in_hand)
         print(f"  {s}: {'; '.join(parts)}")
+    cautions = scan_cautions(scan)
+    if cautions:
+        print("Cautions from the scan:")
+        for line in cautions:
+            print(f"  - {line}")
     print()
-    if report.complete:
+    retake = [s for s in SIDES if scan[s].get("quality") == "rescan"]
+    if report.complete and retake:
+        print(f"COMPLETE ON THE OBSERVATIONS ONLY — the scan said to retake the {' and '.join(retake)} photo, so this grade "
+              "rests on the in-hand checks and typed values, not on that photo")
+    elif report.complete:
         print("COMPLETE — every area was assessed")
     else:
         print("INCOMPLETE — best case only, not a grade")
@@ -301,6 +348,7 @@ def cmd_grade(args) -> None:
             # psa_grade is the number shown; when complete is false it is a ceiling (best case), not a grade.
             "psa_grade": psa.grade, "psa_label": psa.label, "complete": report.complete,
             "psa_grade_is_ceiling": not report.complete,
+            "scan_quality": {s: scan[s].get("quality") for s in SIDES},
             "unassessed": report.unassessed,
             "photo_limited": photo_limited,
             "inspected_in_hand": {s: assessment.inspected_in_hand.get(s, []) for s in SIDES},
@@ -314,6 +362,9 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("scan")
     s.add_argument("front"); s.add_argument("back"); s.add_argument("--out", required=True)
+    s.add_argument("--angled-light", action="store_true",
+                   help="the surface was also examined or photographed under raking (angled) light, so a flat "
+                        "photo's surface limit doesn't apply")
     s.set_defaults(fn=cmd_scan)
     g = sub.add_parser("grade")
     g.add_argument("scan"); g.add_argument("obs"); g.add_argument("--json")

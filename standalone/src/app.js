@@ -97,8 +97,9 @@ const state = {
   // Assessment evidence (see grading.js): which components were looked at, and where each centering
   // share came from. Nothing counts as flawless or centered until there's evidence for it.
   inspected: { front: [], back: [] },
-  // What each side's photo can't show (from the scan's quality check). The photo check wins over a tick in
-  // `inspected`; only a check on the card in hand (`inHand`) counts for those areas.
+  // What each side's photo can't show (from the scan's quality check, plus the surface: a flat photo can't
+  // show scratches, dents or print lines). The photo check wins over a tick in `inspected`; only a check on
+  // the card in hand (`inHand`) counts for those areas.
   photoLimits: { front: [], back: [] },
   inHand: { front: [], back: [] },
   evidence: { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } },
@@ -349,7 +350,7 @@ function applyScan(side, scan, photo = null) {
     result: scan, quality: null, check: null,  // full scan, photo-quality gate, edge/corner candidates
   };
   state.evidence[side] = { lr: unmeasured.lr ? "unread" : "measured", tb: unmeasured.tb ? "unread" : "measured" };
-  state.photoLimits[side] = [];  // set from the new photo's quality check below
+  state.photoLimits[side] = [...FLAT_PHOTO_LIMITS];  // the quality check below adds what else this photo can't show
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
   runInspection(side);
@@ -797,8 +798,12 @@ function renderInspect() {
     const row = box.closest(".check");
     row.classList.toggle("locked", locked);
     row.classList.toggle("limited", limited);
-    $("span", row).textContent = `${cap(comp)} ${limited ? "checked in hand" : "checked"}`;
-    row.title = limited ? "The photo can't show these. Check the card in hand under good light, then tick." : "";
+    const span = $("span", row);
+    span.textContent = `${cap(comp)} ${limited ? "checked in hand" : "checked"}`;
+    span.dataset.hint = comp === "surface" ? "A flat photo can't show it: tilt the card under a light" : "Photo can't show these: check the card in hand";
+    row.title = !limited ? "" : comp === "surface"
+      ? "A flat photo can't show scratches, print lines, dents, creases or gloss loss. Tilt the card under a light, log what you find, then tick."
+      : "The photo can't show these. Check the card in hand under good light, then tick.";
     all = all && box.checked;
   }
   $("#inspect").classList.toggle("incomplete", !all);
@@ -931,13 +936,16 @@ const viewer = {
 
 const httpsUrl = (u) => (typeof u === "string" && /^https:\/\//i.test(u) ? u : "");  // reference URLs are untrusted data
 const QUALITY_TEXT = { ok: "Photo OK", warn: "Usable, with limits", rescan: "Retake this photo" };
+// Whatever its quality, a flat photo can't show surface wear (scratches, print lines, dents, creases, gloss
+// loss): that needs the card tilted under a light, so the surface only counts once checked in hand.
+const FLAT_PHOTO_LIMITS = ["surface"];
 
 function runInspection(side) {
   const s = state.scans[side];
   if (!s || !s.photo || !s.result) return;
   try {
     s.quality = Inspect.quality(s.photo, s.result);
-    state.photoLimits[side] = Grading.photoLimitComponents(s.quality.blocked);
+    state.photoLimits[side] = Grading.photoLimitComponents([...s.quality.blocked, ...FLAT_PHOTO_LIMITS]);
     const opts = { quality: s.quality, face: side };
     if (side === "front" && state.reference && state.reference.rgba && state.reference.usable) {
       opts.printedMask = Identify.printedMask(state.reference.rgba, s.result.warped, s.margin);
@@ -998,6 +1006,7 @@ function renderScanCheck() {
   if (problems.length) for (const [, v] of problems) ul.append(scanCheckLine(v.note, v.status));
   else ul.append(scanCheckLine("Sharpness, glare, resolution and framing look fine."));
   if (q.blocked.length) ul.append(scanCheckLine(`This photo can't show: ${q.blocked.map(blockedText).join(", ")}. Rescan with better light, or check those by eye and log them in DINGS.`, "warn"));
+  ul.append(scanCheckLine("A flat photo can't show the surface (scratches, print lines, dents, creases, gloss loss). Tilt the card under a light, log what you find in DINGS, then tick “Surface checked in hand”."));
   body.append(ul);
 
   const toggle = document.createElement("label");

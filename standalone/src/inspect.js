@@ -66,11 +66,27 @@
     gap: 2, minRun: 3,       // merge runs across gaps; ignore shorter runs
     edgeSearch: 5,           // px either way to look for the true edge line
     candidateConf: 0.4,      // below this a run is shown greyed out and not offered as a DING
+    // Slab rail, sleeve lip or reflection: a thin bright line hugging the edge, even along much of its length.
+    // Seen on nearly every slab photo of the PSA/TAG blind test; worn stock is patchy and varies in depth.
+    railDepth: 6,            // px: reaches at most this deep (90th percentile) ...
+    railEven: 0.9,           // ... and within 1 px of its median depth at this fraction of its positions
+    railRun: 0.2,            // such a run this long (fraction of the edge) is a line by itself
+    railCover: 0.3,          // or such runs of at least railPieceMm together cover this fraction of the edge
+    railPieceMm: 1.5,
     // Severity from length along the edge and depth into the card (mm), same scale for corner whitening.
     sev: { major: [15, 1.0], moderate: [5, 0.6], minor: [1.5, 0.35] },
     // Corners
     rayStep: 3,              // degrees between rays across the rounded corner
     roundExcess: [0.35, 0.8, 1.5, 3.0],  // mm of extra radius for micro / minor / moderate / major softening
+    // The measured radius of unworn corners reads high on real photos (slab/sleeve plastic, blur, slight tilt):
+    // over the 40 slab photos of the PSA/TAG blind test the median corner read 3.49 mm (10-90%: 2.97-4.18 mm)
+    // against 3.02 mm for a new card, while within one photo 90% of corners were within 0.43 mm of that photo's
+    // median. So each corner is compared with the card's own median corner (when 3+ corners were measured),
+    // not below a new corner's radius, and with a new corner's radius only beyond roundPhotoTol mm (the most
+    // a whole photo's median read above it in that test, rounded): catches one worn corner, and four that
+    // are all clearly worn, but not four that read alike.
+    roundNoise: 0.3,         // mm the relative excess must clear before the roundExcess scale starts
+    roundPhotoTol: 1.2,
     roughPx: 3,              // MAD of the corner outline (px) above which it is called rough / frayed
   };
 
@@ -551,7 +567,7 @@
       checks.sleeve = {
         value: sl.found,
         status: sl.found ? "warn" : "ok",
-        note: sl.found ? "The card seems to be in a sleeve or holder. Edges and corners are only seen through plastic and its reflections; take the card out of the sleeve for edge and corner checks."
+        note: sl.found ? "The card seems to be in a sleeve, top-loader or graded slab: edges and corners are seen through plastic, whose reflections and rails can look like whitening and hide fine wear. Take a raw card out for edge and corner checks; for a slab, judge them by eye through the plastic."
           : "No sleeve edge seen around the card.",
         sides: sl.sides,
       };
@@ -630,24 +646,28 @@
     const refAt = (t) => refs[Math.max(0, Math.min(refs.length - 1, Math.round((t - tA) / 4)))];
 
     const n = Math.max(0, tB - tA);
-    const flag = new Uint8Array(n), depth = new Float32Array(n), score = new Float32Array(n);
+    const flag = new Uint8Array(n), depth = new Float32Array(n), score = new Float32Array(n), atEdge = new Uint8Array(n);
     const light = new Uint8Array(n), outsideLight = new Uint8Array(n), crossing = new Uint8Array(n), clip = new Float32Array(n);
     for (let k = 0; k < n; k++) {
       const t = tA + k, e = edgeAt(t), ref = refAt(t);
       if (headroomOf(ref) < T.headroom) { light[k] = 1; continue; }
       let first = -1, last = -1, cnt = 0, sc = 0, clips = 0, gapRun = 0;
-      for (let d = T.band0; d <= band1; d++) {
+      // Only pixels inside the fitted card outline (d + e >= 0) can be exposed stock: when the edge line moved
+      // outward onto a bright line just outside the card (a slab rail, a sleeve's lip), that line isn't card.
+      // Depth is then counted from the outline.
+      const dIn = Math.max(T.band0, -e);
+      for (let d = dIn; d <= band1; d++) {
         const i = sidePix(g, side, t, d + e);
         if (printedMask && printedMask[i]) { if (first >= 0) break; continue; }
         const c = colorAt(lab, i);
         if (stockLike(c.L, c.C, ref)) {
-          if (first < 0) { if (d > T.startBy) break; first = d; }
+          if (first < 0) { if (d - dIn > T.startBy - T.band0) break; first = d; }
           last = d; cnt++; sc += whiteScore(c.L, c.C, ref); gapRun = 0;
           if (clipped(c.L, c.C)) clips++;
         } else if (first >= 0 && ++gapRun > 1) break;
       }
       if (cnt >= T.minPixels) {
-        flag[k] = 1; depth[k] = last + 1; score[k] = sc / cnt; clip[k] = clips / cnt;
+        flag[k] = 1; depth[k] = last + 1 - Math.max(0, -e); score[k] = sc / cnt; clip[k] = clips / cnt; atEdge[k] = first === dIn ? 1 : 0;
         // Is the photo just outside the card as light (glare, a sleeve's reflection, a light background)?
         const out = [4, 6, 8].map((d) => colorAt(lab, sidePix(g, side, t, e - d)));
         outsideLight[k] = out.filter((c) => c.L >= T.stockL && whiteScore(c.L, c.C, ref) >= T.whiteScore).length >= 2 ? 1 : 0;
@@ -659,29 +679,45 @@
     }
     const lightFrac = n ? light.reduce((a, b) => a + b, 0) / n : 1;
 
-    // Runs of flagged positions along the edge.
-    const runs = [];
-    let k = 0;
-    while (k < n) {
-      if (!flag[k]) { k++; continue; }
-      let end = k;
-      for (let j = k + 1; j < n && j - end <= T.gap + 1; j++) if (flag[j]) end = j;
-      const s = k, e2 = end;
-      k = end + 1;
-      if (e2 - s + 1 < T.minRun) continue;
-      const ds = [], scs = [];
-      let hits = 0, ol = 0, cr = 0, cl = 0;
-      for (let q = s; q <= e2; q++) {
-        if (!flag[q]) continue;
-        hits++; ds.push(depth[q]); scs.push(score[q]); ol += outsideLight[q]; cr += crossing[q]; cl += clip[q];
+    // Runs of marked positions along the edge (gaps of up to T.gap merged).
+    const runsOf = (mark) => {
+      const runs = [];
+      let k = 0;
+      while (k < n) {
+        if (!mark[k]) { k++; continue; }
+        let end = k;
+        for (let j = k + 1; j < n && j - end <= T.gap + 1; j++) if (mark[j]) end = j;
+        const s = k, e2 = end;
+        k = end + 1;
+        if (e2 - s + 1 < T.minRun) continue;
+        runs.push(runStats(mark, s, e2));
       }
-      runs.push({
+      return runs;
+    };
+    const runStats = (mark, s, e2) => {
+      const ds = [], scs = [];
+      let hits = 0, ol = 0, cr = 0, cl = 0, ae = 0;
+      for (let q = s; q <= e2; q++) {
+        if (!mark[q]) continue;
+        hits++; ds.push(depth[q]); scs.push(score[q]); ol += outsideLight[q]; cr += crossing[q]; cl += clip[q]; ae += atEdge[q];
+      }
+      const dMed = median(ds);
+      return {
         t0: tA + s, t1: tA + e2 + 1, length: e2 - s + 1, depth: percentile(ds, 80), score: median(scs),
         coherence: hits / (e2 - s + 1), outsideLight: ol / hits, crossing: cr / hits, clipped: cl / hits,
+        // shape across the edge: how deep typically / at most, how even along the run, how often it starts at the edge
+        depthMed: dMed, depthHi: percentile(ds, 90), even: ds.filter((v) => Math.abs(v - dMed) < 2).length / hits, atEdge: ae / hits,
         e: edgeAt(tA + Math.round((s + e2) / 2)),
-      });
-    }
-    return { side, len, tA, tB, runs, refs, refAt, edgeAt, border, measured, borderPx, lightFrac, band1 };
+      };
+    };
+    const runs = runsOf(flag);
+    // Stretches of a run that reach clearly deeper than its typical depth: wear under a bright line along the edge.
+    const deeperIn = (run) => {
+      const mark = new Uint8Array(n);
+      for (let q = run.t0 - tA; q < run.t1 - tA; q++) if (flag[q] && depth[q] >= run.depthMed + 2) mark[q] = 1;
+      return runsOf(mark);
+    };
+    return { side, len, tA, tB, runs, deeperIn, refs, refAt, edgeAt, border, measured, borderPx, lightFrac, band1 };
   }
 
   /* ---------------------------------------------------------------- corners */
@@ -856,8 +892,18 @@
       if (s.lightFrac > T.lightSide) continue;  // no candidates on a white border: it can't tell stock from ink
 
       const span = s.tB - s.tA;
-      for (const run of s.runs) {
+      // A slab's rail, a sleeve's lip or a reflection along the edge: a thin line starting right at the outline,
+      // even in depth, over much of the edge (in one run, or in pieces). Worn stock is patchy and varies in depth.
+      const lineLike = (run) => run.depthHi <= T.railDepth && run.even >= T.railEven && run.atEdge >= T.railEven && run.coherence >= T.railEven;
+      const cover = s.runs.filter((r) => lineLike(r) && r.length >= T.railPieceMm * g.pxPerMm).reduce((a, r) => a + r.length, 0) / Math.max(1, span);
+      const queue = s.runs.map((run) => ({ run, under: false }));
+      for (let qi = 0; qi < queue.length; qi++) {
+        const { run, under } = queue[qi];
         const notes = [];
+        const rail = !under && lineLike(run) && run.length >= T.railPieceMm * g.pxPerMm && (run.length >= T.railRun * span || cover >= T.railCover);
+        // Wear under the line shows as a stretch reaching clearly deeper than it; the line's own wobble is shorter.
+        if (rail) for (const sub of s.deeperIn(run)) if (sub.length >= T.railPieceMm * g.pxPerMm) queue.push({ run: sub, under: true });
+        if (under) notes.push("reaches deeper into the card than the bright line along this edge");
         let conf = 0.3 + 0.7 * clamp01((run.score - T.whiteScore) / 30);
         conf *= 0.6 + 0.4 * run.coherence;
         if (run.outsideLight > 0.3) { conf *= 1 - 0.6 * run.outsideLight; notes.push("the photo just outside the edge is as light (glare, sleeve or background)"); }
@@ -865,13 +911,17 @@
         if (run.clipped > 0.3) { conf *= 1 - 0.6 * run.clipped; notes.push("over-exposed (glare)"); }
         if (run.length > 0.5 * span) { conf *= 0.4; notes.push("runs along most of the edge: more likely the card's cut edge showing (tilt), a printed line or the sleeve than wear"); }
         if (why) { conf *= 0.4; notes.push(`this edge is flagged in photo quality (${why.join(", ")})`); }
-        if (sleeve) { conf *= 0.8; notes.push("seen through a sleeve"); }
+        if (sleeve) { conf *= 0.8; notes.push("seen through plastic (sleeve or slab)"); }
         if (!s.measured) {
           conf *= 0.6;
           notes.push("no plain border here: light artwork at the edge can look like this");
           if (run.depth >= s.band1 - 1) { conf *= 0.4; notes.push("reaches as deep as the check looks, more like artwork than wear"); }
         }
         if (run.length < 6) conf *= 0.7;
+        if (rail) {
+          conf = Math.min(conf, 0.5 * T.candidateConf);
+          notes.push(`a thin, even bright line right at the card's outline along ${Math.round(100 * Math.max(cover, run.length / span))}% of the edge: more likely a slab rail, sleeve edge or reflection than wear; check by eye`);
+        }
         const lengthMm = mm(run.length), depthMm = mm(run.depth);
         const severity = severityOf(lengthMm, depthMm);
         // Short and deep reads as a chip / nick rather than a line of whitening.
@@ -879,19 +929,23 @@
         const item = {
           side, type, start: r3(run.t0 / s.len), end: r3(run.t1 / s.len), start_px: run.t0, end_px: run.t1,
           length_mm: lengthMm, depth: r1(run.depth), depth_mm: depthMm, contrast: r1(run.score),
-          severity, confidence: r2(conf), likely: conf >= T.candidateConf,
-          note: `${type === "edge_chipping" ? "Chip" : "Whitening"} ${lengthMm} mm long, ${depthMm} mm deep${notes.length ? `; ${notes.join("; ")}` : ""}.`,
+          severity, confidence: r2(conf), likely: conf >= T.candidateConf, reflection: rail,
+          note: `${rail ? "Bright line (reflection?)" : type === "edge_chipping" ? "Chip" : "Whitening"} ${lengthMm} mm long, ${depthMm} mm deep${notes.length ? `; ${notes.join("; ")}` : ""}.`,
         };
         edges.push(item);
         const [xa, ya] = sideXY(g, side, run.t0, run.e + T.band0), [xb, yb] = sideXY(g, side, run.t1, run.e + run.depth + 1);
-        overlays.push({ type: "rect", kind: "edge", severity, confidence: item.confidence, likely: item.likely, x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.max(1, Math.abs(xb - xa)), h: Math.max(1, Math.abs(yb - ya)), label: `${side} ${severity}` });
+        overlays.push({ type: "rect", kind: "edge", severity, confidence: item.confidence, likely: item.likely, x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.max(1, Math.abs(xb - xa)), h: Math.max(1, Math.abs(yb - ya)), label: `${side} ${rail ? "reflection" : severity}` });
       }
     }
     edges.sort((a, b) => b.confidence - a.confidence);
 
+    const cornerInfo = [0, 1, 2, 3].map((ci) => analyseCorner(lab, g, ci, sideInfo, mask));
+    const measured = cornerInfo.filter((c) => c.radius !== null && c.contrast >= 12 && c.valid.length >= 20 && c.selfCheck >= 0.5);
+    const ownR = measured.length >= 3 ? median(measured.map((c) => c.radius)) : null;
+    const refR = ownR === null ? g.R : Math.max(g.R, ownR);
     for (let ci = 0; ci < 4; ci++) {
       const loc = CORNERS[ci];
-      const c = analyseCorner(lab, g, ci, sideInfo, mask);
+      const c = cornerInfo[ci];
       const vs = ci === 0 || ci === 3 ? "left" : "right", hs = ci < 2 ? "top" : "bottom";
       const why = blocked[`corners:${loc}`];
       const notes = [];
@@ -901,16 +955,20 @@
       else if (why) { assessable = false; reason = why.join(", "); }
 
       // Softening / rounding
-      let rounding = null;
+      let rounding = null, vsOwn = false;
       if (c.radius !== null) {
-        const excessMm = (c.radius - g.R) / g.pxPerMm;
+        // Rounder than the card's other corners, or rounder than a new corner by more than a photo adds.
+        const relMm = (c.radius - refR) / g.pxPerMm - (ownR === null ? 0 : T.roundNoise);
+        const absMm = (c.radius - g.R) / g.pxPerMm - T.roundPhotoTol;
+        const excessMm = Math.max(relMm, absMm);
+        vsOwn = ownR !== null && ownR > g.R && relMm >= absMm;
         const ex = T.roundExcess;
         const sev = excessMm >= ex[3] ? "major" : excessMm >= ex[2] ? "moderate" : excessMm >= ex[1] ? "minor" : excessMm >= ex[0] ? "micro" : null;
         let conf = clamp01((c.contrast - 12) / 30) * (0.3 + 0.7 * c.selfCheck);
         conf *= c.rough > T.roughPx ? 0.7 : 1;
         conf *= clamp01((0.45 - c.cutLook) / 0.25);
         if (sev && c.cutLook > 0.2) notes.push("the missing part of the corner doesn't look like the background (glare or sleeve haze?)");
-        rounding = { radius_px: r1(c.radius), expected_px: r1(g.R), excess_mm: r2(excessMm), roughness_px: r1(c.rough), rough: c.rough > T.roughPx, severity: sev, confidence: r2(conf) };
+        rounding = { radius_px: r1(c.radius), expected_px: r1(g.R), card_median_px: ownR === null ? null : r1(ownR), excess_mm: r2(excessMm), roughness_px: r1(c.rough), rough: c.rough > T.roughPx, severity: sev, confidence: r2(conf) };
       }
       // Whitening along the arc
       let whitening = null;
@@ -929,12 +987,15 @@
       if (parts.length) conf = Math.max(...parts.map((p) => p.confidence));
       if (why) { conf *= 0.4; notes.push(`flagged in photo quality (${why.join(", ")})`); }
       else if (!assessable) conf *= 0.5;
-      if (sleeve) { conf *= 0.8; notes.push("seen through a sleeve"); }
+      if (sleeve) { conf *= 0.8; notes.push("seen through plastic (sleeve or slab)"); }
       if (!sideInfo[vs].measured || !sideInfo[hs].measured) { conf *= 0.7; notes.push("no plain border here: artwork can look like wear"); }
       if (c.selfCheck < 0.6) notes.push("the outline here doesn't follow the card edge reliably");
       const desc = [];
       if (whitening && whitening.severity) desc.push(`whitening along ${Math.round(c.wFrac * 100)}% of the corner (${whitening.depth_mm} mm deep)`);
-      if (rounding && rounding.severity) desc.push(`rounder than a new corner (radius ${mm(c.radius)} mm vs ${mm(g.R)} mm)${rounding.rough ? ", ragged outline" : ""}`);
+      if (rounding && rounding.severity) {
+        const against = vsOwn ? `the other corners' median ${mm(ownR)} mm; a new corner is ${mm(g.R)} mm` : `a new corner's ${mm(g.R)} mm`;
+        desc.push(`rounder than ${vsOwn ? "the card's other corners" : "a new corner"} (radius ${mm(c.radius)} mm vs ${against})${rounding.rough ? ", ragged outline" : ""}`);
+      }
       const item = {
         location: loc, assessable, reason, whitening, rounding, severity, confidence: r2(conf), likely: !!severity && conf >= T.candidateConf,
         note: (desc.length ? `${desc.join("; ")}` : "no wear above threshold") + (notes.length ? `; ${notes.join("; ")}` : "") + ".",
@@ -978,13 +1039,15 @@
     else parts.push(`No corner wear detected above threshold on assessable corners${okCorners.length ? ` (${okCorners.map(pretty).join(", ")})` : " (none were assessable)"}.`);
     if (badSides.length) parts.push(`Not assessable: ${badSides.map((s) => `${s} edge (${sides[s].reason})`).join(", ")}.`);
     if (badCorners.length) parts.push(`Corners not assessable: ${badCorners.map((c) => `${pretty(c.location)} (${c.reason})`).join(", ")}.`);
-    const weak = edges.filter((e) => !e.likely).length + corners.filter((c) => c.severity && !c.likely).length;
+    const railSides = SIDES.filter((s) => edges.some((e) => e.reflection && e.side === s));
+    if (railSides.length) parts.push(`A thin bright line runs along the ${listText(railSides)} edge${railSides.length > 1 ? "s" : ""} (slab rail, sleeve edge or reflection, not counted as wear), shown greyed out.`);
+    const weak = edges.filter((e) => !e.likely && !e.reflection).length + corners.filter((c) => c.severity && !c.likely).length;
     if (weak) parts.push(`${weak} weaker candidate${weak > 1 ? "s" : ""} (probably glare, sleeve or printing) shown greyed out.`);
     if (likelyEdges.length || likelyCorners.length) parts.push("Check each one by eye before adding it as a DING.");
 
     for (const s of badSides) limitations.push(`${s} edge not assessed: ${sides[s].reason}.`);
     for (const c of badCorners) limitations.push(`${pretty(c.location)} corner not assessed: ${c.reason}.`);
-    if (sleeve) limitations.push("Sleeve present: edges and corners are only seen through plastic; its reflections can look like whitening and it can hide fine wear.");
+    if (sleeve) limitations.push("Sleeve, top-loader or graded slab: edges and corners are seen through plastic; its reflections and rails can look like whitening and it can hide fine wear.");
     if (!mask) limitations.push("No reference image: white or light printing that touches the edge can be mistaken for whitening.");
     const [tl, tr, br, bl] = uprightCorners(scan.corners);
     const srcPx = Math.min(Math.hypot(tr[0] - tl[0], tr[1] - tl[1]), Math.hypot(br[0] - bl[0], br[1] - bl[1]));

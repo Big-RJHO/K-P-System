@@ -16,6 +16,7 @@ import yaml
 from synthetic import (
     H,
     W,
+    add_edge_lines,
     card_mask_worn,
     make_card,
     paint_corner_whitening,
@@ -160,7 +161,8 @@ def test_quality_sleeve_and_cropped_scan(tmp_path):
     sleeved, cropped = run([(place_in_clutter(card, 1, sleeve_pad=(70, 80), sleeve_light=45), "auto"), (card, "cropped")], tmp_path)
     assert sleeved["q"]["checks"]["sleeve"]["status"] == "warn"
     assert "sleeve" in sleeved["q"]["checks"]["sleeve"]["note"]
-    assert any("Sleeve present" in s for s in sleeved["e"]["limitations"])
+    assert any("Sleeve, top-loader or graded slab" in s for s in sleeved["e"]["limitations"])
+    assert "graded slab: edges and corners are seen through plastic" in sleeved["q"]["checks"]["sleeve"]["note"]
     assert cropped["q"]["checks"]["boundary"]["status"] == "warn"
     assert "cropped" in cropped["q"]["checks"]["boundary"]["note"]
 
@@ -210,6 +212,27 @@ def test_finds_painted_edge_whitening(tmp_path):
     assert "Possible edge whitening" in rn["e"]["summary"]
 
 
+def test_slab_rail_line_is_not_whitening(tmp_path):
+    """A bright line hugging the card's left and right edges (a slab's inner rail, on a dark background) used to
+    read as 70+ mm of "major" whitening. It is reported as a greyed-out reflection, and real whitening painted
+    under it, and elsewhere on the card, is still found."""
+    navy = make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240))
+    worn = paint_edge_whitening(paint_edge_whitening(navy, "left", 500, 60, 6, seed=2), "top", 200, 60, 6, seed=1)
+    photos = [(add_edge_lines(place_on_background(worn, 2, bg=8), 2, gap=gap, width=width), "auto") for gap, width in ((0, 2), (1, 3))]
+    for r in run(photos, tmp_path):
+        e = r["e"]
+        rails = [x for x in e["edges"] if x["reflection"]]
+        assert {x["side"] for x in rails} == {"left", "right"}
+        assert all(not x["likely"] and x["length_mm"] > 60 and "slab rail" in x["note"] for x in rails)
+        assert not likely_edges(e, "right") and not likely_edges(e, "bottom")
+        [left] = likely_edges(e, "left")  # the painted patch under the line
+        assert abs(left["start_px"] - 500) <= 6 and abs(left["end_px"] - 560) <= 6 and "deeper" in left["note"]
+        [top] = likely_edges(e, "top")
+        assert abs(top["start_px"] - 200) <= 6 and not top["reflection"]
+        assert {d["location"] for d in e["defects"]} == {"left", "top"}
+        assert "bright line runs along the right and left edges" in e["summary"]
+
+
 def test_clean_cards_report_nothing_but_never_claim_flawless(tmp_path):
     cards = [make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240)), make_card(40, 31, 44, 47, border_bgr=YELLOW)]
     for r in run([(place_on_background(c, a), "auto") for c, a in zip(cards, (2, -4))], tmp_path):
@@ -254,6 +277,27 @@ def test_finds_corner_whitening_and_rounding(tmp_path):
     polys = [o for o in e["overlays"] if o["kind"] == "corner"]
     assert len(polys) == 2 and all(len(o["points"]) >= 5 for o in polys)
     assert "Possible corner wear" in e["summary"]
+
+
+def test_corner_rounding_is_judged_against_the_cards_own_corners(tmp_path):
+    """Photos through slab plastic read every corner a little rounder than a new card's 3.02 mm (median 3.5 mm
+    in the blind test). Four corners that read alike at 3.7 mm are not softening; one clearly rounder than the
+    other three is, and so are four that are all far rounder than a new corner."""
+    navy = make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240))
+    locs = ("top_left", "top_right", "bottom_right", "bottom_left")
+    alike = card_mask_worn(36, {loc: 44 for loc in locs})
+    one = card_mask_worn(36, {**{loc: 44 for loc in locs}, "bottom_left": 70})
+    worn = card_mask_worn(36, {loc: 72 for loc in locs})
+    ra, ro, rw = run([(place_on_background(navy, 2, mask=m), "auto") for m in (alike, one, worn)], tmp_path)
+    for loc in locs:
+        c = corner(ra["e"], loc)
+        assert 40 < c["rounding"]["radius_px"] < 48 and c["rounding"]["severity"] is None
+    assert not [d for d in ra["e"]["defects"] if d["type"] == "corner_softening"]
+    bl = corner(ro["e"], "bottom_left")
+    assert bl["likely"] and bl["rounding"]["severity"] in ("moderate", "major")
+    assert "rounder than the card's other corners" in bl["note"]
+    assert {d["location"] for d in ro["e"]["defects"] if d["type"] == "corner_softening"} == {"bottom_left"}
+    assert {d["location"] for d in rw["e"]["defects"] if d["type"] == "corner_softening"} == set(locs)
 
 
 def test_printed_mask_suppresses_candidates(tmp_path):
