@@ -104,3 +104,49 @@ From PriceCharting's key list for cards:
 ### Not available
 - Graded prices without a PriceCharting subscription. Scrydex also needs a paid key, and TCGdex has ungraded prices only.
 - Sales history: PriceCharting's API gives current values only.
+
+## 3. Web search for prices (`webprices.js`, Gemini)
+
+PriceCharting's terms don't allow its data in this app without a subscription and permission. So the app can instead ask Google's Gemini to search the web and report what the card recently sold for.
+
+### How it works
+- **Trigger:** runs only when you tap **Search the web for prices** (Prices panel). It needs a confirmed card name.
+- **Key:** it uses your own Gemini API key, which you get at aistudio.google.com.
+  - The key is stored only on the phone, never in backups, History or drafts.
+  - It is sent only to `generativelanguage.googleapis.com`, in the `x-goog-api-key` header, never in the URL.
+- **Request:** one `generateContent` call with the `google_search` tool (Grounding with Google Search). The prompt gives:
+  - the card's name, set, number, finish and language;
+  - the grades wanted: ungraded, each company at this report's grade, plus PSA 10 and PSA 9.
+- **What the prompt asks for:**
+  - completed sales from the last 12 months;
+  - the exact version of the card;
+  - no invented numbers;
+  - no pricecharting.com;
+  - one JSON reply.
+- **What the app keeps from the reply:**
+  - prices with a number, one of the grades asked for, and a source site;
+  - PriceCharting figures are dropped even if Gemini returns them;
+  - a price whose site isn't among the pages Google returned for this search is shown in amber with "check it".
+- **When nothing is shown:** if Gemini answered without searching, or its reply can't be read, no prices appear.
+- **What's shown with the prices:** the source links Google returned, and Google's search-suggestion box.
+  - Google's terms require showing the search-suggestion box with the results.
+  - It is shown in a sandboxed frame, where no scripts run and links open in a new tab.
+- **Nothing is saved.** Google's terms don't allow caching these results, so they disappear when the card changes or the app closes.
+- **Labelling:** the panel says the prices are an AI summary of a search, can be wrong or pick the wrong version, and are best-case when the grade is only a ceiling.
+- **No scraping:** the app never fetches the source pages itself. Google's terms also forbid using the results to find pages to crawl or scrape.
+
+### Cost and access
+Checked on the Gemini API pricing and model pages, 2026-09-29.
+
+| Model (chosen under Prices → Web search access) | Search | Notes |
+|---|---|---|
+| `gemini-2.5-flash` (default) | free, up to 500 searches a day | Google now limits 2.5 models to accounts that have used them before; a new key may be refused. |
+| `gemini-3.5-flash-lite` | needs billing on the key: 5,000 searches a month free, then $14 per 1,000 | Tokens about $0.30 in / $2.50 out per million, so a fraction of a cent per lookup. |
+
+- **Errors:** the app explains refusals (bad key, billing needed, model not available to the key, quota used up) and never switches models on its own.
+- **Browser access:** the endpoint allows calls from the app's pages (CORS checked from the GitHub Pages origin).
+
+### Tested
+- **Offline:** `tests/test_standalone_webprices.py` covers the request shape, the key only in a header, price checks, dropping PriceCharting, flagging unconfirmed sources, empty or unsearched answers, and the error messages.
+- **In a browser:** a phone-sized Chromium with a stand-in Gemini reply showed the results, sources and suggestions, stored nothing, and kept the key out of backups.
+- **Not tested against the real Gemini API:** no Gemini key was available here.
