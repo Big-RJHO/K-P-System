@@ -108,6 +108,8 @@ const state = {
   market: null,     // ungraded market prices TCGdex returned for the confirmed card (Pokemon only)
   tcgplayerId: "",  // TCGplayer product id Riftcodex returned for the confirmed card
   price: { key: "", status: "idle" },  // PriceCharting lookup for the current card: see loadPrices()
+  web: { key: "", status: "idle" },    // Gemini web price search for the current card (on screen only, never stored)
+  cs: { key: "", status: "idle" },     // CardSight sales for the current card (Pokemon): see loadCardSight()
   autoRead: false,  // the card has been read from the photo once already (automatic runs only)
   showSuspects: true,
   sheet: { side: null, location: null, type: null, severity: null },
@@ -1169,6 +1171,7 @@ function confirmCandidate(c) {
   state.market = c.market || null;
   state.tcgplayerId = c.tcgplayer_id || "";
   loadPrices({ force: true });
+  loadCardSight({ force: true });
 }
 
 function idNote(box, text) {
@@ -1397,6 +1400,7 @@ function renderMarket(box) {
 function renderPrices() {
   const box = $("#prices-body");
   if (!box) return;
+  renderCardSight();
   box.innerHTML = "";
   const card = priceCard();
   const has = !!(card.name && card.number);
@@ -1404,6 +1408,7 @@ function renderPrices() {
   $("#pc-status").textContent = pcToken() ? "A token is saved on this phone." : "";
   if (!has) {
     priceNote(box, "Confirm which card this is first: Card details → Read from photo, or Find this card online.");
+    renderWebPrices();
     return;
   }
   const p = state.price;
@@ -1411,7 +1416,7 @@ function renderPrices() {
   if (stale && p.status !== "idle") priceNote(box, "The card details changed. Tap Update for this card's prices.");
   if (!stale && p.status === "loading") priceNote(box, "Looking up prices…");
   if (!stale && p.status === "error") priceNote(box, p.error, "warn");
-  if (p.status === "no-token" || !pcToken()) priceNote(box, "Graded prices need PriceCharting access (below). Without it, open the card on PriceCharting to see every grade.");
+  if ((p.status === "no-token" || !pcToken()) && !(state.game === "pokemon" && csKey())) priceNote(box, state.game === "pokemon" ? "For graded prices, add a CardSight key (Sales data access, below), or open the card on PriceCharting to see every grade." : "For graded prices, use Web search below, or open the card on PriceCharting to see every grade.");
   if (!stale && p.status === "ok" && p.product) {
     const prod = p.product;
     const head = document.createElement("div");
@@ -1479,6 +1484,269 @@ function renderPrices() {
   else priceLink(links, Prices.searchUrl(card), "See prices on PriceCharting");
   if (state.tcgplayerId && /^\d+$/.test(state.tcgplayerId)) priceLink(links, `https://www.tcgplayer.com/product/${state.tcgplayerId}`, "TCGplayer");
   box.append(links);
+  renderWebPrices();
+}
+
+/* ---------------------------------------------------------------- recent sales (CardSight, Pokemon) */
+
+const CS_KEY = "cardGradingLab.cardsight.key";  // never in backups, drafts or History
+const csKey = () => { try { return (pcStorage() && pcStorage().getItem(CS_KEY)) || ""; } catch (_) { return ""; } };
+const money2 = (v) => (v == null ? "—" : `$${Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`);
+
+async function loadCardSight({ force = false, chooseId = null } = {}) {
+  const card = priceCard();
+  const key = priceKey(card);
+  if (state.game !== "pokemon" || !card.name) { state.cs = { key, status: "idle" }; renderCardSight(); return; }
+  if (!csKey()) { state.cs = { key, status: "no-key" }; renderCardSight(); return; }
+  if (!force && !chooseId && state.cs.key === key && ["loading", "ok"].includes(state.cs.status)) return;
+  const prev = state.cs;
+  state.cs = { ...(chooseId ? prev : {}), key, status: "loading" };
+  renderCardSight();
+  const opts = { apiKey: csKey(), fetch: (...a) => window.fetch(...a), storage: pcStorage() };
+  try {
+    const find = chooseId && prev.find ? prev.find : await CardSight.findCard(card, opts);
+    if (state.cs.key !== key) return;
+    if (!find.matches.length) throw new Error("CardSight has no card matching these details.");
+    const chosen = chooseId ? find.matches.find((m) => m.id === chooseId) : find.best || find.matches[0];
+    const data = await CardSight.sales(chosen.id, opts);
+    if (state.cs.key !== key) return;
+    state.cs = { key, status: "ok", find, chosenId: chosen.id, data: data || { raw: [], graded: [], messages: [] }, version: "" };
+  } catch (err) {
+    if (state.cs.key === key) state.cs = { key, status: "error", error: (err && err.message) || "The sales lookup failed." };
+  }
+  renderCardSight();
+}
+
+function renderCardSight() {
+  const wrap = $("#cs-prices"), box = $("#cs-body");
+  if (!box) return;
+  const pokemon = state.game === "pokemon";
+  wrap.hidden = !pokemon;
+  $("#cs-settings").hidden = !pokemon;
+  $("#cs-status").textContent = csKey() ? "A key is saved on this phone." : "";
+  if (!pokemon) return;
+  box.innerHTML = "";
+  const card = priceCard();
+  const c = state.cs;
+  const stale = c.key && c.key !== priceKey(card);
+  if (!card.name) { priceNote(box, "Confirm which card this is first."); return; }
+  if (!csKey() || c.status === "no-key") { priceNote(box, "Add your CardSight API key (Sales data access, below) to see recent sales, raw and graded."); return; }
+  if (stale) { priceNote(box, "The card details changed. Tap Update for this card's sales."); return; }
+  if (c.status === "loading") { priceNote(box, "Looking up recent sales…"); return; }
+  if (c.status === "error") { priceNote(box, c.error, "warn"); return; }
+  if (c.status !== "ok") return;
+  const m = c.find.matches.find((x) => x.id === c.chosenId) || c.find.matches[0];
+  const head = document.createElement("div");
+  head.className = "pr-product";
+  head.innerHTML = "<b></b><span></span>";
+  $("b", head).textContent = `${m.name}${m.number ? ` #${m.number}` : ""}`;
+  $("span", head).textContent = [m.set, m.release !== m.set && m.release, m.year].filter(Boolean).join(" · ");
+  box.append(head);
+  const options = c.find.matches.filter((x) => x.score > 0).slice(0, 8);
+  if (options.length > 1) {
+    const sel = document.createElement("select");
+    sel.className = "pr-choose";
+    sel.setAttribute("aria-label", "CardSight card");
+    for (const x of options) {
+      const o = document.createElement("option");
+      o.value = x.id;
+      o.textContent = [`${x.name}${x.number ? ` #${x.number}` : ""}`, x.set || x.release, x.year].filter(Boolean).join(" · ");
+      sel.append(o);
+    }
+    sel.value = c.chosenId;
+    sel.addEventListener("change", () => loadCardSight({ chooseId: sel.value }));
+    box.append(sel);
+  }
+  if (c.find.needs_choice) priceNote(box, "Check this is your exact card: several catalog entries look alike.", "warn");
+  const vers = CardSight.versions(c.data);
+  if (vers.length > 1) {
+    const sel = document.createElement("select");
+    sel.className = "pr-choose";
+    sel.setAttribute("aria-label", "Version");
+    for (const v of vers) {
+      const o = document.createElement("option");
+      o.value = v.id;
+      o.textContent = v.id ? `${v.name} (${v.count} sales)` : "Base card";
+      sel.append(o);
+    }
+    sel.value = c.version;
+    sel.addEventListener("change", () => { state.cs = { ...state.cs, version: sel.value }; renderCardSight(); });
+    box.append(sel);
+  }
+  const res = CardSight.forReport(c.data, state.report, c.version);
+  const table = document.createElement("table");
+  table.className = "pr-table";
+  const row = (label, st, extra = "", cls = "") => {
+    const tr = document.createElement("tr");
+    if (cls) tr.className = cls;
+    tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+    $("th", tr).textContent = label;
+    const sm = document.createElement("small");
+    if (st) {
+      sm.append(`${st.count} sale${st.count === 1 ? "" : "s"}, ${money2(st.low)}–${money2(st.high)}. Last `);
+      if (httpsUrl(st.last.url)) {
+        const a = document.createElement("a");
+        a.href = st.last.url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = `${money2(st.last.price)} on ${st.last.date}`;
+        sm.append(a);
+      } else sm.append(`${money2(st.last.price)} on ${st.last.date}`);
+      if (st.last.source) sm.append(` (${st.last.source})`);
+      sm.append(".");
+    }
+    if (extra) sm.append(`${st ? " " : ""}${extra}`);
+    if (sm.textContent) $("th", tr).append(sm);
+    $("td", tr).textContent = st ? money2(st.median) : "—";
+    table.append(tr);
+  };
+  row("Ungraded", res.ungraded, res.ungraded ? "" : "No ungraded sales in the last year.");
+  for (const r of res.rows) row(`${r.company} ${r.ceiling ? "up to " : ""}${r.label}`, r.stats, r.note, r.ceiling ? "pr-ceiling" : "");
+  box.append(table);
+  if (res.ceiling) priceNote(box, "These grades are best-case ceilings, so the graded prices are the most this card could sell for at those grades, not what it's worth. The real grade may be lower.", "warn");
+  if (res.all.length) {
+    const d = document.createElement("details");
+    d.className = "pr-ladder";
+    d.innerHTML = "<summary>All graded sales</summary>";
+    const t = document.createElement("table");
+    t.className = "pr-table";
+    for (const a of res.all) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = `${a.company} ${a.grade}`;
+      const sm = document.createElement("small");
+      sm.textContent = `${a.stats.count} sale${a.stats.count === 1 ? "" : "s"}, last ${money2(a.stats.last.price)} on ${a.stats.last.date}`;
+      $("th", tr).append(sm);
+      $("td", tr).textContent = money2(a.stats.median);
+      t.append(tr);
+    }
+    d.append(t);
+    box.append(d);
+  }
+  priceNote(box, `Median of completed auction sales in the last year, from CardSight (fetched ${new Date(c.data.fetched_at || Date.now()).toLocaleDateString()}). Open the listings to check they're your version.${(c.data.messages || []).length ? ` CardSight: ${c.data.messages.join(" ")}` : ""}`);
+}
+
+function saveCardSightKey() {
+  const k = $("#cs-key").value.trim();
+  if (!CardSight.validKey(k)) { $("#cs-status").textContent = "That doesn't look like a CardSight API key."; return; }
+  try { pcStorage().setItem(CS_KEY, k); } catch (_) { $("#cs-status").textContent = "This browser won't store it (private mode?)."; return; }
+  $("#cs-key").value = "";
+  $("#cs-settings").open = false;
+  renderPrices();
+  loadCardSight({ force: true });
+}
+
+function removeCardSightKey() {
+  try { pcStorage().removeItem(CS_KEY); } catch (_) { /* blocked */ }
+  CardSight.clearCache(pcStorage());  // cached CardSight data goes with the key
+  $("#cs-key").value = "";
+  state.cs = { key: "", status: "no-key" };
+  renderPrices();
+}
+
+/* ---------------------------------------------------------------- web price search (Gemini) */
+
+const GM_KEY = "cardGradingLab.gemini.key", GM_MODEL = "cardGradingLab.gemini.model";  // never in backups, drafts or History
+const gmKey = () => { try { return (pcStorage() && pcStorage().getItem(GM_KEY)) || ""; } catch (_) { return ""; } };
+const gmModel = () => { try { return (pcStorage() && pcStorage().getItem(GM_MODEL)) || WebPrices.MODELS[0].id; } catch (_) { return WebPrices.MODELS[0].id; } };
+
+async function webSearch() {
+  const card = { ...priceCard(), set_code: $("#card-set-code").value.trim(), language: $("#card-language").value };
+  const key = priceKey(card);
+  if (!card.name) { state.web = { key, status: "error", error: "Confirm which card this is first: Card details → Read from photo, or Find this card online." }; renderWebPrices(); return; }
+  if (!gmKey()) { state.web = { key, status: "error", error: "Add your Gemini API key first (Web search access, below)." }; $("#gm-settings").open = true; renderWebPrices(); return; }
+  state.web = { key, status: "loading" };
+  renderWebPrices();
+  try {
+    const result = await WebPrices.search(card, { apiKey: gmKey(), model: gmModel(), fetch: (...a) => window.fetch(...a), report: state.report });
+    if (state.web.key === key) state.web = { key, status: "ok", result, ceiling: !!(state.report && state.report.complete === false) };
+  } catch (err) {
+    if (state.web.key === key) state.web = { key, status: "error", error: (err && err.message) || "The web search failed." };
+  }
+  renderWebPrices();
+}
+
+function renderWebPrices() {
+  const box = $("#web-results");
+  if (!box) return;
+  box.innerHTML = "";
+  const card = priceCard();
+  const w = state.web;
+  const stale = w.key && w.key !== priceKey({ ...card });
+  $("#web-search").disabled = w.status === "loading";
+  $("#web-status").textContent = w.status === "loading" ? "Searching… (10-30 s)" : gmKey() ? "" : "Needs your Gemini API key.";
+  $("#gm-status").textContent = gmKey() ? "A key is saved on this phone." : "";
+  if (w.status === "error" && !stale) priceNote(box, w.error, "warn");
+  if (w.status !== "ok" || stale) {
+    if (stale && w.status === "ok") priceNote(box, "The card details changed. Search again for this card.");
+    return;
+  }
+  const r = w.result;
+  if (r.card_found) priceNote(box, `Found as: ${r.card_found}`);
+  if (!r.grounded) priceNote(box, "Gemini didn't use web search for this answer, so no prices are shown. Try again.", "warn");
+  if (r.grounded && !r.prices.length) priceNote(box, r.parsed ? "No prices for this card were found in the search results." : "Gemini's answer couldn't be read. Try again.", "warn");
+  if (r.grounded && r.prices.length) {
+    const table = document.createElement("table");
+    table.className = "pr-table";
+    for (const p of r.prices) {
+      const tr = document.createElement("tr");
+      if (!p.in_results) tr.className = "unverified";
+      tr.innerHTML = "<th></th><td class=\"pr-val\"></td>";
+      $("th", tr).textContent = p.grade;
+      const sm = document.createElement("small");
+      sm.textContent = [p.kind && cap(p.kind), p.source, p.date, p.version, !p.in_results && "source not in Google's results: check it"].filter(Boolean).join(" · ");
+      $("th", tr).append(sm);
+      $("td", tr).textContent = `$${p.price_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      table.append(tr);
+    }
+    box.append(table);
+    if (w.ceiling) priceNote(box, "Your grades are best-case ceilings: the real grade, and so the price, may be lower.", "warn");
+  }
+  priceNote(box, `An AI summary of a Google search (${r.model}). It can be wrong or pick the wrong version: check the sources before relying on a price.${r.notes ? ` Gemini's note: ${r.notes}` : ""}${r.dropped.some((d) => d.why === "blocked source") ? " PriceCharting figures are left out (its terms don't allow them here)." : ""}`);
+  if (r.sources.length) {
+    const ol = document.createElement("ol");
+    ol.className = "pr-sources";
+    for (const s of r.sources.slice(0, 10)) {
+      if (!httpsUrl(s.uri)) continue;
+      const li = document.createElement("li");
+      const a = document.createElement("a");
+      a.href = s.uri;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = s.title || s.site;
+      li.append(a);
+      ol.append(li);
+    }
+    box.append(ol);
+  }
+  if (r.suggestionsHtml) {
+    // Google's search suggestions must be shown with the results. Sandboxed: no scripts, links open a new tab.
+    const f = document.createElement("iframe");
+    f.className = "pr-suggest";
+    f.title = "Google search suggestions";
+    f.setAttribute("sandbox", "allow-popups allow-popups-to-escape-sandbox");
+    f.srcdoc = WebPrices.suggestionsDoc(r.suggestionsHtml);
+    box.append(f);
+  }
+}
+
+function saveGeminiKey() {
+  const k = $("#gm-key").value.trim();
+  const model = $("#gm-model").value;
+  try { if (model) pcStorage().setItem(GM_MODEL, model); } catch (_) { /* blocked */ }
+  if (!k && gmKey()) { $("#gm-status").textContent = "Model saved."; return; }
+  if (!WebPrices.validKey(k)) { $("#gm-status").textContent = "That doesn't look like a Gemini API key."; return; }
+  try { pcStorage().setItem(GM_KEY, k); } catch (_) { $("#gm-status").textContent = "This browser won't store it (private mode?)."; return; }
+  $("#gm-key").value = "";
+  $("#gm-settings").open = false;
+  renderWebPrices();
+}
+
+function removeGeminiKey() {
+  try { pcStorage().removeItem(GM_KEY); } catch (_) { /* blocked */ }
+  $("#gm-key").value = "";
+  state.web = { key: "", status: "idle" };
+  renderWebPrices();
 }
 
 function savePriceToken() {
@@ -1849,6 +2117,7 @@ function setView(view, { animate = true } = {}) {
       readFromPhoto({ auto: true });
     } else if (!state.example) {
       loadPrices();
+      loadCardSight();
     }
   } else {
     renderSlots();
@@ -1872,6 +2141,8 @@ function resetCard() {
   state.market = null;
   state.tcgplayerId = "";
   state.price = { key: "", status: "idle" };
+  state.web = { key: "", status: "idle" };
+  state.cs = { key: "", status: "idle" };
   state.autoRead = false;
   clearReference();
   $("#id-results").hidden = true;
@@ -2146,9 +2417,21 @@ function init() {
   });
   $("#find-card").addEventListener("click", findCard);
   $("#read-card").addEventListener("click", () => readFromPhoto());
-  $("#refresh-prices").addEventListener("click", () => loadPrices({ force: true }));
+  $("#refresh-prices").addEventListener("click", () => { loadPrices({ force: true }); loadCardSight({ force: true }); });
+  $("#cs-save").addEventListener("click", saveCardSightKey);
+  $("#cs-remove").addEventListener("click", removeCardSightKey);
   $("#pc-save").addEventListener("click", savePriceToken);
   $("#pc-remove").addEventListener("click", removePriceToken);
+  $("#web-search").addEventListener("click", webSearch);
+  $("#gm-save").addEventListener("click", saveGeminiKey);
+  $("#gm-remove").addEventListener("click", removeGeminiKey);
+  for (const m of WebPrices.MODELS) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = m.label;
+    $("#gm-model").append(o);
+  }
+  $("#gm-model").value = gmModel();
   $("#clear-reference").addEventListener("click", () => { clearReference(); setStatus("Reference removed."); });
   // A reference only belongs to the card it was confirmed for: changing what identifies the card drops it.
   for (const id of ["card-set-code", "card-number", "card-language"]) {

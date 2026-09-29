@@ -1,5 +1,7 @@
 # Reading the card from the photo, and its prices
 
+Price sources in the app: CardSight sales for Pokémon (section 4); Gemini web search for Riftbound, and optionally for Pokémon (section 3); PriceCharting only with your own subscription token (section 2); TCGdex's free ungraded prices as a fallback.
+
 Two steps run after a scan:
 
 1. **Read.** The app reads the card's name and collector number from the front photo.
@@ -104,3 +106,81 @@ From PriceCharting's key list for cards:
 ### Not available
 - Graded prices without a PriceCharting subscription. Scrydex also needs a paid key, and TCGdex has ungraded prices only.
 - Sales history: PriceCharting's API gives current values only.
+
+## 3. Web search for prices (`webprices.js`, Gemini)
+
+PriceCharting's terms don't allow its data in this app without a subscription and permission. So the app can instead ask Google's Gemini to search the web and report what the card recently sold for.
+
+### How it works
+- **Trigger:** runs only when you tap **Search the web for prices** (Prices panel). It needs a confirmed card name.
+- **Key:** it uses your own Gemini API key, which you get at aistudio.google.com.
+  - The key is stored only on the phone, never in backups, History or drafts.
+  - It is sent only to `generativelanguage.googleapis.com`, in the `x-goog-api-key` header, never in the URL.
+- **Request:** one `generateContent` call with the `google_search` tool (Grounding with Google Search). The prompt gives:
+  - the card's name, set, number, finish and language;
+  - the grades wanted: ungraded, each company at this report's grade, plus PSA 10 and PSA 9.
+- **What the prompt asks for:**
+  - completed sales from the last 12 months;
+  - the exact version of the card;
+  - no invented numbers;
+  - no pricecharting.com;
+  - one JSON reply.
+- **What the app keeps from the reply:**
+  - prices with a number, one of the grades asked for, and a source site;
+  - PriceCharting figures are dropped even if Gemini returns them;
+  - a price whose site isn't among the pages Google returned for this search is shown in amber with "check it".
+- **When nothing is shown:** if Gemini answered without searching, or its reply can't be read, no prices appear.
+- **What's shown with the prices:** the source links Google returned, and Google's search-suggestion box.
+  - Google's terms require showing the search-suggestion box with the results.
+  - It is shown in a sandboxed frame, where no scripts run and links open in a new tab.
+- **Nothing is saved.** Google's terms don't allow caching these results, so they disappear when the card changes or the app closes.
+- **Labelling:** the panel says the prices are an AI summary of a search, can be wrong or pick the wrong version, and are best-case when the grade is only a ceiling.
+- **No scraping:** the app never fetches the source pages itself. Google's terms also forbid using the results to find pages to crawl or scrape.
+
+### Cost and access
+Checked on the Gemini API pricing and model pages, 2026-09-29.
+
+| Model (chosen under Prices → Web search access) | Search | Notes |
+|---|---|---|
+| `gemini-2.5-flash` (default) | free, up to 500 searches a day | Google now limits 2.5 models to accounts that have used them before; a new key may be refused. |
+| `gemini-3.5-flash-lite` | needs billing on the key: 5,000 searches a month free, then $14 per 1,000 | Tokens about $0.30 in / $2.50 out per million, so a fraction of a cent per lookup. |
+
+- **Errors:** the app explains refusals (bad key, billing needed, model not available to the key, quota used up) and never switches models on its own.
+- **Browser access:** the endpoint allows calls from the app's pages (CORS checked from the GitHub Pages origin).
+
+### Tested
+- **Offline:** `tests/test_standalone_webprices.py` covers the request shape, the key only in a header, price checks, dropping PriceCharting, flagging unconfirmed sources, empty or unsearched answers, and the error messages.
+- **In a browser:** a phone-sized Chromium with a stand-in Gemini reply showed the results, sources and suggestions, stored nothing, and kept the key out of backups.
+- **Not tested against the real Gemini API:** no Gemini key was available here.
+
+## 4. Recent sales from CardSight (`cardsight.js`, Pokémon)
+
+CardSight AI (cardsight.ai) sells access to trading-card data, including sale prices and graded prices from eBay, Fanatics Collect, COMC and other marketplaces. Pokémon is covered; Riftbound isn't, so Riftbound cards use the Gemini web search instead.
+
+### How it works
+- **When it runs:** automatically when you confirm a Pokémon card, and again when you tap **Update**.
+- **Two calls:**
+  1. `GET /v1/catalog/search?q=<name number set>&type=card` finds the card. Results are ranked by number, name and set; entries outside the Pokémon segment are left out; and a picker is offered when several entries look alike.
+  2. `GET /v1/pricing/{card_id}?period=1y&listing_type=auction` fetches completed auction sales from the last year, raw and graded, grouped by company and grade.
+- **What's shown:**
+  - for the ungraded card and for each company at this report's grade: the median sale, the number of sales, the price range, and the latest sale with a link to the listing;
+  - an "All graded sales" list;
+  - a version picker when parallels (1st Edition, reverse holo, …) appear in the sales. The base card is shown by default.
+- **Labelling:** grades that are only a ceiling are marked "up to", with the same warning as the other prices. Pristine or Black Label 10s can't be told apart from a plain 10 in the sales data, and the panel says so.
+
+### Access and terms
+Checked on CardSight's OpenAPI spec, pricing page and terms, 2026-09-29.
+- **API:** `https://api.cardsight.ai`, with the key in the `X-API-Key` header. Browser calls are allowed (`Access-Control-Allow-Origin: *`).
+- **Free plan:** 750 calls a month and 4 a second. Usage stops at the cap, so it never charges. Paid plans start at $14.95 a month for 5,000 calls.
+- **Calls used:** about 2 per card, and answers are cached for 24 hours.
+- **Terms on the key:** it is personal and must not be shared. So each person enters their own, it stays on their phone, and it is never in backups, drafts, History or the published app.
+- **Terms on caching:** only short-term caching is allowed. Answers are kept 24 hours, and all cached CardSight data is deleted when the key is removed.
+
+### Tested
+- **Offline:** `tests/test_standalone_cardsight.py` uses stand-in responses built from the spec. It covers the request shape, the key only in a header, card ranking (other segments dropped), the grade summaries and version split, 24-hour caching and purging, and the error messages.
+- **In a browser:** a phone-sized Chromium with a stand-in CardSight showed the sales table, made two calls, kept the key out of backups, and cleared the cache on **Remove**. It also hid the section for Riftbound.
+- **Not tested against the real CardSight API:** no key was used here.
+
+### Not used yet
+- **Photo identification:** CardSight can identify a card from the photo (`POST /v1/identify/card`, 1 call). That would likely beat the on-phone text reading for Pokémon, but it isn't wired in.
+- **Population reports:** CardSight also offers free PSA population reports.
