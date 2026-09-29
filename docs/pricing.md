@@ -142,8 +142,14 @@ Checked on the Gemini API pricing and model pages, 2026-09-29.
 
 | Model (chosen under Prices → Web search access) | Search | Notes |
 |---|---|---|
-| `gemini-2.5-flash` (default) | free, up to 500 searches a day | Google now limits 2.5 models to accounts that have used them before; a new key may be refused. |
-| `gemini-3.5-flash-lite` | needs billing on the key: 5,000 searches a month free, then $14 per 1,000 | Tokens about $0.30 in / $2.50 out per million, so a fraction of a cent per lookup. |
+| `gemini-3.5-flash-lite` (default) | needs billing on the key: 5,000 searches a month free, then $14 per 1,000 | Tokens about $0.30 in / $2.50 out per million, so a fraction of a cent per lookup. |
+| `gemini-2.5-flash` | free, up to 500 searches a day | Older accounts only: Google refuses it to new users. |
+
+- **Live check (2026-09-29, a new free key in the newer `AQ.` format):**
+  - A plain request to `gemini-3.5-flash-lite` worked.
+  - Google search on `gemini-3.5-flash-lite` and `gemini-3.8-flash` answered 429 "You exceeded your current quota, please check your plan and billing details": the free tier includes no searches.
+  - `gemini-2.5-flash` answered 404 "no longer available to new users".
+  - So web search needs billing enabled on the key's project. The app says so when it gets that answer.
 
 - **Errors:** the app explains refusals (bad key, billing needed, model not available to the key, quota used up) and never switches models on its own.
 - **Browser access:** the endpoint allows calls from the app's pages (CORS checked from the GitHub Pages origin).
@@ -151,7 +157,7 @@ Checked on the Gemini API pricing and model pages, 2026-09-29.
 ### Tested
 - **Offline:** `tests/test_standalone_webprices.py` covers the request shape, the key only in a header, price checks, dropping PriceCharting, flagging unconfirmed sources, empty or unsearched answers, and the error messages.
 - **In a browser:** a phone-sized Chromium with a stand-in Gemini reply showed the results, sources and suggestions, stored nothing, and kept the key out of backups.
-- **Not tested against the real Gemini API:** no Gemini key was available here.
+- **Against the real Gemini API:** only the error paths so far (see the live check above). A successful grounded search needs a key with billing.
 
 ## 4. Recent sales from CardSight (`cardsight.js`, Pokémon)
 
