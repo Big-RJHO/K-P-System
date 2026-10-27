@@ -233,6 +233,22 @@ def test_slab_rail_line_is_not_whitening(tmp_path):
         assert "bright line runs along the right and left edges" in e["summary"]
 
 
+def test_light_printing_at_the_edge_is_not_wear(tmp_path):
+    """A dull light patch reaching ~1 mm into the card (like the cream rays that meet the edge of the old Japanese
+    back at the same places on every copy) used to read as a "major" chip on every card, TAG 10s included. It is
+    greyed out now. A bare-white chip of the same shape, and shallow whitening elsewhere, are still found."""
+    navy = make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240))
+    worn = paint_edge_whitening(navy, "bottom", 200, 60, 4, seed=1)
+    printed, chipped = (paint_edge_whitening(worn, "top", 300, 10, 14, seed=5, color=col) for col in ((135, 150, 155), (238, 240, 242)))
+    rp, rc = run([(place_on_background(printed, 2), "auto"), (place_on_background(chipped, 2), "auto")], tmp_path)
+    [top] = [x for x in rp["e"]["edges"] if x["side"] == "top"]
+    assert not top["likely"] and "light printing" in top["note"]
+    assert {d["location"] for d in rp["e"]["defects"]} == {"bottom"}
+    [chip] = likely_edges(rc["e"], "top")
+    assert chip["type"] == "edge_chipping" and chip["severity"] == "major" and "light printing" not in chip["note"]
+    assert {d["location"] for d in rc["e"]["defects"]} == {"top", "bottom"}
+
+
 def test_clean_cards_report_nothing_but_never_claim_flawless(tmp_path):
     cards = [make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240)), make_card(40, 31, 44, 47, border_bgr=YELLOW)]
     for r in run([(place_on_background(c, a), "auto") for c, a in zip(cards, (2, -4))], tmp_path):

@@ -463,14 +463,29 @@
     }
     if (outer !== top0) cands.unshift(outer);
     let chosen = null;
+    const refined = [];
     for (const c of cands.slice(0, 6)) {
       const r = refine(c.q);
       const value = r.strength * Math.max(0, 1 - 5 * r.err) * (0.5 + 0.5 * c.score / cands[0].score);
+      refined.push({ value, quad: r.quad });
       if (!chosen || value > chosen.value) chosen = { value, quad: r.quad };
     }
     best.q = chosen.quad;
-    const corners = best.q.map(([x, y]) => [(x + 0.5) / scale - 0.5, (y + 0.5) / scale - 0.5]);
-    return { corners, confidence: Math.min(1, 0.45 + best.support * 0.6), method: "edges" };
+    const toFull = (q) => q.map(([x, y]) => [(x + 0.5) / scale - 0.5, (y + 0.5) / scale - 0.5]);
+    // Other plausible outlines, best first, for scan() to try when the chosen one doesn't settle on a card
+    // (in a slab photo the slab's window, label included, can outscore the card itself).
+    const minSide = Math.min(w, h);
+    const alternatives = [];
+    for (const r of refined.sort((a, b) => b.value - a.value)) {
+      const far = (q) => Math.max(...q.map((p, i) => Math.hypot(p[0] - r.quad[i][0], p[1] - r.quad[i][1]))) > 0.03 * minSide;
+      if (far(chosen.quad) && alternatives.every((a) => far(a))) alternatives.push(r.quad);
+    }
+    for (const c of cands.slice(6, 40)) {
+      if (alternatives.length >= 6) break;
+      const far = (q) => Math.max(...q.map((p, i) => Math.hypot(p[0] - c.q[i][0], p[1] - c.q[i][1]))) > 0.03 * minSide;
+      if (far(chosen.quad) && alternatives.every((a) => far(a))) alternatives.push(c.q);
+    }
+    return { corners: toFull(best.q), confidence: Math.min(1, 0.45 + best.support * 0.6), method: "edges", alternatives: alternatives.map(toFull) };
   }
 
   /**
@@ -1000,12 +1015,46 @@
         // Settle which lines are the card's own edges (not a sleeve's or a printed frame's), re-flattening
         // each time until the outline stops moving: every round the view gets squarer (this also takes
         // out an off-angle photo's keystone), so the later rounds judge the corners best.
-        for (let i = 0; i < 4; i++) {
-          const next = resolveEdges(img, corners).corners;
-          const moved = Math.max(...next.map((p, j) => Math.hypot(p[0] - corners[j][0], p[1] - corners[j][1])));
-          corners = next;
-          if (i > 0 && moved < 3) break;
+        const settle = (start) => {
+          let c = start, best = null;
+          for (let i = 0; i < 4; i++) {
+            const r = resolveEdges(img, c);
+            const moved = Math.max(...r.corners.map((p, j) => Math.hypot(p[0] - c[j][0], p[1] - c[j][1])));
+            c = r.corners;
+            if (i > 0 && moved < 3) return r;   // settled: the last, squarest view is the most accurate
+            if (!best || r.score > best.score) best = r;
+          }
+          // Never settled (it jumps between candidate lines): keep the round that looked most like a card.
+          return best && Number.isFinite(best.score) ? best : { corners: c, round: -1, score: -Infinity };
+        };
+        let best = settle(corners);
+        // Corners that don't look like a card's rounded corners mean the outline is something else (a slab's
+        // window with its label, a sleeve): try the finder's other outlines and keep the most card-like.
+        if (best.round < 0.75) {
+          const alts = found.alternatives || (found.method === "blob" && (findCardEdges(img) || {}));
+          const starts = Array.isArray(alts) ? alts : alts && alts.corners ? [alts.corners, ...(alts.alternatives || [])] : [];
+          for (const start of starts.slice(0, 6)) {
+            const r = settle(start);
+            if (r.round >= 0.75 && r.score > best.score + 0.05 && r.round > best.round) best = r;   // only a clearly card-like outline replaces it
+            if (best.round >= 0.85) break;
+          }
         }
+        // Still not card-like: the card may sit well inside the outline found (a slab's window is card-shaped
+        // but bigger, with the card at its bottom). Try smaller card outlines inside it.
+        if (best.round < 0.75) {
+          const q = corners;
+          const at = (u, v) => [0, 1].map((k) => (1 - v) * ((1 - u) * q[0][k] + u * q[1][k]) + v * ((1 - u) * q[3][k] + u * q[2][k]));
+          for (const sc of [0.85, 0.75]) {
+            for (const anchor of ["bottom", "center"]) {
+              const u0 = (1 - sc) / 2, v0 = anchor === "bottom" ? 1 - sc - 0.01 : (1 - sc) / 2;
+              const r = settle([at(u0, v0), at(1 - u0, v0), at(1 - u0, v0 + sc), at(u0, v0 + sc)]);
+              if (r.round >= 0.75 && r.score > best.score + 0.05 && r.round > best.round) best = r;   // only a clearly card-like outline replaces it
+              if (best.round >= 0.85) break;
+            }
+            if (best.round >= 0.85) break;
+          }
+        }
+        corners = best.corners;
       }
     }
     const warped = warpCard(img, corners, MARGIN);

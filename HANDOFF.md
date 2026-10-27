@@ -74,7 +74,7 @@ It never claims a firm grade from photos alone. Anything the photos can't show s
 
 ```bash
 python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
-pytest                                   # 144 passed, 2 skipped; JS tests need node
+pytest                                   # 145 passed, 2 skipped; JS tests need node
 python scripts/build_standalone.py       # -> standalone/dist/card-grading-lab.html and site/
 python scripts/fetch_riftbound_prices.py # optional locally: -> site/riftbound-prices.json
 ```
@@ -91,6 +91,12 @@ python scripts/fetch_riftbound_prices.py # optional locally: -> site/riftbound-p
   - Since the evidence fixes, every report is an honest ceiling, and every ceiling was at or above the real grade in the last round.
   - Absolute grades from slab photos are not reliable (bias about +2). The ranking of cards correlates with real grades at about 0.6–0.8.
   - Heavily damaged cards are recognised; mid-grade cards look like 9–10 in photos.
+- **Owner's sample sets** (`docs/blind-test.md`, "Owner's sample sets"):
+  - 16 TAG copies of one card (TAG 2–10) and 10 PSA Charizards (PSA 1–10).
+  - Fixed the outline on slab backs (52/52 now on the card).
+  - Light printing at the edge is no longer called a chip.
+  - Detector-only TAG ceilings at or above the real grade went from 8/16 to 14/16, in-sample.
+  - Corner whitening is the signal that tracks grade best (−0.78).
 - **Card reading:** Gemini 31/31 versus the on-phone reader 15/31 on the same photos.
 
 ## Known gaps and next steps (in priority order)
