@@ -58,6 +58,34 @@ Each round gave every card to a fresh agent: 40 per round, no card twice, a new 
 - **Caveat:** the thresholds were tuned on these same photos (round A), so the "after" numbers are in-sample.
 - **PSA set:** the detector can't assess anything at ~550 px, so it adds nothing there.
 
+### Owner's sample sets (2026-10-27): one card at many grades
+Two sets from the owner, each the same card at many grades. The photos aren't in the repo.
+- **TAG set:** 16 copies of the Japanese Gym Heroes "Sabrina's Gengar" holo, TAG 2 to 10 including half grades. Front and back slab photos, 3400 px.
+- **PSA set:** 10 Shadowless Charizards, PSA 1 to 10. Front and back, 572 px.
+
+**Outline fix.** On about 10 of the 52 photos (all slab backs), `vision.scan` locked onto the slab or label instead of the card. It now retries other outlines and inset starts. A candidate replaces the first outline only when its corners are clearly card-like (rounded-corner score ≥ 0.75, and better than the first). All 52 outlines are now on the card.
+
+**Light printing at the edge.** The old Japanese back has cream rays that reach the edge at the same places on every copy. Each one read as a 1 mm deep "major chip", so every TAG back looked heavily worn, the TAG 10 included.
+- Real wear candidates sat 0.17–0.45 mm deep with whiteness scores of 43–77.
+- The rays sat 0.5–1.3 mm deep with scores of 25–51.
+- So a patch that typically reaches 0.5 mm or more into the card without being bright (score < 55) is now greyed out ("more like light printing meeting the edge than wear"). A bright, deep chip is still reported.
+
+Detector-only grades (the scan's own likely candidates as the only defects, corners and edges counted as inspected, surface unassessed):
+
+| TAG set (n=16) | ceiling ≥ true grade | mean abs error | bias | rank correlation |
+|---|---|---|---|---|
+| Before the printing rule | 8/16 | 2.50 | +0.12 | −0.21 |
+| After | 14/16 | 2.75 | +2.38 | 0.22 |
+
+- **In-sample.** The rule was found and checked on these same 16 backs, so treat the "after" row as optimistic.
+- **PSA set unchanged:** 10/10 ceilings at or above the real grade, all 8–10. At 572 px the corners can't be assessed, and edge counts barely track the grade (−0.67 rank correlation with the number of edge candidates, but none are likely).
+- **What tracks the grade** (TAG set, rank correlation with the real grade):
+  - corner whitening fraction −0.78, which is zero for every TAG 6 and up;
+  - number of edge candidates −0.69;
+  - corner rounding and front centering ≈ 0, which is noise through slab plastic.
+- **The two ceilings still below the real grade (TAG 9 → 8, TAG 10 → 8)** come from short whitening runs next to the slab's inner rail on the back. They are a rail touching the card, not wear, but they're too short and patchy for the rail rule.
+- **Still one card design.** These sets say little about other cards, about raw cards, or about photos taken outside a slab.
+
 ## What this shows
 1. **Photos of slabbed cards can't support a grade.** At 500-1000 px through plastic, neither the detector nor a careful viewer can see the wear that separates TAG 7 from 9 or PSA 3 from 8. The system now says so: every photo-only report is a ceiling, and the ceilings were never below the real grade in round B.
 2. **Ordering works; absolute grades don't.** Rank correlation between the system and real grades is 0.6-0.8. Heavily damaged cards (creases, chipping) are recognised; mid-grade cards all look like 9-10.
@@ -76,6 +104,8 @@ Each round gave every card to a fresh agent: 40 per round, no card twice, a new 
 - The front-edge check calls yellow borders "white border" and skips them.
 - One back photo was found at only 295 px (card outline detection failed on the slab).
 - Uniform edge wear along a whole edge can now be labelled a reflection (seen once, card c26 in round A).
+- A slab's inner rail touching the card's edge for a short stretch reads as whitening (TAG 9 and 10 backs in the owner's set).
+- A light label strip less than about 1 mm from the card can still be taken as part of the card (synthetic test, before and after the outline fix).
 - "Up to 10" headlines are still easy to misread as grades; agents said so in most runs.
 
 ## Steps to improve (in order of value)

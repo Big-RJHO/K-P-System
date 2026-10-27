@@ -66,6 +66,11 @@
     gap: 2, minRun: 3,       // merge runs across gaps; ignore shorter runs
     edgeSearch: 5,           // px either way to look for the true edge line
     candidateConf: 0.4,      // below this a run is shown greyed out and not offered as a DING
+    // Light printing meeting the edge (a cream ray, a white logo): typically reaches this deep into the card
+    // while only moderately lighter than the border. On 16 TAG-graded slab photos of one card back (TAG 2-10),
+    // the cream rays that reach the edge at the same places on every copy sat 0.5-1.3 mm deep (median) and
+    // scored 25-51; the wear candidates elsewhere sat 0.17-0.45 mm deep and scored 43-77.
+    printDepthMm: 0.5, printScore: 55,
     // Slab rail, sleeve lip or reflection: a thin bright line hugging the edge, even along much of its length.
     // Seen on nearly every slab photo of the PSA/TAG blind test; worn stock is patchy and varies in depth.
     railDepth: 6,            // px: reaches at most this deep (90th percentile) ...
@@ -918,6 +923,10 @@
           if (run.depth >= s.band1 - 1) { conf *= 0.4; notes.push("reaches as deep as the check looks, more like artwork than wear"); }
         }
         if (run.length < 6) conf *= 0.7;
+        if (!under && run.depthMed >= T.printDepthMm * g.pxPerMm && run.score < T.printScore) {
+          conf *= 0.35;  // below candidateConf even at full confidence: shown greyed out, to check by eye
+          notes.push("reaches well into the card without being as bright as bare stock: more like light printing meeting the edge than wear");
+        }
         if (rail) {
           conf = Math.min(conf, 0.5 * T.candidateConf);
           notes.push(`a thin, even bright line right at the card's outline along ${Math.round(100 * Math.max(cover, run.length / span))}% of the edge: more likely a slab rail, sleeve edge or reflection than wear; check by eye`);
@@ -932,6 +941,7 @@
           severity, confidence: r2(conf), likely: conf >= T.candidateConf, reflection: rail,
           note: `${rail ? "Bright line (reflection?)" : type === "edge_chipping" ? "Chip" : "Whitening"} ${lengthMm} mm long, ${depthMm} mm deep${notes.length ? `; ${notes.join("; ")}` : ""}.`,
         };
+        if (opts.debug) item.debug = { coherence: r2(run.coherence), outsideLight: r2(run.outsideLight), crossing: r2(run.crossing), clipped: r2(run.clipped), even: r2(run.even), atEdge: r2(run.atEdge), depthMed: r1(run.depthMed), score: r1(run.score), measured: !!s.measured, under };
         edges.push(item);
         const [xa, ya] = sideXY(g, side, run.t0, run.e + T.band0), [xb, yb] = sideXY(g, side, run.t1, run.e + run.depth + 1);
         overlays.push({ type: "rect", kind: "edge", severity, confidence: item.confidence, likely: item.likely, x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.max(1, Math.abs(xb - xa)), h: Math.max(1, Math.abs(yb - ya)), label: `${side} ${rail ? "reflection" : severity}` });
