@@ -124,8 +124,14 @@ def test_lookup_queries_go_from_most_to_least_specific():
         numberOnly: O.queries({ number: "4/102", set_code: "", language: "", name: "", name_key: "" }, "pokemon"),
         nameOnly: O.queries({ number: "", set_code: "", language: "", name: "Shining Raichu", name_key: "Shining" }, "pokemon"),
         nothing: O.queries({ number: "", set_code: "", name: "", name_key: "" }, "pokemon"),
+        japanese: O.queries({ number: "", set_code: "", language: "JP", name: "Sabrina's Gengar", printed_name: "ナツメのゲンガー", name_key: "Gengar" }, "pokemon"),
+        smallKana: O.queries({ number: "", set_code: "", language: "JP", name: "Sabrina's Gengar", printed_name: "ナッメのゲンガー", name_key: "Gengar" }, "pokemon"),
       }));""")
     assert [(q["set_code"], q["number"], q["name"]) for q in r["full"]] == [("OBF", "125/197", "Charizard"), ("", "125/197", "Charizard"), ("", "", "Charizard ex"), ("", "", "Charizard")]
     assert [(q["set_code"], q["number"]) for q in r["numberOnly"]] == [("", "4/102")]
     assert [q["name"] for q in r["nameOnly"]] == ["Shining Raichu", "Shining"]
     assert r["nothing"] == []
+    # another language: the printed name in that language's database first, then the English printing, then one word
+    assert [(q["language"], q["name"]) for q in r["japanese"]] == [("JP", "ナツメのゲンガー"), ("JP", "Sabrina's Gengar"), ("EN", "Sabrina's Gengar"), ("JP", "Gengar")]
+    # Gemini read ナツメ as ナッメ on one TAG sample: the full-size spelling is tried right after the printed one
+    assert [q["name"] for q in r["smallKana"][:2]] == ["ナッメのゲンガー", "ナツメのゲンガー"]

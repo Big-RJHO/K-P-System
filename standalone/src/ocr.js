@@ -391,6 +391,18 @@
     if (reading.number && reading.set_code) q.push({ ...base, set_code: reading.set_code, number: reading.number, name });
     if (reading.number) q.push({ ...base, set_code: "", number: reading.number, name });
     if (reading.name && reading.name !== name) q.push({ ...base, set_code: "", number: "", name: reading.name });
+    // A card in another language: its printed name finds it in that language's database first. Failing that,
+    // its full English name finds the same card's English printing (shown for the user to confirm), which is
+    // closer than any card matching one word of the name.
+    const foreign = base.language && base.language !== "EN";
+    const printed = reading.printed_name || "";
+    if (foreign && printed && printed !== reading.name) {
+      // Small and full-size kana are easy to confuse in a photo (ッ for ツ): try the full-size spelling too.
+      const full = printed.replace(/[ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮ]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 1));
+      if (full !== printed) q.unshift({ ...base, set_code: reading.set_code || "", number: "", name: full });
+      q.unshift({ ...base, set_code: reading.set_code || "", number: "", name: printed });
+    }
+    if (foreign && reading.name) q.push({ ...base, language: "EN", set_code: "", number: "", name: reading.name });
     if (name) q.push({ ...base, set_code: "", number: "", name });
     return q;
   }

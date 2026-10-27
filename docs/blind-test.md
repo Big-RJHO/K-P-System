@@ -60,7 +60,7 @@ Each round gave every card to a fresh agent: 40 per round, no card twice, a new 
 
 ### Owner's sample sets (2026-10-27): one card at many grades
 Two sets from the owner, each the same card at many grades. The photos aren't in the repo.
-- **TAG set:** 16 copies of the Japanese Gym Heroes "Sabrina's Gengar" holo, TAG 2 to 10 including half grades. Front and back slab photos, 3400 px.
+- **TAG set:** 16 copies of the Japanese "Sabrina's Gengar" holo (ナツメのゲンガー, Challenge from the Darkness, the Japanese Gym Challenge set), TAG 2 to 10 including half grades. Front and back slab photos, 3400 px.
 - **PSA set:** 10 Shadowless Charizards, PSA 1 to 10. Front and back, 572 px.
 
 **Outline fix.** On about 10 of the 52 photos (all slab backs), `vision.scan` locked onto the slab or label instead of the card. It now retries other outlines and inset starts. A candidate replaces the first outline only when its corners are clearly card-like (rounded-corner score ≥ 0.75, and better than the first). All 52 outlines are now on the card.
@@ -85,6 +85,30 @@ Detector-only grades (the scan's own likely candidates as the only defects, corn
   - corner rounding and front centering ≈ 0, which is noise through slab plastic.
 - **The two ceilings still below the real grade (TAG 9 → 8, TAG 10 → 8)** come from short whitening runs next to the slab's inner rail on the back. They are a rail touching the card, not wear, but they're too short and patchy for the rail rule.
 - **Still one card design.** These sets say little about other cards, about raw cards, or about photos taken outside a slab.
+
+### End-to-end check against the certs (2026-10-27)
+Six agents took the same 26 slabs. For each card they:
+- looked up its certification: TAG's public DIG report via `tagd.co/<cert>`, or the PSA label in the photo;
+- entered it as the answer key;
+- ran `scripts/sample_check.py` (scan, identify, grade);
+- checked the outline and the identified card by eye;
+- compared the program's wear flags with TAG's listed defects (DINGs).
+
+The cert's grade and defects are only used for scoring, never given to the grader.
+
+- **Certs:** all 16 TAG reports and all 10 PSA labels matched the slab grades in the sample set.
+- **Outline:** correct on all 52 photos. 3 back crops include a sliver of slab rail.
+- **Identification:** 26/26 first matches are the exact database entry (TCGdex `PMCG6-054` ナツメのゲンガー, `base1-4` Charizard). This needed three fixes found during the run:
+  - Gemini now returns the printed (Japanese) name.
+  - The lookup no longer searches on a possessive like "Sabrina's".
+  - A small-kana misread (ナッメ for ナツメ) gets a full-size retry.
+
+  Gemini also reads the Pokédex number "094" as a collector number at times; the prompt now forbids it. TCGdex has no separate Shadowless entry, so Base Set Charizards can't be told from Unlimited.
+- **Centering:** never read on the old Japanese back (no printed border). Front top/bottom read 50–51 where TAG measured 42–58.
+- **Defects, TAG set:**
+  - TAG listed 40 corner and edge DINGs. The program flagged 14 and missed 26, and raised 80 flags TAG didn't list (mostly slab rails next to an edge).
+  - TAG's other 25 DINGs are surface defects (creases, dents, roller marks), which flat photos can't show. They decide most of the low grades.
+- **Grade:** the best case was at or above the slab on 24/26. It was within a grade on only 2.
 
 ## What this shows
 1. **Photos of slabbed cards can't support a grade.** At 500-1000 px through plastic, neither the detector nor a careful viewer can see the wear that separates TAG 7 from 9 or PSA 3 from 8. The system now says so: every photo-only report is a ceiling, and the ceilings were never below the real grade in round B.

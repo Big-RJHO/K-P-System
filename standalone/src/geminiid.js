@@ -34,6 +34,7 @@
     properties: {
       game: { type: "string", enum: ["pokemon", "riftbound", "other", "unknown"] },
       name: { type: "string" },
+      printed_name: { type: "string" },
       set_name: { type: "string" },
       set_code: { type: "string" },
       number: { type: "string" },
@@ -42,12 +43,15 @@
       graded_slab: { type: "boolean" },
       confidence: { type: "number" },
     },
-    required: ["game", "name", "number", "confidence"],
+    required: ["game", "name", "printed_name", "number", "confidence"],
   };
 
   const PROMPT = "Identify this trading card from the photo. Read the printed name, the collector number exactly as printed " +
     "(e.g. 4/102, 125/197, SP3/006, TG05/TG30, GG70/GG70), the set code if printed (e.g. OBF, VEN), the set name if you can tell, " +
     "the language, and the version (1st Edition, Shadowless, reverse holo, foil, alternate art...) only if visible. " +
+    "name is the card's English name; printed_name is the name exactly as printed, in the card's own language and script. " +
+    "Some cards, such as vintage Japanese ones, print no collector number: then leave number empty. Never give the " +
+    "Pokédex number, HP, or any other number as the collector number. " +
     "Leave a field empty if you can't read it; don't guess numbers. confidence is 0 to 1.";
 
   const clean = (s, n = 80) => String(s == null ? "" : s).replace(/[\u0000-\u001f]/g, " ").trim().slice(0, n);
@@ -57,14 +61,15 @@
     const number = clean(g.number, 20).toUpperCase().replace(/\s+/g, "");
     const code = clean(g.set_code, 8).toUpperCase();
     const name = clean(g.name);
-    const words = name.split(/\s+/).filter((w) => w.replace(/[^A-Za-z]/g, "").length >= 4);
+    // The lookup key is the longest word, but never a possessive owner ("Sabrina's Gengar" -> Gengar).
+    const words = name.split(/\s+/).filter((w) => w.replace(/[^A-Za-z]/g, "").length >= 4 && !/['’]s$/i.test(w));
     const lang = LANGS[clean(g.language, 20).toLowerCase()] || "";
     const conf = Number(g.confidence);
     return {
       found: !!(name || number),
       source: "gemini",
       game: ["pokemon", "riftbound"].includes(g.game) ? g.game : "",
-      name, name_key: words.sort((a, b) => b.length - a.length)[0] || name,
+      name, printed_name: clean(g.printed_name), name_key: words.sort((a, b) => b.length - a.length)[0] || name,
       number: /^[A-Z0-9-]{1,8}(\/[A-Z0-9-]{1,8})?$/.test(number) ? number : "",
       set_code: /^[A-Z0-9]{2,6}$/.test(code) ? code : "",
       set_name: clean(g.set_name),
