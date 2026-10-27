@@ -59,6 +59,14 @@ def test_bad_fields_are_dropped():
     assert b["found"] is False and b["game"] == ""
 
 
+def test_japanese_card_keeps_its_printed_name():
+    """A vintage Japanese Sabrina's Gengar (TAG sample set): no collector number, an owner's name in front."""
+    r = run("""console.log(JSON.stringify(G.toReading({ game: "pokemon", name: "Sabrina's Gengar", printed_name: "ナツメのゲンガー",
+      number: "", language: "Japanese", confidence: 0.95 })));""")
+    assert r["printed_name"] == "ナツメのゲンガー" and r["language"] == "JP" and r["number"] == ""
+    assert r["name_key"] == "Gengar"   # not the possessive "Sabrina's"
+
+
 def test_errors():
     r = run("""
       const msgs = [];
