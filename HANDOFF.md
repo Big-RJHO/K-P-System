@@ -91,6 +91,11 @@ python scripts/fetch_riftbound_prices.py # optional locally: -> site/riftbound-p
   - Since the evidence fixes, every report is an honest ceiling, and every ceiling was at or above the real grade in the last round.
   - Absolute grades from slab photos are not reliable (bias about +2). The ranking of cards correlates with real grades at about 0.6–0.8.
   - Heavily damaged cards are recognised; mid-grade cards look like 9–10 in photos.
+- **TAG DIG reports** (`docs/blind-test.md`, "Tuning on TAG DIG reports"):
+  - 464 TAG-graded cards from 17 sets, collected with the owner's written permission and kept outside the repo.
+  - Tuning used 325 of them; 139 were held out.
+  - Held-out results: corner/edge defects found 29 → 68 of 294; false flags 440 → 176; back left/right centering read 57 → 92.
+  - The surface, which photos can't see, decides most low grades.
 - **Owner's sample sets** (`docs/blind-test.md`, "Owner's sample sets"):
   - 16 TAG copies of one card (TAG 2–10) and 10 PSA Charizards (PSA 1–10).
   - Fixed the outline on slab backs (52/52 now on the card).
