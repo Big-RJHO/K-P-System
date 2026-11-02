@@ -117,3 +117,34 @@ def test_js_cropped_mode_and_guides(tmp_path):
     lines = res["lines"]
     assert lines["inner"]["left"] > lines["outer"]["left"]
     assert lines["inner"]["right"] < lines["outer"]["right"]
+
+
+def test_js_reads_back_where_artwork_hides_the_frame_on_most_rows(tmp_path):
+    """The blue Pokémon back: the swirl runs into the dark border on most rows along the left and right, so
+    only a minority of rows show the frame. Nothing crosses earlier and the late rows are spread out, so
+    the frame is read (it used to be left unread), on a flat scan and on a photo."""
+    from synthetic import make_swirl_back
+
+    cases = [((34, 41, 38, 38), 0.7, 1), ((42, 33, 36, 40), 0.75, 2), ((37, 37, 40, 36), 0.65, 3)]
+    images, truth = [], []
+    for borders, hidden, seed in cases:
+        card = make_swirl_back(*borders, hidden=hidden, seed=seed)
+        images += [(card, "cropped"), (place_on_background(card, 2), "auto")]
+        truth += [expected(*borders)] * 2
+    for (lr, tb), res in zip(truth, run(images, tmp_path)):
+        per = res["confidence"]["per_side"]
+        assert min(per.values()) >= 0.3, per  # every side counts as measured (the app's 0.3 rule)
+        assert abs(res["centering"]["lr"] - lr) <= 1.0, (lr, res["centering"])
+        assert abs(res["centering"]["tb"] - tb) <= 1.0, (tb, res["centering"])
+
+
+def test_js_borderless_card_stays_unread(tmp_path):
+    """A full-art card has no border to measure: no side may pass as measured."""
+    from synthetic import make_borderless
+
+    images = [(make_borderless(seed), "cropped") for seed in (1, 2, 3)]
+    images += [(place_on_background(make_borderless(4), 2), "auto")]
+    for res in run(images, tmp_path):
+        per = res["confidence"]["per_side"]
+        assert max(per.values()) < 0.3, per
+

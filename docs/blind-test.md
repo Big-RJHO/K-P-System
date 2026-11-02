@@ -110,6 +110,54 @@ The cert's grade and defects are only used for scoring, never given to the grade
   - TAG's other 25 DINGs are surface defects (creases, dents, roller marks), which flat photos can't show. They decide most of the low grades.
 - **Grade:** the best case was at or above the slab on 24/26. It was within a grade on only 2.
 
+### Tuning on TAG DIG reports (2026-11-02)
+**Data.** 464 TAG-graded Pokémon cards were collected from TAG's pop report and DIG report pages, with the owner's written permission. Each card has its report (grade, score, centering, defects with side and location) and TAG's front and back scans.
+- They come from 17 sets across 1999–2025, English and Japanese, with 30–65 cards per grade 1–10.
+- Collection ran at one page every 5 s or slower, identified, and stopped at any block. None occurred.
+- The data stays outside the repo.
+- Scans were put on a dark background to look like photos.
+
+**Method.**
+- **Split:** 70% (325 cards) for tuning and 30% (139) held out, stratified by grade. The held-out cards were scored once, at the end.
+- **Three agents, one area each:**
+  - centering (`vision.js`);
+  - corner and edge wear (`inspect.js`);
+  - an analysis of which wear signals track TAG's grade.
+
+**Held-out results** (139 cards):
+
+| | Before | After |
+|---|---|---|
+| Back left/right centering read (error) | 57 (1.41) | **92** (1.51) |
+| Front centering read / error | unchanged | unchanged |
+| TAG corner/edge defects found (of 294) | 29 | **68** |
+| Flags TAG didn't list | 440 | **176** |
+| Flags on cards TAG found clean (42 cards) | 160 | **75** |
+| Best-case grade at or above TAG | 124 | **131** |
+| Within one grade of TAG | 34 | 37 |
+| Average grade error | 3.28 | 3.49 |
+
+**What changed.**
+- **Back centering:** the back's left/right border is read when the frame shows on only a minority of rows, provided those rows agree tightly.
+- **Corner outlines:** a corner's outline is judged by the nearer colour, so a thin rim no longer blocks it.
+- **Dark corners:** tiny light specks at a dark corner count as micro whitening.
+- **Not wear any more:** border texture (foil sparkle, print dots), faint runs, and light catching a whole edge.
+- **Tests:** synthetic tests cover each change.
+
+**Owner's 26 slab photos.**
+- No ceiling fell below its slab grade.
+- The ceilings of low-grade TAG slabs rose by 0.5–2.5, because some whitening seen through the plastic is now greyed out.
+
+**Findings.**
+- **Corner whitening tracks the grade only weakly across designs** (ρ −0.25). The earlier −0.78 held only for Base Set.
+- **The program's measurements don't single out the corners TAG flags.** At individual corners they separate TAG's defects from clean corners at chance (AUC about 0.5).
+- **The surface decides most low grades.** TAG's surface defects (creases, dents, play wear) explain more of the grade than corners, edges and centering together. A crease means a median grade of 2.
+- **A calibration fitted to photo features doesn't beat guessing the median.**
+
+**Recommended next:**
+- Unconfirmed automatic flags shouldn't cap the grade below 9 or stack.
+- Add an in-hand surface checklist, ordered crease → dent → stain → play wear.
+
 ## What this shows
 1. **Photos of slabbed cards can't support a grade.** At 500-1000 px through plastic, neither the detector nor a careful viewer can see the wear that separates TAG 7 from 9 or PSA 3 from 8. The system now says so: every photo-only report is a ceiling, and the ceilings were never below the real grade in round B.
 2. **Ordering works; absolute grades don't.** Rank correlation between the system and real grades is 0.6-0.8. Heavily damaged cards (creases, chipping) are recognised; mid-grade cards all look like 9-10.
