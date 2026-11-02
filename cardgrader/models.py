@@ -131,6 +131,8 @@ class Defect(BaseModel):
     type: str = Field(description="Key from criteria/defects.yaml")
     severity: Severity
     note: str | None = None
+    confirmed: bool = Field(True, description="False for a photo-check flag nobody has confirmed by eye: it only limits "
+                                               "its component to component_rules.unconfirmed_floor and never stacks")
 
     @property
     def component(self) -> Component:
@@ -220,9 +222,9 @@ class CardAssessment(BaseModel):
         return data
 
     def is_inspected(self, side: Side, component: Component) -> bool:
-        """Was this component said to be looked at on this side? A listed defect counts as having looked."""
+        """Was this component said to be looked at on this side? A listed (confirmed) defect counts as having looked."""
         return component in self.inspected.get(side, []) or any(
-            d.side == side and d.component == component for d in self.defects
+            d.side == side and d.component == component and d.confirmed for d in self.defects
         )
 
     def is_photo_limited(self, side: Side, component: Component) -> bool:

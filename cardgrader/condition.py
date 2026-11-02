@@ -55,6 +55,19 @@ def describe(defect: Defect) -> str:
 
 
 def _condition(defects: list[Defect], company: str | None, inspected: bool) -> ComponentCondition:
+    cond = _confirmed_condition([d for d in defects if d.confirmed], company, inspected)
+    pending = [d for d in defects if not d.confirmed]
+    if not pending:
+        return cond
+    # Unconfirmed flags: each limits the component to its cap, but never below the floor, and they don't stack.
+    floor = criteria_loader.defects()["component_rules"]["unconfirmed_floor"]
+    limit, worst = min(((max(defect_cap(d, company), floor), d) for d in pending), key=lambda cd: cd[0])
+    if limit >= cond.ceiling:
+        return cond
+    return ComponentCondition(grade=limit, reasons=cond.reasons + [f"possible {describe(worst)} (not confirmed) limits it to {limit:g}"])
+
+
+def _confirmed_condition(defects: list[Defect], company: str | None, inspected: bool) -> ComponentCondition:
     if not defects:
         # Nothing listed means flawless only if someone looked; otherwise we don't know.
         return ComponentCondition() if inspected else ComponentCondition(grade=None)
@@ -143,13 +156,15 @@ def unread_centering_note(assessment: CardAssessment) -> str | None:
 
 
 def fatal_defects(assessment: CardAssessment) -> list[Defect]:
-    return [d for d in assessment.defects if criteria_loader.defect_type(d.type).get("fatal")]
+    return [d for d in assessment.defects if d.confirmed and criteria_loader.defect_type(d.type).get("fatal")]
 
 
 def qualifier_flags(assessment: CardAssessment) -> list[str]:
     """PSA-style qualifiers triggered by moderate or major defects."""
     flags: list[str] = []
     for d in assessment.defects:
+        if not d.confirmed:
+            continue
         q = criteria_loader.defect_type(d.type).get("qualifier")
         if q and d.severity in ("moderate", "major") and q not in flags:
             flags.append(q)

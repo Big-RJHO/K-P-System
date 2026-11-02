@@ -89,6 +89,7 @@ def random_assessments(n: int, seed: int = 7) -> list[dict]:
                     "location": loc,
                     "type": key,
                     "severity": rng.choice(["micro", "minor", "moderate", "major"]),
+                    **({"confirmed": False} if rng.random() < 0.3 else {}),
                 }
             )
         out.append(

@@ -96,6 +96,9 @@ python scripts/fetch_riftbound_prices.py # optional locally: -> site/riftbound-p
   - Tuning used 325 of them; 139 were held out.
   - Held-out results: corner/edge defects found 29 → 68 of 294; false flags 440 → 176; back left/right centering read 57 → 92.
   - The surface, which photos can't see, decides most low grades.
+  - **Follow-ups:**
+    - Unconfirmed photo flags now limit an area to 9 at most and never stack (`Defect.confirmed`, `unconfirmed_floor`).
+    - The app has "Not wear" buttons and an in-hand surface checklist.
 - **Owner's sample sets** (`docs/blind-test.md`, "Owner's sample sets"):
   - 16 TAG copies of one card (TAG 2–10) and 10 PSA Charizards (PSA 1–10).
   - Fixed the outline on slab backs (52/52 now on the card).

@@ -40,7 +40,8 @@ def grade(assessment: CardAssessment) -> CompanyGrade:
             d
             for d in assessment.defects
             if not (
-                criteria_loader.defect_type(d.type).get("qualifier") == q
+                d.confirmed
+                and criteria_loader.defect_type(d.type).get("qualifier") == q
                 and d.severity in ("moderate", "major")
             )
         ]
