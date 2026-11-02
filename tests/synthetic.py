@@ -27,6 +27,41 @@ def make_card(
     return card
 
 
+def make_swirl_back(
+    left: int, right: int, top: int, bottom: int, hidden: float = 0.7, border_bgr=(70, 25, 10), art_bgr=(190, 140, 110), seed: int = 0
+) -> np.ndarray:
+    """A back like the blue Pokémon back: a dark border around lighter artwork, where along the left and right
+    a dark swirl in the artwork runs into the border on a fraction `hidden` of the rows, so the frame's inner
+    edge only shows on the rest (scattered stretches). Top and bottom are clear."""
+    rng = np.random.default_rng(seed)
+    card = np.zeros((H, W, 3), np.uint8)
+    card[:] = border_bgr
+    inner = card[top : H - bottom, left : W - right]
+    inner[:] = art_bgr
+    for _ in range(25):  # light swirls in the middle
+        c = tuple(int(x) for x in np.clip(np.array(art_bgr) + rng.integers(-40, 40, 3), 0, 255))
+        cv2.circle(inner, (int(rng.integers(0, inner.shape[1])), int(rng.integers(0, inner.shape[0]))), int(rng.integers(20, 90)), c, -1)
+    ih = inner.shape[0]
+    for x0, sign in ((0, 1), (inner.shape[1] - 1, -1)):
+        phase = rng.uniform(0, 100)
+        for y in range(ih):  # in every 80 rows, the swirl (border colour) touches the frame on `hidden` of them
+            if (y + phase) % 80 < 80 * hidden:
+                reach = int(70 + 45 * np.sin((y + phase) / 13))  # how far into the artwork the dark swirl reaches
+                xs = slice(x0, x0 + reach) if sign > 0 else slice(x0 - reach + 1, x0 + 1)
+                inner[y, xs] = border_bgr
+    return np.clip(card.astype(np.int16) + rng.normal(0, 3, card.shape), 0, 255).astype(np.uint8)
+
+
+def make_borderless(seed: int = 0) -> np.ndarray:
+    """A full-art card: busy artwork right up to the card's edge, no border at all."""
+    rng = np.random.default_rng(seed)
+    card = np.full((H, W, 3), 120, np.uint8)
+    for _ in range(400):
+        c = tuple(int(x) for x in rng.integers(0, 255, 3))
+        cv2.circle(card, (int(rng.integers(-40, W + 40)), int(rng.integers(-40, H + 40))), int(rng.integers(8, 70)), c, -1)
+    return card
+
+
 def card_mask(radius: int = 36) -> np.ndarray:
     """Card shape with rounded corners (real cards have a ~3 mm corner radius, 36 px at this scale)."""
     mask = np.zeros((H, W), np.uint8)

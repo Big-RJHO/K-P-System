@@ -944,15 +944,21 @@
     for (let l = 0; l < lines; l++) for (let i = refStart; i < refEnd; i++) refDists.push(dist[l * depth + i]);
     const thresh = Math.max(18, 4 * median(refDists));
 
-    const inner = [], outer = [];
+    const inner = [], fine = [], outer = [];
     const over = new Uint8Array(depth);
     let found = 0;
     for (let l = 0; l < lines; l++) {
-      for (let i = 0; i < depth; i++) over[i] = dist[l * depth + i] > thresh ? 1 : 0;
+      const row = l * depth;
+      for (let i = 0; i < depth; i++) over[i] = dist[row + i] > thresh ? 1 : 0;
       const rel = firstRun(over, refEnd, depth, 3);
       if (rel < 0) continue;
       found++;
-      inner.push(rel + refEnd);
+      const pos = rel + refEnd;
+      inner.push(pos);
+      // Where between the last pixel under the threshold and the first one over it the colour crosses it:
+      // whole pixels are ~1 point of centering on a 40 px border.
+      const a = dist[row + pos - 1], b = dist[row + pos];
+      fine.push(pos - 1 + (b > a ? Math.min(1, Math.max(0, (thresh - a) / (b - a))) : 1));
       // The card's edge was placed exactly at the margin when the card was found; a colour change
       // further out is the sleeve or the desk, not the card.
       outer.push(margin);
@@ -960,10 +966,10 @@
     if (found < Math.max(5, lines * 0.2)) return { outer: margin, inner: NaN, confidence: 0 };
     // The frame's inner edge is where most rows first change colour: the densest window of positions.
     // A row that changes colour only *later* saw artwork that matches the border there (the dark-blue swirl
-    // along the left and right of the WOTC Pokémon back does this on a third of the rows or more): it didn't
+    // along the left and right of the Pokémon back does this on two thirds of the rows or more): it didn't
     // see the frame edge, but it doesn't contradict it either. A row that changes colour *earlier* does
     // contradict it. So confidence comes from how many rows agree, minus the contradicting ones; a spread
-    // of late rows no longer counts against the reading (it used to, through the interquartile range).
+    // of late rows doesn't count against the reading.
     const sorted = Float64Array.from(inner).sort();
     const win = Math.max(4, extent * 0.006);
     let best = 0, lo = 0;
@@ -971,9 +977,23 @@
       while (sorted[j] < sorted[i] - win) j++;
       if (i - j + 1 > best) { best = i - j + 1; lo = sorted[j]; }
     }
-    const agree = inner.filter((v) => v >= lo && v <= lo + win);
+    const agree = fine.filter((_, k) => inner[k] >= lo && inner[k] <= lo + win);
     const early = inner.filter((v) => v < lo).length;
-    const support = Math.min(1, Math.max(0, (best / found - 0.2) / 0.5));  // 20% agreeing: nothing; 70%: full
+    let support = Math.min(1, Math.max(0, (best / found - 0.2) / 0.5));  // 20% agreeing: nothing; 70%: full
+    // A minority of rows can still pin the frame down, when none of the others cross earlier and the late
+    // rows are spread out (artwork matching the border) rather than bunched at a second line. That is the
+    // blue Pokémon back's left and right border, where the swirl hides the frame on most rows. Full support
+    // from 24% of the rows, if no window of later rows holds more than 1/2.2 as many.
+    if (early / found <= 0.02 && found / lines >= 0.95) {
+      let second = 0, k0 = 0;
+      while (k0 < found && sorted[k0] <= lo + 2 * win) k0++;
+      for (let i = k0, j = k0; i < found; i++) {
+        while (sorted[j] < sorted[i] - win) j++;
+        second = Math.max(second, i - j + 1);
+      }
+      const peak = best / Math.max(second, 1);
+      support = Math.max(support, Math.min(1, Math.max(0, (best / found - 0.12) / 0.12)) * Math.min(1, Math.max(0, peak - 1.2)));
+    }
     const contradiction = Math.max(0, 1 - early / found / 0.3);           // 30% crossing earlier: nothing
     return { outer: median(outer), inner: median(agree), confidence: (found / lines) * support * contradiction };
   }
