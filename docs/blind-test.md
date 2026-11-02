@@ -154,9 +154,20 @@ The cert's grade and defects are only used for scoring, never given to the grade
 - **The surface decides most low grades.** TAG's surface defects (creases, dents, play wear) explain more of the grade than corners, edges and centering together. A crease means a median grade of 2.
 - **A calibration fitted to photo features doesn't beat guessing the median.**
 
-**Recommended next:**
-- Unconfirmed automatic flags shouldn't cap the grade below 9 or stack.
-- Add an in-hand surface checklist, ordered crease → dent → stain → play wear.
+**Follow-up, done the same day:**
+- **Unconfirmed flags.** A photo-check spot nobody has reviewed (`confirmed: false`) now limits its area to 9 at most (`component_rules.unconfirmed_floor`). It never stacks, never counts as "looked at", and never makes a card altered or triggers a qualifier. Confirmed DINGs keep their caps.
+  - **In the app,** each spot gets "Add to DINGS" or "Not wear".
+  - **Held out:** best case at or above TAG rose from 131 to 133 of 139; within one grade from 37 to 38; average error from 3.49 to 3.68.
+- **In-hand surface checklist.** For each side, the app now offers a checklist in order of impact:
+  1. crease;
+  2. dent;
+  3. stain;
+  4. play wear;
+  5. ink or print spot;
+  6. scratches;
+  7. print line.
+
+  It logs what you find as DINGs and marks the surface as checked in hand.
 
 ## What this shows
 1. **Photos of slabbed cards can't support a grade.** At 500-1000 px through plastic, neither the detector nor a careful viewer can see the wear that separates TAG 7 from 9 or PSA 3 from 8. The system now says so: every photo-only report is a ceiling, and the ceilings were never below the real grade in round B.

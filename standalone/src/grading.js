@@ -82,10 +82,13 @@
 
   const axisName = (axis) => (axis === "lr" ? "left/right" : "top/bottom");
 
-  // CardAssessment.is_inspected: a listed defect counts as having looked.
+  // models.Defect.confirmed (default true): false for a photo-check flag nobody has confirmed by eye.
+  const confirmed = (d) => d.confirmed !== false;
+
+  // CardAssessment.is_inspected: a listed (confirmed) defect counts as having looked.
   const isInspected = (a, side, comp) =>
     (a.inspected[side] || []).includes(comp) ||
-    a.defects.some((d) => d.side === side && locationComponent(d.location) === comp);
+    a.defects.some((d) => d.side === side && locationComponent(d.location) === comp && confirmed(d));
 
   // CardAssessment.is_photo_limited / is_assessed: the photo check wins unless checked in hand.
   const inHand = (a, side, comp) => (a.inspected_in_hand[side] || []).includes(comp);
@@ -204,6 +207,18 @@
   const ceiling = (cc) => (cc.grade == null ? FLAWLESS : cc.grade);
 
   function condition(criteria, defects, company, inspected) {
+    const cond = confirmedCondition(criteria, defects.filter(confirmed), company, inspected);
+    const pending = defects.filter((d) => !confirmed(d));
+    if (!pending.length) return cond;
+    // Unconfirmed flags: each limits the component to its cap, but never below the floor, and they don't stack.
+    const floor = criteria.defects.component_rules.unconfirmed_floor;
+    let limit = Infinity, worst = null;
+    for (const d of pending) { const c = Math.max(defectCap(criteria, d, company), floor); if (c < limit) { limit = c; worst = d; } }
+    if (limit >= ceiling(cond)) return cond;
+    return { grade: limit, reasons: [...cond.reasons, `possible ${describe(criteria, worst)} (not confirmed) limits it to ${g(limit)}`] };
+  }
+
+  function confirmedCondition(criteria, defects, company, inspected) {
     if (!defects.length) return { grade: inspected ? FLAWLESS : null, reasons: [] };
     const rules = criteria.defects.component_rules;
     const capped = defects.map((d) => [defectCap(criteria, d, company), d]).sort((a, b) => a[0] - b[0]);
@@ -271,11 +286,12 @@
       "just making Gem Mint. That's this lab's convention, not a grading company's rule.";
   }
 
-  const fatalDefects = (criteria, a) => a.defects.filter((d) => defectType(criteria, d.type).fatal);
+  const fatalDefects = (criteria, a) => a.defects.filter((d) => confirmed(d) && defectType(criteria, d.type).fatal);
 
   function qualifierFlags(criteria, a) {
     const flags = [];
     for (const d of a.defects) {
+      if (!confirmed(d)) continue;
       const q = defectType(criteria, d.type).qualifier;
       if (q && (d.severity === "moderate" || d.severity === "major") && !flags.includes(q)) flags.push(q);
     }
@@ -372,7 +388,7 @@
     }
     for (const q of qualifierFlags(criteria, a)) {
       const remaining = a.defects.filter(
-        (d) => !(defectType(criteria, d.type).qualifier === q && (d.severity === "moderate" || d.severity === "major")),
+        (d) => !(confirmed(d) && defectType(criteria, d.type).qualifier === q && (d.severity === "moderate" || d.severity === "major")),
       );
       const alt = floorTo(grades, Math.min(psaBody(criteria, { ...a, defects: remaining }, grades).body, cent.grade));
       if (alt > overall) alternatives.push(`PSA ${g(alt)} ${q}: graded with the ${q} qualifier instead of for the flaw`);

@@ -56,6 +56,23 @@ def test_defects_stack():
     assert three["TAG"].score < one["TAG"].score
 
 
+def test_unconfirmed_flags_only_limit_to_nine_and_never_stack():
+    """A photo-check flag nobody confirmed by eye means "possible wear": it limits its area to 9 at most and
+    doesn't stack. On 325 TAG-graded cards such flags matched TAG's own defects at chance level."""
+    flag = lambda sev, loc="top": {**defect("edge_whitening", sev, "back", loc), "confirmed": False}
+    three = grades(card(defects=[flag("major", loc) for loc in ("top", "left", "right")]))
+    assert three["BGS"].subgrades["edges"] == 9            # a confirmed major would cap at 6 and stack
+    assert any("not confirmed" in f for f in three["PSA"].limiting_factors)
+    assert grades(card(defects=[flag("micro")]))["PSA"].grade == 10   # micro caps nothing, confirmed or not
+    # confirmed defects keep their caps, and an unconfirmed one never raises a grade
+    mixed = grades(card(defects=[defect("edge_whitening", "moderate", "back", "top"), flag("major", "left")]))
+    assert mixed["BGS"].subgrades["edges"] == 8
+    # an unconfirmed flag doesn't count as having looked, can't make a card altered or trigger a PSA qualifier
+    looked = grades(card(defects=[{**defect("stain", "major"), "confirmed": False}], inspected={}))
+    assert not looked["PSA"].complete and "ST" not in looked["PSA"].qualifiers
+    assert grades(card(defects=[{**defect("altered", "major", "front", "top"), "confirmed": False}]))["PSA"].grade > 1
+
+
 def test_heavy_crease_is_low_everywhere():
     g = grades(card(defects=[defect("crease", "major")]))
     assert g["PSA"].grade <= 2

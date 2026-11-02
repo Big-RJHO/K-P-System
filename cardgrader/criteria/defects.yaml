@@ -19,6 +19,11 @@ component_rules:
   stack_penalty: 0.5        # each additional non-micro defect in the same component lowers it by this
   max_stack_penalty: 1.5
   micro_stack_count: 3      # this many micro defects in one component cap it at 9.5
+  # A defect not confirmed by eye (a photo-check flag nobody has reviewed) limits its component to at most
+  # this ("possible wear"), never stacks and doesn't count towards the micro rule. On 325 TAG-graded cards
+  # the photo flags matched TAG's own defects at chance level, so letting them cap and stack put 1 in 10
+  # best-case grades below TAG's; with this floor it was about 1 in 16. Confirmed defects keep their caps.
+  unconfirmed_floor: 9
 
 types:
   corner_whitening:

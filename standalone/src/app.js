@@ -102,6 +102,8 @@ const state = {
   // the card in hand (`inHand`) counts for those areas.
   photoLimits: { front: [], back: [] },
   inHand: { front: [], back: [] },
+  // Photo-check spots the user marked "Not wear" (keys from flagKey), per side; reset when that side is rescanned.
+  dismissed: { front: [], back: [] },
   evidence: { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } },
   activeSide: "front",
   reference: null,  // {image_url|image, source, source_url, name, rgba, mask}: only set once the user confirms the card
@@ -950,6 +952,7 @@ const FLAT_PHOTO_LIMITS = ["surface"];
 function runInspection(side) {
   const s = state.scans[side];
   if (!s || !s.photo || !s.result) return;
+  state.dismissed[side] = [];
   try {
     s.quality = Inspect.quality(s.photo, s.result);
     state.photoLimits[side] = Grading.photoLimitComponents([...s.quality.blocked, ...FLAT_PHOTO_LIMITS]);
@@ -974,6 +977,65 @@ function scanCheckLine(text, cls = "") {
   if (cls) li.className = cls;
   li.textContent = text;
   return li;
+}
+
+// A photo-check spot, and whether the user has dealt with it: added as a DING (same side, place and type) or
+// dismissed as "Not wear". Spots left open count as unconfirmed possible wear.
+const flagKey = (d) => [d.side, d.location, d.type, d.severity].join("|");
+const flagAdded = (d) => state.defects.some((x) => x.side === d.side && x.location === d.location && x.type === d.type);
+function pendingFlags() {
+  if (state.example) return [];
+  const out = [];
+  for (const side of SIDES) {
+    const c = state.scans[side] && state.scans[side].check;
+    if (!c) continue;
+    for (const d of c.defects) {
+      const f = { side: d.side || side, location: d.location, type: d.type, severity: d.severity };
+      if (!flagAdded(f) && !state.dismissed[f.side].includes(flagKey(f))) out.push({ ...f, note: "Photo check, not confirmed", confirmed: false });
+    }
+  }
+  return out;
+}
+
+// In-hand surface check, in order of how much each costs a grade (TAG's reports: a crease means a median grade
+// of 2, a dent 4, play wear 5). Each maps to a DING type from defects.yaml.
+const SURFACE_CHECKS = [
+  ["crease", "Crease or wrinkle", "crease"],
+  ["dent", "Dent or indentation", "indentation"],
+  ["stain", "Stain or water damage", "stain"],
+  ["playwear", "Play wear (scuffs, dull gloss)", "gloss_loss"],
+  ["ink", "Ink or print spot", "print_spot"],
+  ["scratch", "Scratches", "surface_scratch"],
+  ["printline", "Print line", "print_line"],
+];
+
+function surfaceChecklist(side) {
+  const det = document.createElement("details");
+  det.className = "sc-surface";
+  const done = state.inHand[side].includes("surface");
+  det.innerHTML = `<summary class="link-btn"></summary><p class="hint"></p><div class="sc-surface-rows"></div><button type="button" class="btn small">Save surface check</button>`;
+  $("summary", det).textContent = done ? `Surface checked in hand (${side})` : `Check the ${side} surface in hand`;
+  $("p", det).textContent = "Tilt the card under a light and look for each of these, worst first. Choose how bad anything you find is; leave the rest as “Not seen”.";
+  const rows = $(".sc-surface-rows", det);
+  for (const [id, label] of SURFACE_CHECKS) {
+    const row = document.createElement("label");
+    row.className = "sc-surface-row";
+    row.innerHTML = `<span></span><select id="surf-${side}-${id}"><option value="">Not seen</option><option value="micro">Tiny</option><option value="minor">Minor</option><option value="moderate">Obvious</option><option value="major">Heavy</option></select>`;
+    $("span", row).textContent = label;
+    rows.append(row);
+  }
+  $("button", det).addEventListener("click", () => {
+    leaveExample();
+    for (const [id, label, type] of SURFACE_CHECKS) {
+      const sev = $(`#surf-${side}-${id}`, det).value;
+      if (sev) state.defects.push({ side, location: "surface", type, severity: sev, note: `In-hand surface check: ${label.toLowerCase()}` });
+    }
+    // Checked in hand: the surface counts as assessed for this side, with whatever was logged.
+    if (!state.inHand[side].includes("surface")) state.inHand[side] = COMPONENTS.filter((c) => c === "surface" || state.inHand[side].includes(c));
+    runGrade();
+    renderScanCheck();
+  });
+  return det;
 }
 
 function renderScanCheck() {
@@ -1013,7 +1075,7 @@ function renderScanCheck() {
   if (problems.length) for (const [, v] of problems) ul.append(scanCheckLine(v.note, v.status));
   else ul.append(scanCheckLine("Sharpness, glare, resolution and framing look fine."));
   if (q.blocked.length) ul.append(scanCheckLine(`This photo can't show: ${q.blocked.map(blockedText).join(", ")}. Rescan with better light, or check those by eye and log them in DINGS.`, "warn"));
-  ul.append(scanCheckLine("A flat photo can't show the surface (scratches, print lines, dents, creases, gloss loss). Tilt the card under a light, log what you find in DINGS, then tick “Surface checked in hand”."));
+  ul.append(scanCheckLine("A flat photo can't show the surface (creases, dents, stains, scuffs, scratches, print lines). Tilt the card under a light and use the surface check below; it logs what you find and marks the surface as checked in hand."));
   body.append(ul);
 
   const toggle = document.createElement("label");
@@ -1033,21 +1095,45 @@ function renderScanCheck() {
   sum.textContent = c.summary;
   body.append(sum);
 
-  for (const d of c.defects) {
+  const open = c.defects.filter((d) => { const f = { ...d, side: d.side || side }; return !flagAdded(f) && !state.dismissed[f.side].includes(flagKey(f)); });
+  if (open.length) {
+    const why = document.createElement("p");
+    why.className = "hint";
+    why.textContent = "Until you check these by eye, each counts as possible wear: that area's best case stays at 9 at most. Add the real ones to DINGS and mark the rest “Not wear”.";
+    body.append(why);
+  }
+  for (const d of open) {
     const row = document.createElement("div");
     row.className = "sc-cand";
     const label = CRITERIA.defects.types[d.type] ? CRITERIA.defects.types[d.type].label : pretty(d.type);
-    row.innerHTML = "<div><b></b><small></small></div><button type=\"button\" class=\"btn small\">Add to DINGS</button>";
+    row.innerHTML = "<div><b></b><small></small></div><span class=\"sc-cand-btns\"><button type=\"button\" class=\"btn small\">Add to DINGS</button><button type=\"button\" class=\"btn small ghost\">Not wear</button></span>";
     $("b", row).textContent = `${label} · ${cap(d.severity)} · ${whereText(d)}`;
     $("small", row).textContent = d.note || "";
-    $("button", row).addEventListener("click", () => {
+    const [add, notWear] = $$("button", row);
+    add.addEventListener("click", () => {
       leaveExample();
       state.defects.push({ side: d.side || side, location: d.location, type: d.type, severity: d.severity, note: `Auto-detected: ${d.note || label}`.slice(0, 200) });
       markInspected(d.side || side, COMPONENT_OF[d.location]);
       runGrade();
+      renderScanCheck();
+    });
+    notWear.addEventListener("click", () => {
+      leaveExample();
+      state.dismissed[d.side || side].push(flagKey({ ...d, side: d.side || side }));
+      runGrade();
+      renderScanCheck();
     });
     body.append(row);
   }
+  if (state.dismissed[side].length) {
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "link-btn";
+    undo.textContent = `Show the ${state.dismissed[side].length} spot${state.dismissed[side].length > 1 ? "s" : ""} marked “Not wear” again`;
+    undo.addEventListener("click", () => { state.dismissed[side] = []; runGrade(); renderScanCheck(); });
+    body.append(undo);
+  }
+  body.append(surfaceChecklist(side));
   const det = document.createElement("details");
   det.innerHTML = "<summary class=\"link-btn\">What this can't tell you</summary><ul class=\"sc-limits\"></ul>";
   for (const l of c.limitations) { const li = document.createElement("li"); li.textContent = l; $("ul", det).append(li); }
@@ -1876,7 +1962,9 @@ function assessment() {
     // Raw shares plus where they came from: the engine counts an unread axis as 55/45.
     centering: { front: { ...state.centering.front }, back: { ...state.centering.back } },
     centering_evidence: { front: { ...state.evidence.front }, back: { ...state.evidence.back } },
-    defects: state.defects,
+    // DINGS the user logged, plus photo-check spots nobody has added or dismissed yet: those count only as
+    // "possible wear" (confirmed: false), which limits an area to 9 at most and never stacks.
+    defects: [...state.defects, ...pendingFlags()],
     inspected: { front: [...state.inspected.front], back: [...state.inspected.back] },
     photo_limits: { front: [...state.photoLimits.front], back: [...state.photoLimits.back] },
     inspected_in_hand: { front: [...state.inHand.front], back: [...state.inHand.back] },
@@ -2230,6 +2318,7 @@ function resetCard() {
   state.inspected = { front: [], back: [] };
   state.photoLimits = { front: [], back: [] };
   state.inHand = { front: [], back: [] };
+  state.dismissed = { front: [], back: [] };
   state.evidence = { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } };
   state.activeSide = "front";
   state.example = false;
@@ -2301,7 +2390,7 @@ function loadAssessment(a, thumbs) {
   $("#card-name").value = a.card.name || "";
   fillDetails(a.card);
   state.centering = { front: { ...a.centering.front }, back: { ...a.centering.back } };
-  state.defects = (a.defects || []).map((d) => ({ ...d }));
+  state.defects = (a.defects || []).filter((d) => d.confirmed !== false).map((d) => ({ ...d }));
   // Older saves have no inspection record: their areas start unchecked. Their centering was typed or
   // measured before saving (the grading engine's default when evidence is missing).
   const bySide = (x) => ({ front: [...((x || {}).front || [])], back: [...((x || {}).back || [])] });

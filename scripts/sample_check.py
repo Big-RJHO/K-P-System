@@ -166,7 +166,8 @@ def check_card(card: dict, base: Path, out: Path, skip_identify: bool, identify_
     # 3. grade from the scan's own flags (the key's grade is not given to the grader)
     t = time.time()
     obs = {"inspected": {"front": ["corners", "edges"], "back": ["corners", "edges"]},
-           "defects": [{k: x[k] for k in ("side", "location", "type", "severity")} for s in ("front", "back") for x in scan[s]["auto_defects"]]}
+           "defects": [{**{k: x[k] for k in ("side", "location", "type", "severity")}, "confirmed": False}   # photo flags nobody checked by eye
+                       for s in ("front", "back") for x in scan[s]["auto_defects"]]}
     (d / "obs.json").write_text(json.dumps(obs))
     p = run([PY, "scripts/photo_grade.py", "grade", str(d / "scan.json"), str(d / "obs.json"), "--json", str(d / "grade.json")])
     if p.returncode:
