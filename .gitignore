@@ -7,3 +7,4 @@ data/
 *.egg-info/
 standalone/dist/
 site/
+.claude/worktrees/
