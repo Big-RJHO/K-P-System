@@ -17,10 +17,14 @@ from synthetic import (
     H,
     W,
     add_edge_lines,
+    add_sparkle,
     card_mask_worn,
     make_card,
+    paint_corner_specks,
     paint_corner_whitening,
+    paint_edge_highlight,
     paint_edge_whitening,
+    paint_top_edge_specks,
     place_on_background,
 )
 
@@ -314,6 +318,64 @@ def test_corner_rounding_is_judged_against_the_cards_own_corners(tmp_path):
     assert "rounder than the card's other corners" in bl["note"]
     assert {d["location"] for d in ro["e"]["defects"] if d["type"] == "corner_softening"} == {"bottom_left"}
     assert {d["location"] for d in rw["e"]["defects"] if d["type"] == "corner_softening"} == set(locs)
+
+
+def test_corner_specks_on_a_dark_border(tmp_path):
+    """Lightly worn corner tips on a dark border show as specks of stock smaller than a pixel at the outline: they
+    lift a pixel only part of the way to white, so the bare-stock test (L >= 45) never fired on them. They are now
+    found, as micro whitening, when the corner shows clearly more of them than the middle of its edges does; the
+    same specks along the whole top edge (light catching the cut edge) don't make its corners worn."""
+    navy = make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240))
+    specked = paint_corner_specks(navy, "top_right", n=10, strength=0.6, seed=1)
+    everywhere = paint_top_edge_specks(specked, n=80)
+    rs, re_ = run([(place_on_background(c, 2), "auto") for c in (specked, everywhere)], tmp_path)
+    tr = corner(rs["e"], "top_right")
+    assert tr["likely"] and tr["severity"] == "micro" and tr["whitening"]["specks"]
+    assert "specks of whitening" in tr["note"]
+    assert {(d["location"], d["type"], d["severity"]) for d in rs["e"]["defects"]} == {("top_right", "corner_whitening", "micro")}
+    assert re_["e"]["defects"] == []
+
+
+def test_rim_between_card_and_background_keeps_corners_assessable(tmp_path):
+    """A thin band of a third colour hugging the outline (a shadow, a mat's edge; on the TAG scans, a left-over
+    sliver of the scanner's background) used to be taken for card, so the corner outline missed the card's edges
+    and the corner was "outline unclear". Card vs background is now decided by the nearer colour."""
+    navy = make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240))
+    [r] = run([(place_on_background(navy, 2, rim=((40, 110, 230), 2)), "auto")], tmp_path)
+    for c in r["e"]["corners"]:
+        assert c["assessable"], c
+        assert c["severity"] is None
+        assert abs(c["rounding"]["radius_px"] - 36) < 5
+    assert r["e"]["defects"] == []
+
+
+def test_border_texture_highlights_and_faint_bands_are_not_wear(tmp_path):
+    """Three things that read as edge whitening on graded scans of cards with no edge wear: foil sparkle or light
+    print dots (they turn up at every depth, not only at the edge), thin light pieces along much of an edge (light
+    catching the cut edge), and a band only a little lighter than the border. All are greyed out, except that the
+    brightest of the thin pieces is offered once for the edge (a worn edge can look the same); a deep patch of bare
+    stock on the highlighted edge is still found."""
+    navy = make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240))
+    slate = make_card(33, 36, 30, 31, border_bgr=(120, 85, 60), frame_bgr=(40, 220, 240))
+    photos = [
+        add_sparkle(navy),
+        paint_edge_whitening(paint_edge_highlight(navy, "top"), "top", 400, 40, 9, seed=7),
+        paint_edge_whitening(slate, "bottom", 300, 60, 5, seed=1, color=(150, 145, 140)),
+    ]
+    rs, rh, rf = run([(place_on_background(p, 2), "auto") for p in photos], tmp_path)
+    assert rs["e"]["defects"] == []
+    assert any("border's own texture" in x["note"] for x in rs["e"]["edges"])
+    top = likely_edges(rh["e"], "top")
+    [patch] = [x for x in top if x["start_px"] <= 400 + 6 and x["end_px"] >= 440 - 6]
+    assert patch["depth_mm"] > 0.6
+    [one] = [x for x in top if x is not patch]
+    assert "one candidate for the edge" in one["note"] and one["depth_mm"] <= 0.5
+    greyed = [x for x in rh["e"]["edges"] if x["side"] == "top" and not x["likely"]]
+    assert len(greyed) >= 5 and all("light catching the cut edge" in x["note"] for x in greyed)
+    assert {d["location"] for d in rh["e"]["defects"]} == {"top"} and len(rh["e"]["defects"]) == 2
+    [faint] = [x for x in rf["e"]["edges"] if x["side"] == "bottom"]
+    assert not faint["likely"] and "only a little lighter than the border" in faint["note"]
+    assert rf["e"]["defects"] == []
 
 
 def test_printed_mask_suppresses_candidates(tmp_path):
