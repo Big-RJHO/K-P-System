@@ -71,6 +71,15 @@
     // the cream rays that reach the edge at the same places on every copy sat 0.5-1.3 mm deep (median) and
     // scored 25-51; the wear candidates elsewhere sat 0.17-0.45 mm deep and scored 43-77.
     printDepthMm: 0.5, printScore: 55,
+    // A run that is only a little lighter than the border (median score below runScore) is greyed out: bare stock
+    // scores 45-65 against yellow and navy borders, and the wear candidates on the slab photos above scored 43-77.
+    // On a light border bare stock can't score that much (yellow: ~50 at most), so the bar is at most runCover of
+    // what bare stock would score there (headroom).
+    runScore: 40, runCover: 0.7,
+    // Border texture: the share of positions (within 2 mm of a run, or along the whole edge) where the same stock-like
+    // pixels turn up deeper in the band without touching the edge (foil sparkle, light print dots). At this rate or
+    // more a run is greyed out; for a corner, the share of its rays with such pixels further in.
+    speckleRate: 0.05,
     // Slab rail, sleeve lip or reflection: a thin bright line hugging the edge, even along much of its length.
     // Seen on nearly every slab photo of the PSA/TAG blind test; worn stock is patchy and varies in depth.
     railDepth: 6,            // px: reaches at most this deep (90th percentile) ...
@@ -78,6 +87,7 @@
     railRun: 0.2,            // such a run this long (fraction of the edge) is a line by itself
     railCover: 0.3,          // or such runs of at least railPieceMm together cover this fraction of the edge
     railPieceMm: 1.5,
+    edgeWide: 0.25,          // shallow whitening (railDepth) at this share of an edge's positions or more: a highlight
     // Severity from length along the edge and depth into the card (mm), same scale for corner whitening.
     sev: { major: [15, 1.0], moderate: [5, 0.6], minor: [1.5, 0.35] },
     // Corners
@@ -93,6 +103,10 @@
     roundNoise: 0.3,         // mm the relative excess must clear before the roundExcess scale starts
     roundPhotoTol: 1.2,
     roughPx: 3,              // MAD of the corner outline (px) above which it is called rough / frayed
+    // Specks of stock at a corner's outline (fleckLike): lighter than the card's own light tail (95th percentile of
+    // its texture next to the corner) and than the background by fleckDL, on at least fleckMinRays rays, and on a
+    // larger share of the corner than fleckBaseK x the share of the edges' middles that show it.
+    fleckDL: 10, fleckMinRays: 2, fleckBaseK: 2, fleckExcess: 0.05,
   };
 
   /* ---------------------------------------------------------------- colour */
@@ -255,6 +269,11 @@
   const whiteScore = (L, C, ref) => (L - ref.L) + 0.5 * (ref.C - C);
   const stockLike = (L, C, ref) => L - ref.L >= 4 && L >= T.stockL && C <= Math.max(T.stockC, 0.6 * ref.C) && whiteScore(L, C, ref) >= T.whiteScore;
   const headroomOf = (ref) => whiteScore(95, 3, ref);
+  // A fleck of bare stock smaller than a pixel: on a dark border it only lifts the pixel part of the way to white,
+  // so it can't pass the absolute stockL test. It still reads as lighter than both the border's own light tail
+  // (its print texture) and the background, and no more colourful than the border.
+  const fleckLike = (c, ref, lightTail, outL) =>
+    c.L >= Math.max(lightTail, outL) + T.fleckDL && c.C <= Math.max(T.stockC, ref.C) && whiteScore(c.L, c.C, ref) >= T.whiteScore;
   const clipped = (L, C) => L >= T.glareL && C <= T.glareC;
 
   function severityOf(lengthMm, depthMm) {
@@ -635,6 +654,10 @@
       const d1 = measured ? Math.max(ref1, Math.floor(borderPx - 4)) : ref1;
       for (let t = tA; t < tB; t += 4) for (let d = ref0; d <= d1; d += 2) idx.push(sidePix(g, side, t, d + edgeAt(t)));
       border = medLab(lab, idx);
+      border.lightTail = percentile(idx.map((i) => lab[i * 3]), 95);
+      const out = [];
+      for (let t = tA; t < tB; t += 4) for (let d = 4; d <= 8; d += 2) out.push(sidePix(g, side, t, edgeAt(t) - d));
+      border.outside = medLab(lab, out);
     }
 
     // Local border colour every 4 px (median over +-refHalf px along and ref0..ref1 in); follows lighting
@@ -650,9 +673,24 @@
     }
     const refAt = (t) => refs[Math.max(0, Math.min(refs.length - 1, Math.round((t - tA) / 4)))];
 
+    // How often the outline along the middle of this edge carries flecks lighter than the border's texture: a
+    // highlight along the whole edge (lighting catching the cut edge, a sleeve's lip) shows here as well as at
+    // the corners, wear at a corner doesn't. The corners are judged against this.
+    let fleckFrac = 0;
+    {
+      let hits = 0, cnt = 0;
+      for (let t = Math.round(len * 0.15); t < len * 0.85; t += 2) {
+        const e = edgeAt(t), ref = refAt(t);
+        cnt++;
+        for (let d = 0; d <= 2; d++) if (fleckLike(colorAt(lab, sidePix(g, side, t, d + e)), ref, border.lightTail, border.outside.L)) { hits++; break; }
+      }
+      fleckFrac = cnt ? hits / cnt : 0;
+    }
+
     const n = Math.max(0, tB - tA);
     const flag = new Uint8Array(n), depth = new Float32Array(n), score = new Float32Array(n), atEdge = new Uint8Array(n);
     const light = new Uint8Array(n), outsideLight = new Uint8Array(n), crossing = new Uint8Array(n), clip = new Float32Array(n);
+    const floating = new Uint8Array(n);
     for (let k = 0; k < n; k++) {
       const t = tA + k, e = edgeAt(t), ref = refAt(t);
       if (headroomOf(ref) < T.headroom) { light[k] = 1; continue; }
@@ -671,6 +709,18 @@
           if (clipped(c.L, c.C)) clips++;
         } else if (first >= 0 && ++gapRun > 1) break;
       }
+      // The same test away from the edge: stock-like pixels in the band that don't start at the edge. Wear starts
+      // at the edge; printing, foil sparkle or texture turns up at any depth, so this measures the border's own noise.
+      {
+        let fc = 0;
+        for (let d = Math.max(dIn + T.startBy + 1, last + 3); d <= band1; d++) {
+          const i = sidePix(g, side, t, d + e);
+          if (printedMask && printedMask[i]) continue;
+          const c = colorAt(lab, i);
+          if (stockLike(c.L, c.C, ref)) fc++;
+        }
+        floating[k] = fc >= T.minPixels ? 1 : 0;
+      }
       if (cnt >= T.minPixels) {
         flag[k] = 1; depth[k] = last + 1 - Math.max(0, -e); score[k] = sc / cnt; clip[k] = clips / cnt; atEdge[k] = first === dIn ? 1 : 0;
         // Is the photo just outside the card as light (glare, a sleeve's reflection, a light background)?
@@ -683,6 +733,9 @@
       }
     }
     const lightFrac = n ? light.reduce((a, b) => a + b, 0) / n : 1;
+    let fAll = 0, fN = 0, eAll = 0;
+    for (let k = 0; k < n; k++) if (!light[k]) { fN++; fAll += floating[k]; eAll += flag[k]; }
+    const floatFrac = fN ? fAll / fN : 0, edgeFrac = fN ? eAll / fN : 0;
 
     // Runs of marked positions along the edge (gaps of up to T.gap merged).
     const runsOf = (mark) => {
@@ -707,7 +760,10 @@
         hits++; ds.push(depth[q]); scs.push(score[q]); ol += outsideLight[q]; cr += crossing[q]; cl += clip[q]; ae += atEdge[q];
       }
       const dMed = median(ds);
+      let fl = 0, fn = 0;
+      for (let q = Math.max(0, s - 24); q <= Math.min(n - 1, e2 + 24); q++) if (!light[q]) { fn++; fl += floating[q]; }
       return {
+        floatLocal: fn ? fl / fn : 0,
         t0: tA + s, t1: tA + e2 + 1, length: e2 - s + 1, depth: percentile(ds, 80), score: median(scs),
         coherence: hits / (e2 - s + 1), outsideLight: ol / hits, crossing: cr / hits, clipped: cl / hits,
         // shape across the edge: how deep typically / at most, how even along the run, how often it starts at the edge
@@ -722,7 +778,7 @@
       for (let q = run.t0 - tA; q < run.t1 - tA; q++) if (flag[q] && depth[q] >= run.depthMed + 2) mark[q] = 1;
       return runsOf(mark);
     };
-    return { side, len, tA, tB, runs, deeperIn, refs, refAt, edgeAt, border, measured, borderPx, lightFrac, band1 };
+    return { side, len, tA, tB, runs, deeperIn, refs, refAt, edgeAt, border, measured, borderPx, lightFrac, band1, floatFrac, edgeFrac, fleckFrac };
   }
 
   /* ---------------------------------------------------------------- corners */
@@ -754,9 +810,11 @@
     // Whitening is only judged where the card next to the corner is dark or colourful enough on both sides.
     const lightNear = Math.min(...cr.map(headroomOf)) < T.headroom || V.lightFrac > T.lightSide || Hh.lightFrac > T.lightSide;
     const canWhiten = !lightNear && !bgLight;
+    // Card or not by the nearer of the two colours: a thin rim of a third colour between card and background (a
+    // shadow, a coloured mat's edge, the card's side) goes to whichever it is closer to rather than always to the card.
     const isCard = (i) => {
       const c = colorAt(lab, i);
-      if (dE(c, bg) >= 0.5 * contrast) return true;
+      if (dE(c, bg) >= 0.5 * contrast && dE(c, card) <= dE(c, bg)) return true;
       return canWhiten && stockLike(c.L, c.C, card);
     };
 
@@ -804,10 +862,42 @@
           else if (!started && q > 1.5) break;
         }
       }
+      // The same test further in, not joined to the outline: the card's own light texture (as for the edges).
+      let floating = 0;
+      if (canWhiten) {
+        for (let q = Math.max(4, wd + 2); q <= 12; q += 1) {
+          const i = at(rhoB - q);
+          if (printedMask && printedMask[i]) continue;
+          const col = colorAt(lab, i);
+          if (stockLike(col.L, col.C, card)) floating++;
+        }
+      }
       const [x, y] = cornerXY(g, ci, u0 + R0 - rhoB * c, v0 + R0 - rhoB * s);
-      rays.push({ phi, valid: true, rho: rhoB, whiteDepth: wd >= 1.5 ? wd : 0, score: wd >= 1.5 ? sc / (wd * 2) : 0, clipped: clips > 0, x, y });
+      rays.push({ phi, valid: true, rho: rhoB, whiteDepth: wd >= 1.5 ? wd : 0, score: wd >= 1.5 ? sc / (wd * 2) : 0, clipped: clips > 0, x, y, at, floating: floating >= T.minPixels });
     }
     const valid = rays.filter((r) => r.valid);
+
+    // Flecks of stock right at the outline (see fleckLike), against the card's own texture next to the corner and
+    // against the same test along the middle of the two edges (a highlight along a whole edge isn't corner wear).
+    let fleckRays = 0, fleckN = 0, fleckBase = 0;
+    if (canWhiten && valid.length >= 10) {
+      const tex = [];
+      for (const r of valid) for (let q = 6; q <= 14; q += 2) tex.push(lab[r.at(r.rho - q) * 3]);
+      const lightTail = percentile(tex, 95);
+      for (const r of valid) {
+        if (r.phi < 6 || r.phi > 84) continue;
+        fleckN++;
+        for (let q = -0.5; q <= 1.5; q += 0.5) {
+          const i = r.at(r.rho - q);
+          if (printedMask && printedMask[i]) continue;
+          if (fleckLike(colorAt(lab, i), card, lightTail, bg.L)) { fleckRays++; r.fleck = true; break; }
+        }
+      }
+      fleckBase = Math.max(V.fleckFrac, Hh.fleckFrac);
+    }
+    const fleckFrac = fleckN ? fleckRays / fleckN : 0;
+    const speckle = valid.length ? valid.filter((r) => r.floating).length / valid.length : 0;
+    const fleckExcess = fleckFrac - T.fleckBaseK * fleckBase;
 
     // Radius that explains each mid-corner ray's outline point: a circle tangent to both edges.
     const rhoFor = (R, c, s) => { const k = R0 - R; return k * (c + s) + Math.sqrt(Math.max(0, k * k * ((c + s) ** 2 - 2) + R * R)); };
@@ -841,7 +931,7 @@
     const wLen = wFrac * arcPx, wDepth = white.length ? median(white.map((r) => r.whiteDepth)) : 0;
     const wScore = white.length ? median(white.map((r) => r.score)) : 0;
 
-    return { ci, card, bg, contrast, bgLight, lightNear, canWhiten, selfCheck, rays, valid, radius, rough, cutLook, white, wFrac, wLen, wDepth, wScore, u0, v0 };
+    return { ci, card, bg, contrast, bgLight, lightNear, canWhiten, selfCheck, rays, valid, radius, rough, cutLook, white, wFrac, wLen, wDepth, wScore, u0, v0, fleckRays, fleckFrac, fleckBase, fleckExcess, speckle };
   }
 
   /* ---------------------------------------------------------------- edges + corners */
@@ -889,6 +979,7 @@
         assessable, reason,
         border: { L: r1(s.border.L), a: r1(s.border.a), b: r1(s.border.b), C: r1(s.border.C) },
         frame_measured: !!s.measured, light_fraction: r2(s.lightFrac),
+        ...(opts.debug ? { debug: { fleckFrac: r3(s.fleckFrac), edgeFrac: r3(s.edgeFrac), floatFrac: r3(s.floatFrac) } } : {}),
       };
       if (!assessable) {
         const [xa, ya] = sideXY(g, side, s.tA, 0), [xb, yb] = sideXY(g, side, s.tB, 12);
@@ -902,6 +993,7 @@
       const lineLike = (run) => run.depthHi <= T.railDepth && run.even >= T.railEven && run.atEdge >= T.railEven && run.coherence >= T.railEven;
       const cover = s.runs.filter((r) => lineLike(r) && r.length >= T.railPieceMm * g.pxPerMm).reduce((a, r) => a + r.length, 0) / Math.max(1, span);
       const queue = s.runs.map((run) => ({ run, under: false }));
+      const sideWide = [];
       for (let qi = 0; qi < queue.length; qi++) {
         const { run, under } = queue[qi];
         const notes = [];
@@ -927,6 +1019,26 @@
           conf *= 0.35;  // below candidateConf even at full confidence: shown greyed out, to check by eye
           notes.push("reaches well into the card without being as bright as bare stock: more like light printing meeting the edge than wear");
         }
+        // Shallow whitening at a quarter or more of the edge's positions, in pieces: light catching the cut edge
+        // all along it (a scanner's or lamp's highlight), the patchy cousin of the rail line below. As with a
+        // rail, only stretches reaching deeper than such a line can stand out as wear.
+        // A worn edge can look the same (specks of stock all along it), so the strongest piece is still offered,
+        // once per edge (below).
+        const wide = !under && !rail && s.edgeFrac >= T.edgeWide && run.depthHi <= T.railDepth;
+        const textured = !under && Math.max(run.floatLocal, s.floatFrac) >= T.speckleRate;
+        const faint = !under && run.score < Math.min(T.runScore, T.runCover * headroomOf(s.refAt((run.t0 + run.t1) / 2)));
+        let wideConf = null;
+        if (wide) {
+          if (!textured && !faint) wideConf = conf;
+          conf = Math.min(conf, 0.5 * T.candidateConf);
+          notes.push(`thin light pieces along ${Math.round(100 * s.edgeFrac)}% of this edge: more likely light catching the cut edge than wear; check by eye`);
+        } else if (textured) {
+          conf = Math.min(conf, 0.9 * T.candidateConf);
+          notes.push("light specks turn up as often away from the edge here (foil, print texture): more like the border's own texture than wear");
+        } else if (faint) {
+          conf = Math.min(conf, 0.9 * T.candidateConf);
+          notes.push("only a little lighter than the border, not as light as bare stock: more like printing, texture or a soft edge than wear");
+        }
         if (rail) {
           conf = Math.min(conf, 0.5 * T.candidateConf);
           notes.push(`a thin, even bright line right at the card's outline along ${Math.round(100 * Math.max(cover, run.length / span))}% of the edge: more likely a slab rail, sleeve edge or reflection than wear; check by eye`);
@@ -941,12 +1053,24 @@
           severity, confidence: r2(conf), likely: conf >= T.candidateConf, reflection: rail,
           note: `${rail ? "Bright line (reflection?)" : type === "edge_chipping" ? "Chip" : "Whitening"} ${lengthMm} mm long, ${depthMm} mm deep${notes.length ? `; ${notes.join("; ")}` : ""}.`,
         };
-        if (opts.debug) item.debug = { coherence: r2(run.coherence), outsideLight: r2(run.outsideLight), crossing: r2(run.crossing), clipped: r2(run.clipped), even: r2(run.even), atEdge: r2(run.atEdge), depthMed: r1(run.depthMed), score: r1(run.score), measured: !!s.measured, under };
+        if (wideConf !== null && wideConf >= T.candidateConf) sideWide.push({ item, conf: wideConf, score: run.score, notes });
+        if (opts.debug) item.debug = { coherence: r2(run.coherence), outsideLight: r2(run.outsideLight), crossing: r2(run.crossing), clipped: r2(run.clipped), even: r2(run.even), atEdge: r2(run.atEdge), depthMed: r1(run.depthMed), score: r1(run.score), measured: !!s.measured, under, floatLocal: r2(run.floatLocal), floatFrac: r3(s.floatFrac), edgeFrac: r3(s.edgeFrac), refL: r1(s.refAt(run.t0).L), refC: r1(s.refAt(run.t0).C) };
         edges.push(item);
         const [xa, ya] = sideXY(g, side, run.t0, run.e + T.band0), [xb, yb] = sideXY(g, side, run.t1, run.e + run.depth + 1);
-        overlays.push({ type: "rect", kind: "edge", severity, confidence: item.confidence, likely: item.likely, x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.max(1, Math.abs(xb - xa)), h: Math.max(1, Math.abs(yb - ya)), label: `${side} ${rail ? "reflection" : severity}` });
+        item.overlay = { type: "rect", kind: "edge", severity, confidence: item.confidence, likely: item.likely, x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.max(1, Math.abs(xb - xa)), h: Math.max(1, Math.abs(yb - ya)), label: `${side} ${rail ? "reflection" : severity}` };
+        overlays.push(item.overlay);
+      }
+      // Of the thin pieces along a highlighted edge, the brightest that would have counted is offered as one candidate.
+      if (sideWide.length) {
+        const best = sideWide.reduce((a, b) => (b.score > a.score ? b : a));
+        const it = best.item, pct = Math.round(100 * s.edgeFrac);
+        it.confidence = it.overlay.confidence = r2(best.conf);
+        it.likely = it.overlay.likely = true;
+        it.note = it.note.replace(/thin light pieces along \d+% of this edge: more likely light catching the cut edge than wear; check by eye/,
+          `the brightest of thin light pieces along ${pct}% of this edge (light catching the cut edge, or wear all along it): one candidate for the edge; check by eye`);
       }
     }
+    for (const e of edges) delete e.overlay;
     edges.sort((a, b) => b.confidence - a.confidence);
 
     const cornerInfo = [0, 1, 2, 3].map((ci) => analyseCorner(lab, g, ci, sideInfo, mask));
@@ -985,11 +1109,25 @@
       if (!c.canWhiten) {
         notes.push(c.bgLight ? "background as light as bare stock: whitening can't be told apart" : "white/light border or artwork next to the corner: whitening can't be told apart");
       } else {
-        const sev = c.white.length >= 2 ? severityOf(mm(c.wLen), mm(c.wDepth)) : null;
+        let sev = c.white.length >= 2 ? severityOf(mm(c.wLen), mm(c.wDepth)) : null;
         let conf = 0.3 + 0.7 * clamp01((c.wScore - T.whiteScore) / 30);
+        const speckle = Math.max(c.speckle, sideInfo[vs].floatFrac, sideInfo[hs].floatFrac);
+        // As for the edges: light pixels that turn up just as often further into the corner are the card's own
+        // texture, and a band only a little lighter than the border is more like printing than bare stock.
+        if (sev && speckle >= T.speckleRate) { sev = null; notes.push("light specks turn up as often further into the corner (foil, print texture): not counted as whitening"); }
+        else if (sev && c.wScore < Math.min(T.runScore, T.runCover * headroomOf(c.card))) { sev = null; notes.push("the light band at the outline is only a little lighter than the border: not counted as whitening"); }
         const clipFrac = c.white.length ? c.white.filter((r) => r.clipped).length / c.white.length : 0;
         if (clipFrac > 0.3) { conf *= 1 - 0.6 * clipFrac; notes.push("over-exposed (glare)"); }
-        whitening = { fraction: r2(c.wFrac), length_mm: mm(c.wLen), depth_mm: mm(c.wDepth), contrast: r1(c.wScore), severity: sev, confidence: sev ? r2(conf) : 0 };
+        let flecks = false;
+        // Only next to a dark card (a part-covered pixel on a light border barely changes) without light texture of its own.
+        if (!sev && c.card.L < T.stockL && speckle < T.speckleRate && c.fleckRays >= T.fleckMinRays && c.fleckExcess >= T.fleckExcess) {
+          // Specks of stock too small to fill a pixel: "visible only under magnification", so micro.
+          flecks = true;
+          sev = "micro";
+          conf = 0.3 + 0.7 * clamp01(c.fleckExcess / 0.2);
+          notes.push(`light specks at the outline along ${Math.round(c.fleckFrac * 100)}% of the corner (the middle of its edges: ${Math.round(c.fleckBase * 100)}%)`);
+        }
+        whitening = { fraction: r2(flecks ? c.fleckFrac : c.wFrac), length_mm: mm(flecks ? c.fleckFrac * (Math.PI / 2) * g.R : c.wLen), depth_mm: mm(c.wDepth), contrast: r1(c.wScore), severity: sev, confidence: sev ? r2(conf) : 0, specks: flecks };
       }
       const parts = [whitening && whitening.severity ? whitening : null, rounding && rounding.severity ? rounding : null].filter(Boolean);
       let severity = null, conf = 0;
@@ -1001,7 +1139,7 @@
       if (!sideInfo[vs].measured || !sideInfo[hs].measured) { conf *= 0.7; notes.push("no plain border here: artwork can look like wear"); }
       if (c.selfCheck < 0.6) notes.push("the outline here doesn't follow the card edge reliably");
       const desc = [];
-      if (whitening && whitening.severity) desc.push(`whitening along ${Math.round(c.wFrac * 100)}% of the corner (${whitening.depth_mm} mm deep)`);
+      if (whitening && whitening.severity) desc.push(whitening.specks ? "specks of whitening at the corner's outline" : `whitening along ${Math.round(c.wFrac * 100)}% of the corner (${whitening.depth_mm} mm deep)`);
       if (rounding && rounding.severity) {
         const against = vsOwn ? `the other corners' median ${mm(ownR)} mm; a new corner is ${mm(g.R)} mm` : `a new corner's ${mm(g.R)} mm`;
         desc.push(`rounder than ${vsOwn ? "the card's other corners" : "a new corner"} (radius ${mm(c.radius)} mm vs ${against})${rounding.rough ? ", ragged outline" : ""}`);
@@ -1010,10 +1148,12 @@
         location: loc, assessable, reason, whitening, rounding, severity, confidence: r2(conf), likely: !!severity && conf >= T.candidateConf,
         note: (desc.length ? `${desc.join("; ")}` : "no wear above threshold") + (notes.length ? `; ${notes.join("; ")}` : "") + ".",
       };
-      if (opts.debug) item.debug = { contrast: r1(c.contrast), selfCheck: r2(c.selfCheck), valid: c.valid.length, bg: [r1(c.bg.L), r1(c.bg.C)], card: [r1(c.card.L), r1(c.card.C)], cutLook: r2(c.cutLook) };
+      if (opts.debug) item.debug = { contrast: r1(c.contrast), selfCheck: r2(c.selfCheck), valid: c.valid.length, bg: [r1(c.bg.L), r1(c.bg.C)], card: [r1(c.card.L), r1(c.card.C)], cutLook: r2(c.cutLook), fleckRays: c.fleckRays, fleckFrac: r2(c.fleckFrac), fleckBase: r2(c.fleckBase), speckle: r2(c.speckle), wScore: r1(c.wScore), measured: !!(sideInfo[vs].measured && sideInfo[hs].measured) };
       corners.push(item);
       if (severity) {
-        const pts = (c.white.length >= 2 && whitening && whitening.severity && !(rounding && rounding.severity) ? c.white : c.valid).map((r) => [r1(r.x), r1(r.y)]);
+        const onlyWhite = whitening && whitening.severity && !(rounding && rounding.severity);
+        const specks = onlyWhite && whitening.specks ? c.valid.filter((r) => r.fleck) : [];
+        const pts = (specks.length >= 2 ? specks : onlyWhite && c.white.length >= 2 ? c.white : c.valid).map((r) => [r1(r.x), r1(r.y)]);
         overlays.push({ type: "polyline", kind: "corner", severity, confidence: item.confidence, likely: item.likely, points: pts, label: `${pretty(loc)} ${severity}` });
       }
     }

@@ -38,10 +38,11 @@ def card_mask(radius: int = 36) -> np.ndarray:
 
 
 def place_on_background(
-    card: np.ndarray, angle: float = 3.0, seed: int = 1, bg: int = 35, mask: np.ndarray | None = None
+    card: np.ndarray, angle: float = 3.0, seed: int = 1, bg: int = 35, mask: np.ndarray | None = None, rim=None
 ) -> np.ndarray:
     """Rotate the card and paste it onto a larger, noisy dark background, like a photo.
-    `mask` replaces the card's shape (default: `card_mask()`), e.g. with worn corners."""
+    `mask` replaces the card's shape (default: `card_mask()`), e.g. with worn corners.
+    `rim` = (bgr, width): a band of a third colour hugging the card's outline outside it (a shadow or a mat's edge)."""
     rng = np.random.default_rng(seed)
     bh, bw = int(H * 1.5), int(W * 1.6)
     bg = np.clip(rng.normal(bg, 10, (bh, bw, 3)), 0, 255).astype(np.uint8)
@@ -51,6 +52,10 @@ def place_on_background(
     matrix[1, 2] += center[1] - H / 2
     warped = cv2.warpAffine(card, matrix, (bw, bh), flags=cv2.INTER_CUBIC, borderValue=(0, 0, 0))
     mask = cv2.warpAffine(card_mask() if mask is None else mask, matrix, (bw, bh), flags=cv2.INTER_NEAREST)
+    if rim is not None:
+        color, width = rim
+        k = 2 * width + 1
+        bg[cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))) > 0] = color
     bg[mask > 0] = warped[mask > 0]
     return bg
 
@@ -156,6 +161,55 @@ def paint_corner_whitening(card: np.ndarray, corner: str, depth: int = 6, radius
             y = int(round(cy - sy * rr * np.sin(ang)))
             if 0 <= x < W and 0 <= y < H:
                 out[y, x] = color
+    return out
+
+
+def paint_corner_specks(card: np.ndarray, corner: str, n: int = 8, strength: float = 0.6, radius: int = 36, seed: int = 0) -> np.ndarray:
+    """Specks of exposed stock smaller than a pixel on a rounded corner's outline: `n` single pixels on the arc
+    blended `strength` of the way to white (a lightly worn corner tip, seen at ~12 px/mm)."""
+    rng = np.random.default_rng(seed)
+    out = card.copy()
+    sx, sy = {"top_left": (1, 1), "top_right": (-1, 1), "bottom_right": (-1, -1), "bottom_left": (1, -1)}[corner]
+    x0 = 0 if sx > 0 else W - 1
+    y0 = 0 if sy > 0 else H - 1
+    cx, cy = x0 + sx * radius, y0 + sy * radius
+    for ang in rng.uniform(0.15, np.pi / 2 - 0.15, n):
+        x = int(round(cx - sx * (radius - 1) * np.cos(ang)))
+        y = int(round(cy - sy * (radius - 1) * np.sin(ang)))
+        out[y, x] = np.clip(out[y, x] * (1 - strength) + 245 * strength, 0, 255).astype(np.uint8)
+    return out
+
+
+def paint_top_edge_specks(card: np.ndarray, n: int = 80, strength: float = 0.6, seed: int = 2) -> np.ndarray:
+    """The same sub-pixel specks as `paint_corner_specks`, scattered along the middle of the top edge (light
+    catching the whole cut edge rather than wear at a corner)."""
+    rng = np.random.default_rng(seed)
+    out = card.copy()
+    for x in rng.integers(80, W - 80, n):
+        out[0, x] = np.clip(out[0, x] * (1 - strength) + 245 * strength, 0, 255).astype(np.uint8)
+    return out
+
+
+def add_sparkle(card: np.ndarray, n: int = 8000, seed: int = 3, color=(225, 228, 230)) -> np.ndarray:
+    """Light 2 x 2 px specks all over the card, at every depth from the edge (holo foil sparkle, light print dots)."""
+    rng = np.random.default_rng(seed)
+    out = card.copy()
+    for _ in range(n):
+        x, y = int(rng.integers(0, W)), int(rng.integers(0, H))
+        out[y : y + 2, x : x + 2] = color
+    return out
+
+
+def paint_edge_highlight(card: np.ndarray, side: str = "top", depth: int = 3, seed: int = 4) -> np.ndarray:
+    """Thin light pieces (8-30 px, up to `depth` px deep) over about half of an edge, gaps between them: light
+    catching the cut edge along its length (a scanner's or lamp's highlight), not wear."""
+    rng = np.random.default_rng(seed)
+    out, t = card, 60
+    length = W if side in ("top", "bottom") else H
+    while t < length - 100:
+        n = int(rng.integers(8, 30))
+        out = paint_edge_whitening(out, side, t, n, depth, seed=t)
+        t += n + int(rng.integers(5, 25))
     return out
 
 
