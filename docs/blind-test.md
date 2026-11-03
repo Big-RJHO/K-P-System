@@ -212,3 +212,30 @@ python scripts/photo_grade.py scan FRONT.jpg BACK.jpg --out OUT   # add --angled
 python scripts/photo_grade.py grade OUT/scan.json OBS.json --json RESULT.json
 python scripts/score_blind_test.py KEY.json RESULTS_DIR --list
 ```
+
+## Resolution experiment: would close-up photos help? (2026-11-03)
+
+Question: does the existing corner/edge check find TAG's corner and edge DINGs better when it sees the card
+sharper? Run with `tools/tag/resexp.py` on the full-size TAG scans in the research database (data outside this
+repo), split by card design into dev-tune (316 certs) and dev-check (148). The sealed test set was not used.
+
+Arms: A is today's app (photo downsized to 2400 px, card at about 12 px/mm); B, C, D run the same detector on the
+full-size scan at about 25, 40 and 69 px/mm. Score per corner/edge area = the app's own candidate confidence,
+fixed before any result. Decision rule, also fixed in advance: build close-ups only if the best sharper arm
+(chosen on dev-tune) beats A's corner AUC by at least 0.10 on dev-check, with the 95% card-grouped bootstrap
+interval above zero.
+
+| Corner AUC change vs A | dev-tune | dev-check |
+|---|---|---|
+| B, ~25 px/mm (chosen) | −0.013 [−0.037, +0.007] | −0.008 [−0.049, +0.031] |
+| C, ~40 px/mm | −0.042 [−0.066, −0.020] | −0.036 [−0.084, 0.000] |
+| D, ~69 px/mm | −0.020 [−0.042, 0.000] | −0.026 [−0.065, +0.021] |
+
+A's own corner AUC is about 0.62 and edge AUC about 0.52–0.55. Sharper arms flag fewer clean edges (dev-check
+11.4% → 7.5–9.1%) but also find fewer flagged ones; corner recall at 10% false positives drops (0.34 → 0.26–0.31).
+
+**Result: the gate is not met, so close-up capture is not built.** On these scans, resolution is not what limits
+the detector. What it points at instead (to be tested, not assumed): TAG's corner/edge DINGs may be hard to see in
+flat scanner images at all, TAG's location names may not map onto the app's areas, or the detector's whitening
+and rounding measures don't capture what TAG marks. TAG scans are flat and evenly lit, so this is a best case for
+sharpness; it says nothing about angled-light photos.
