@@ -58,8 +58,10 @@ def split_certs(root: Path, split: str, allow_test: bool, certs_file: str = ""):
     if split == "test" and not allow_test:
         sys.exit("refusing the sealed test split without --allow-test")
     s = json.loads((root / "splits.json").read_text())
-    members = s.get("membership", s.get("splits"))[split]
-    return sorted(members if isinstance(members, list) else members.keys())
+    certs = sorted(c for c, sp in s["membership"].items() if sp == split)   # membership: cert -> split
+    if not certs:
+        sys.exit(f"no certs in split {split!r}; splits are {sorted(set(s['membership'].values()))}")
+    return certs
 
 
 # ---------------------------------------------------------------- labels from TAG's DING list
