@@ -18,8 +18,6 @@ import cv2
 import numpy as np
 
 BG = (24, 24, 26)
-data, out = Path(sys.argv[1]), Path(sys.argv[2])
-certs = sys.argv[3:] or sorted(d.name for d in data.iterdir() if d.is_dir() and (d / "front.jpg").exists())
 
 
 def prep(img: np.ndarray) -> np.ndarray:
@@ -39,13 +37,20 @@ def prep(img: np.ndarray) -> np.ndarray:
     return cv2.copyMakeBorder(work, m, m, m, m, cv2.BORDER_CONSTANT, value=BG)
 
 
-for cert in certs:
-    (out / cert).mkdir(parents=True, exist_ok=True)
-    for side in ("front", "back"):
-        src = data / cert / f"{side}.jpg"
-        img = cv2.imread(str(src), cv2.IMREAD_COLOR) if src.exists() else None
-        if img is None:
-            print(cert, side, "missing")
-            continue
-        cv2.imwrite(str(out / cert / f"{side}.jpg"), prep(img), [cv2.IMWRITE_JPEG_QUALITY, 92])
-    print(cert, "ok")
+def main() -> None:
+    data, out = Path(sys.argv[1]), Path(sys.argv[2])
+    certs = sys.argv[3:] or sorted(d.name for d in data.iterdir() if d.is_dir() and (d / "front.jpg").exists())
+    for cert in certs:
+        (out / cert).mkdir(parents=True, exist_ok=True)
+        for side in ("front", "back"):
+            src = data / cert / f"{side}.jpg"
+            img = cv2.imread(str(src), cv2.IMREAD_COLOR) if src.exists() else None
+            if img is None:
+                print(cert, side, "missing")
+                continue
+            cv2.imwrite(str(out / cert / f"{side}.jpg"), prep(img), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        print(cert, "ok")
+
+
+if __name__ == "__main__":
+    main()

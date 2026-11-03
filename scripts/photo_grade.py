@@ -53,7 +53,7 @@ const out = jobs.map((j) => {
   const img = { width: j.width, height: j.height, data: new Uint8ClampedArray(fs.readFileSync(j.path)) };
   const scan = j.scale === 1 ? V.scan(img, "auto") : V.scan(img, "auto", null, { scale: j.scale });
   const quality = I.quality(img, scan);
-  const check = I.edgesAndCorners(scan, { quality, face: j.side });
+  const check = I.edgesAndCorners(scan, { quality, face: j.side, debug: !!j.debug });
   fs.writeFileSync(j.path + ".warped", Buffer.from(scan.warped.data.buffer));
   const { warped, ...rest } = scan;
   return { side: j.side, scan: rest, quality, check };
@@ -72,12 +72,12 @@ def load(path: str, max_side: int = MAX_SIDE) -> np.ndarray:
     return img
 
 
-def run_vision(images: dict[str, np.ndarray], tmp: Path, scale: float = 1) -> list[dict]:
+def run_vision(images: dict[str, np.ndarray], tmp: Path, scale: float = 1, debug: bool = False) -> list[dict]:
     jobs = []
     for side, img in images.items():
         p = tmp / f"{side}.rgba"
         p.write_bytes(cv2.cvtColor(img, cv2.COLOR_BGR2RGBA).tobytes())
-        jobs.append({"side": side, "path": str(p), "width": img.shape[1], "height": img.shape[0], "scale": scale})
+        jobs.append({"side": side, "path": str(p), "width": img.shape[1], "height": img.shape[0], "scale": scale, "debug": debug})
     script = NODE_SCRIPT % (json.dumps(str(ROOT / "standalone/src/vision.js")), json.dumps(str(ROOT / "standalone/src/inspect.js")))
     res = subprocess.run(["node", "-e", script], input=json.dumps(jobs), capture_output=True, text=True, check=True)
     return json.loads(res.stdout)
@@ -163,7 +163,11 @@ def cmd_scan(args) -> None:
     if args.scale <= 0:
         sys.exit("--scale must be positive")
     images = {"front": load(args.front, args.max_side), "back": load(args.back, args.max_side)}
-    results = run_vision(images, out, args.scale)
+    results = run_vision(images, out, args.scale, debug=bool(args.details))
+    if args.details:  # every edge/corner candidate with its measurements (debug on), for offline analysis
+        Path(args.details).write_text(json.dumps({r["side"]: {k: v for k, v in r["check"].items() if k != "overlays"}
+                                                 | {"quality": {k: v for k, v in r["quality"].items() if k != "overlays"}}
+                                                 for r in results}))
     # the zoomed corner / edge crops cover the same part of the card at any --scale
     crop, depth = round(160 * args.scale), round(44 * args.scale)
     zc, ze = max(1, round(3 / args.scale)), max(1, round(2 / args.scale))
@@ -377,6 +381,7 @@ def main() -> None:
     s.add_argument("--max-side", type=int, default=MAX_SIDE,
                    help=f"downsize photos to at most this many px on the long side first (default {MAX_SIDE}, as the "
                         "app; 0 = keep full resolution)")
+    s.add_argument("--details", help="also write every edge/corner candidate with its measurements to this JSON file")
     s.set_defaults(fn=cmd_scan)
     g = sub.add_parser("grade")
     g.add_argument("scan"); g.add_argument("obs"); g.add_argument("--json")
