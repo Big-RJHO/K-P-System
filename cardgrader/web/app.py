@@ -12,6 +12,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from .. import criteria_loader
 from ..engine import grade_all
@@ -82,14 +83,8 @@ def criteria() -> dict:
     }
 
 
-@app.post("/api/scan")
-async def scan(file: UploadFile = File(...), mode: str = Form("auto")) -> dict:
-    """Find the card in an uploaded scan or photo and measure its borders."""
-    if mode not in ("auto", "cropped"):
-        raise HTTPException(422, "mode must be 'auto' or 'cropped'")
-    data = await file.read()
-    if len(data) > MAX_UPLOAD:
-        raise HTTPException(413, "image too large (25 MB max)")
+def _analyse_scan(data: bytes, mode: str) -> dict:
+    """Decode, find, flatten and measure the card, and encode the previews (CPU-bound: run in a thread)."""
     try:
         img = decode_image(data)
     except ValueError as exc:
@@ -121,6 +116,21 @@ async def scan(file: UploadFile = File(...), mode: str = Form("auto")) -> dict:
             "per_side": {s: round(x.confidence, 3) for s, x in e.items()},
         },
     }
+
+
+@app.post("/api/scan")
+async def scan(file: UploadFile = File(...), mode: str = Form("auto")) -> dict:
+    """Find the card in an uploaded scan or photo and measure its borders."""
+    if mode not in ("auto", "cropped"):
+        raise HTTPException(422, "mode must be 'auto' or 'cropped'")
+    # Read at most one byte past the limit, so an oversized upload is rejected without reading all of it.
+    # This bounds what this endpoint reads; it does not bound multipart parsing (which has already spooled
+    # the upload) or the decoded image size.
+    data = await file.read(MAX_UPLOAD + 1)
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, "image too large (25 MB max)")
+    # Image processing is CPU-bound: run it in the thread pool so the event loop keeps serving requests.
+    return await run_in_threadpool(_analyse_scan, data, mode)
 
 
 @app.post("/api/grade", response_model=GradeReport)

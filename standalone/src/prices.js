@@ -23,8 +23,29 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
+  /* ------------------------------------------------------------- request deadline (net.js) */
+
+  // The shared helper: required next to this file in Node, the page's global in the browser. Without it
+  // (this file loaded alone) requests still work, only without a deadline.
+  function netLib() {
+    try { if (typeof require === "function") return require("./net.js"); } catch (err) { /* not next to it */ }
+    const g = typeof self !== "undefined" ? self : typeof globalThis !== "undefined" ? globalThis : {};
+    return (g && g.Net) || null;
+  }
+  async function fetchJSON(url, opts) {
+    const N = netLib();
+    if (N) return N.fetchJSON(url, opts);
+    const { timeoutMs, fetch: F, ...init } = opts;
+    const res = await F(url, init);
+    let body = null;
+    try { body = await res.json(); } catch (err) { body = null; }
+    return { res, ok: !!res.ok, status: res.status, body };
+  }
+  const isTimeout = (err) => !!err && (err.timeout === true || err.name === "TimeoutError");
+
   const BASE = "https://www.pricecharting.com";
   const MIN_GAP_MS = 1100;             // PriceCharting allows one call per second
+  const TIMEOUT_MS = 15000;            // per request, headers and body together
   const CACHE_MS = 24 * 3600 * 1000;   // its prices are regenerated once a day
   const CACHE_PREFIX = "kp.pc.";
 
@@ -158,28 +179,37 @@
 
   /* ------------------------------------------------------------- network */
 
-  let lastCall = 0;
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Request starts are reserved one slot at a time, MIN_GAP_MS apart, at the moment each call asks: callers
+  // arriving together get successive slots instead of computing the same delay and waking together. A slot
+  // is used whether its request succeeds or fails, so a failure never holds up the reservations after it.
+  let nextSlot = 0;
+  const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
+
+  async function waitForSlot(clock) {
+    const start = Math.max(clock.now(), nextSlot);
+    nextSlot = start + MIN_GAP_MS;
+    // Timers may fire a millisecond early; never start before the reserved time.
+    for (let left = start - clock.now(); left > 0; left = start - clock.now()) await clock.sleep(left);
+  }
 
   async function call(path, params, opts) {
     const F = opts.fetch || (typeof fetch === "function" ? fetch : null);
     if (!F) throw new Error("No network available.");
-    const gap = lastCall + MIN_GAP_MS - Date.now();
-    if (gap > 0) await wait(gap);
-    lastCall = Date.now();
+    await waitForSlot(opts.clock || realClock);
     const qs = Object.entries({ t: opts.token, ...params }).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
-    let res;
+    const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
+    let r;
     try {
-      res = await F(`${BASE}${path}?${qs}`, { headers: { Accept: "application/json" } });
+      r = await fetchJSON(`${BASE}${path}?${qs}`, { fetch: F, timeoutMs, headers: { Accept: "application/json" } });
     } catch (err) {
+      if (isTimeout(err)) throw new Error(`PriceCharting didn't answer within ${Math.round(timeoutMs / 1000)} seconds. Try again.`);
       throw new Error("PriceCharting couldn't be reached (offline, or this page isn't allowed to contact it).");
     }
-    let body = null;
-    try { body = await res.json(); } catch (err) { body = null; }
-    if (!res.ok || !body || body.status !== "success") {
+    const body = r.body;
+    if (!r.ok || !body || body.status !== "success") {
       const msg = body && (body["error-message"] || body.error);
       if (/token/i.test(msg || "")) throw new Error("PriceCharting didn't accept the API token. Check it on your PriceCharting subscription page (API/Download).");
-      throw new Error(`PriceCharting answered with an error${msg ? `: ${msg}` : ` (HTTP ${res.status})`}.`);
+      throw new Error(`PriceCharting answered with an error${msg ? `: ${msg}` : ` (HTTP ${r.status})`}.`);
     }
     return body;
   }
@@ -288,5 +318,5 @@
 
   function validToken(t) { return /^[0-9a-f]{40}$/i.test(String(t || "").trim()); }
 
-  return { query, searchUrl, productUrl, pcNumber, rankProducts, gradeKey, search, product, forReport, ladder, fromTcgdex, money, validToken, clearCache, LADDER, _reset: () => { lastCall = 0; } };
+  return { query, searchUrl, productUrl, pcNumber, rankProducts, gradeKey, search, product, forReport, ladder, fromTcgdex, money, validToken, clearCache, LADDER, _reset: () => { nextSlot = 0; }, TIMEOUT_MS, MIN_GAP_MS };
 });
