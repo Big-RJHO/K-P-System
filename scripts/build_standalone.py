@@ -48,12 +48,6 @@ def _inline_script(code: str) -> str:
 
 
 TITLE = "Card Grading Lab"
-FONTS = (
-    '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
-    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
-    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800'
-    '&family=Figtree:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">'
-)
 # Same small reset the Claude page skeleton provides, for the GitHub Pages build.
 SITE_RESET = (
     ":root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}"
@@ -88,7 +82,7 @@ def _parts(env: str) -> tuple[str, str, str]:
 def render_artifact() -> str:
     """Page fragment for a Claude Artifact (the publisher adds <!doctype>, <head> and <body>)."""
     body, css, scripts = _parts("artifact")
-    return f"<title>{TITLE}</title>\n{FONTS}\n<style>\n{css}\n</style>\n{body}\n{scripts}\n"
+    return f"<title>{TITLE}</title>\n<style>\n{css}\n</style>\n{body}\n{scripts}\n"
 
 
 def render_site() -> str:
@@ -110,7 +104,6 @@ def render_site() -> str:
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" href="icon-192.png">
-{FONTS}
 <style>{SITE_RESET}</style>
 <style>
 {css}
@@ -141,10 +134,9 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
   const url = new URL(e.request.url);
-  const fonts = url.hostname === "fonts.googleapis.com" || url.hostname === "fonts.gstatic.com";
   // Card lookups, prices and the text reader go straight to the network: never cached here (price
   // requests carry the user's PriceCharting token).
-  if (url.origin !== location.origin && !fonts) return;
+  if (url.origin !== location.origin) return;
   // The daily Riftbound price file: always try the network first, fall back to the cached copy offline.
   if (url.pathname.endsWith("/riftbound-prices.json")) {
     e.respondWith(fetch(e.request).then((res) => {
@@ -156,7 +148,7 @@ self.addEventListener("fetch", (e) => {
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((hit) =>
       hit || fetch(e.request).then((res) => {
-        if ((res.ok && url.origin === location.origin) || (fonts && (res.ok || res.type === "opaque"))) {
+        if (res.ok) {
           const copy = res.clone();
           caches.open(CACHE).then((c) => c.put(e.request, copy));
         }

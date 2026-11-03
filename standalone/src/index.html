@@ -1,397 +1,546 @@
-<div class="app" id="app" data-view="scan">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-scan" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><rect x="8" y="7" width="8" height="10" rx="1.2"/></symbol>
+    <symbol id="i-history" viewBox="0 0 24 24"><path d="M12 7.5V12l3 2"/><path d="M3.6 12a8.4 8.4 0 1 0 2.5-6"/><path d="M3 4.5v4h4"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.5-2-3.5-2.4 1a7.5 7.5 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5A7.5 7.5 0 0 0 7 6.5l-2.4-1-2 3.5 2 1.5a7.6 7.6 0 0 0 0 3l-2 1.5 2 3.5 2.4-1a7.5 7.5 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a7.5 7.5 0 0 0 2.6-1.5l2.4 1 2-3.5z"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l1.6-2.5h6.8L17 8h3v11H4z"/><circle cx="12" cy="13.2" r="3.4"/></symbol>
+    <symbol id="i-photos" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="1.5"/><circle cx="9" cy="10" r="1.6"/><path d="M4 17l5-4.5 3.5 3 3-2.5 4.5 4"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4.5M12 17.2v.3"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.3"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V4.5h4V7M7 7l1 12.5h8L17 7"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-loupe" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3"/><path d="M4 4.5V9h4.5"/></symbol>
+    <symbol id="i-hand" viewBox="0 0 24 24"><path d="M8 12V6.5a1.5 1.5 0 0 1 3 0V11M11 10.5V5a1.5 1.5 0 0 1 3 0v5.5M14 10.5V6.5a1.5 1.5 0 0 1 3 0V14a6 6 0 0 1-6 6h-.5a6 6 0 0 1-4.8-2.4L3.5 14.5a1.5 1.5 0 0 1 2.3-1.9L8 15"/></symbol>
+    <symbol id="i-light" viewBox="0 0 24 24"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/></symbol>
+  </defs>
+</svg>
 
-  <!-- ============ SCAN SCREEN ============ -->
-  <section class="screen scan-screen" id="scan-screen" aria-labelledby="scan-title">
-    <header class="bar">
-      <div class="brand">
-        <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l10 10-10 10L2 12z"/><path class="logo-cut" d="M12 7.5l4.5 4.5-4.5 4.5L7.5 12z"/></svg>
-        <span>Grading Lab</span>
-      </div>
-      <button type="button" class="icon-btn" id="open-history" aria-label="History">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2"/><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4h4"/></svg>
-      </button>
+<div class="app" id="app" data-view="scan" data-tab="scan">
+  <p class="sr-only" id="live" aria-live="polite" aria-atomic="true"></p>
+
+  <!-- ============ SCAN ============ -->
+  <section class="screen" id="scan-screen" aria-labelledby="scan-title">
+    <header class="navbar">
+      <span class="nav-side"></span>
+      <h1 class="nav-title" id="scan-title">Scan</h1>
+      <span class="nav-side end"><button type="button" class="nav-btn" id="clear-card" hidden>Clear</button></span>
     </header>
-
-    <div class="scan-body">
-      <div class="scan-intro">
-        <h1 id="scan-title">Scan your card</h1>
-        <p>Pick the game, then photograph the front and back. You'll get estimated PSA, BGS, CGC and TAG grades.</p>
-      </div>
-
-      <div class="segmented game-seg" id="game-seg" role="radiogroup" aria-label="Card game">
+    <div class="content">
+      <div class="seg" id="game-seg" role="radiogroup" aria-label="Card game">
         <button type="button" role="radio" data-game="pokemon" aria-checked="true">Pokémon</button>
         <button type="button" role="radio" data-game="riftbound" aria-checked="false">Riftbound</button>
       </div>
 
       <div class="slots">
-        <label class="slot" data-side="front" for="file-front">
-          <input type="file" id="file-front" accept="image/*" hidden>
-          <span class="slot-frame">
-            <img class="slot-img" alt="" hidden>
-            <span class="slot-empty">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
-            </span>
-            <span class="slot-busy">Measuring…</span>
-            <span class="slot-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-          </span>
-          <span class="slot-label">Front</span>
-          <span class="slot-meta">Tap to add photo</span>
-        </label>
-        <label class="slot" data-side="back" for="file-back">
-          <input type="file" id="file-back" accept="image/*" hidden>
-          <span class="slot-frame">
-            <img class="slot-img" alt="" hidden>
-            <span class="slot-empty">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
-            </span>
-            <span class="slot-busy">Measuring…</span>
-            <span class="slot-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span>
-          </span>
-          <span class="slot-label">Back</span>
-          <span class="slot-meta">Tap to add photo</span>
-        </label>
+        <div class="slot" data-side="front">
+          <div class="slot-frame">
+            <img class="slot-img" alt="Front photo, flattened" hidden>
+            <span class="slot-empty" aria-hidden="true"><svg class="ic"><use href="#i-scan"/></svg></span>
+            <span class="slot-busy" role="status">Measuring…</span>
+          </div>
+          <p class="slot-label"><b>Front</b> <span class="slot-meta">No photo</span></p>
+          <div class="slot-actions">
+            <label class="btn tinted" for="camera-front"><svg class="ic"><use href="#i-camera"/></svg><span>Camera</span>
+              <input type="file" id="camera-front" accept="image/*" capture="environment" class="file-hidden"></label>
+            <label class="btn tinted" for="file-front"><svg class="ic"><use href="#i-photos"/></svg><span>Photos</span>
+              <input type="file" id="file-front" accept="image/*" class="file-hidden"></label>
+          </div>
+        </div>
+        <div class="slot" data-side="back">
+          <div class="slot-frame">
+            <img class="slot-img" alt="Back photo, flattened" hidden>
+            <span class="slot-empty" aria-hidden="true"><svg class="ic"><use href="#i-scan"/></svg></span>
+            <span class="slot-busy" role="status">Measuring…</span>
+          </div>
+          <p class="slot-label"><b>Back</b> <span class="slot-meta">No photo</span></p>
+          <div class="slot-actions">
+            <label class="btn tinted" for="camera-back"><svg class="ic"><use href="#i-camera"/></svg><span>Camera</span>
+              <input type="file" id="camera-back" accept="image/*" capture="environment" class="file-hidden"></label>
+            <label class="btn tinted" for="file-back"><svg class="ic"><use href="#i-photos"/></svg><span>Photos</span>
+              <input type="file" id="file-back" accept="image/*" class="file-hidden"></label>
+          </div>
+        </div>
       </div>
 
-      <ul class="tips" id="tips" aria-label="Photo tips"></ul>
-    </div>
+      <h2 class="group-title">Scan confidence</h2>
+      <div class="group" id="scan-conf"></div>
+      <p class="footnote" id="runner-note" hidden></p>
 
-    <div class="scan-actions">
-      <button type="button" class="btn primary big" id="get-report" disabled>Get report</button>
-      <button type="button" class="link-btn" id="front-only" hidden>No back photo? Continue with the front only</button>
-      <div class="scan-links">
-        <button type="button" class="link-btn" id="resume" hidden></button>
-        <button type="button" class="link-btn" id="try-example">See an example</button>
+      <div class="primary-actions">
+        <button type="button" class="btn filled large" id="review-card" disabled>Review card</button>
+        <button type="button" class="btn plain" id="front-only" hidden>Continue with the front only</button>
+      </div>
+
+      <h2 class="group-title">Photo tips</h2>
+      <ul class="group tips" id="tips" aria-label="Photo tips"></ul>
+
+      <div class="group">
+        <button type="button" class="row row-btn" id="resume" hidden><span class="row-main"><span class="row-title" id="resume-text">Resume last card</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+        <button type="button" class="row row-btn" id="try-example"><span class="row-main"><span class="row-title">See an example card</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
       </div>
     </div>
   </section>
 
-  <!-- ============ REPORT SCREEN ============ -->
-  <section class="screen report-screen" id="report-screen" aria-labelledby="report-title" hidden>
-    <header class="bar sticky">
-      <button type="button" class="icon-btn" id="back-to-scan" aria-label="New scan">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
-      </button>
-      <h1 id="report-title" class="bar-title">Card report</h1>
-      <button type="button" class="icon-btn" id="open-history-2" aria-label="History">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2"/><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6"/><path d="M3 4v4h4"/></svg>
-      </button>
+  <!-- ============ REVIEW ============ -->
+  <section class="screen" id="report-screen" aria-labelledby="report-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"><button type="button" class="nav-btn back" id="back-to-scan"><svg class="ic"><use href="#i-back"/></svg><span>Scan</span></button></span>
+      <h1 class="nav-title" id="report-title">Review</h1>
+      <span class="nav-side end"><button type="button" class="nav-btn strong" id="save-card">Save</button></span>
     </header>
-
-    <div class="report-body">
-      <div class="example-note" id="example-note" hidden>
-        <span>You're looking at an example card.</span>
-        <button type="button" class="link-btn strong" id="scan-own">Scan my card</button>
+    <div class="content review">
+      <div class="banner" id="example-note" hidden>
+        <svg class="ic"><use href="#i-info"/></svg>
+        <span>This is an example card.</span>
+        <button type="button" class="btn plain" id="scan-own">Scan my card</button>
       </div>
 
-      <!-- identity -->
-      <div class="identity reveal">
-        <span class="game-chip" id="game-chip"></span>
-        <label class="sr-only" for="card-name">Card name</label>
-        <input id="card-name" class="name-input" placeholder="Name this card" autocomplete="off">
-        <p class="identity-sub" id="identity-sub"></p>
-      </div>
-
-      <!-- report header: card viewer + score, laid out like a TAG DIG report -->
-      <section class="report-hero reveal" aria-label="Your card's results">
-        <div class="viewer">
-          <div class="segmented viewer-side" role="tablist" aria-label="Card side">
+      <div class="review-media">
+        <div class="photo-card">
+          <div class="seg side-seg" role="tablist" aria-label="Card side">
             <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
             <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
           </div>
           <div class="viewer-frame">
-            <canvas id="viewer-canvas" aria-label="Your card with centering lines and numbered defect markers. Tap the card to log a defect."></canvas>
+            <canvas id="viewer-canvas" role="img" aria-label="Your card with centering lines and numbered defect markers. Tap the card to log a defect."></canvas>
           </div>
-          <label class="overlay-slider" for="overlay">
+          <label class="slider-row" for="overlay">
             <span>Photo</span>
-            <input id="overlay" type="range" min="0" max="100" value="100">
+            <input id="overlay" type="range" min="0" max="100" value="100" aria-label="Overlay strength">
             <span>Overlay</span>
           </label>
+          <div class="conf-review" id="review-conf"></div>
+          <button type="button" class="btn tinted wide" id="open-surface"><svg class="ic"><use href="#i-loupe"/></svg><span>Inspect surface</span></button>
         </div>
-        <div class="score-block">
-          <span class="incomplete-badge" id="score-incomplete" hidden>Incomplete</span>
-          <div class="score-top">
-            <span class="score-grade" id="score-grade"></span>
-            <span class="score-label" id="score-label"></span>
-          </div>
-          <div class="score-num"><b id="score-num"></b><span>/ 1000</span></div>
-          <div class="meter" aria-hidden="true"><span id="score-bar"></span><i style="left:94.4%"></i><i style="left:98.9%"></i></div>
-          <p class="score-caption">Lab score on TAG's 1000-point scale</p>
-          <div class="score-missing" id="score-missing" hidden>
-            <p><b>Best case, not a grade.</b> Not checked yet: <span id="score-missing-list"></span>.</p>
-            <button type="button" class="link-btn strong" id="go-checklist">Open the checklist</button>
-          </div>
-        </div>
-      </section>
+      </div>
 
-      <!-- card details, like the card information on a TAG report -->
-      <section class="card-panel details-panel reveal" aria-labelledby="details-title">
-        <div class="panel-head">
-          <h2 id="details-title">Card details</h2>
-          <button type="button" class="link-btn strong" id="edit-details" aria-expanded="false">Edit</button>
+      <div class="review-rows">
+        <div class="group">
+          <label class="row field-row" for="card-name"><span class="row-label">Name</span><input id="card-name" placeholder="Name this card" autocomplete="off"></label>
+          <button type="button" class="row row-btn" id="open-details" aria-haspopup="dialog">
+            <span class="row-main"><span class="row-title">Card details</span><span class="row-sub" id="identity-sub"></span><span class="row-sub status" id="id-row-status"></span></span>
+            <span class="row-value" id="game-chip"></span><svg class="ic chev"><use href="#i-chevron"/></svg>
+          </button>
         </div>
-        <dl class="details" id="details-view"></dl>
-        <div class="details-form" id="details-form" hidden>
-          <label for="collector-line">Collector line <span class="hint-inline">(bottom of the card)</span>
-            <input id="collector-line" placeholder="e.g. VEN · SP3/006 · EN" autocomplete="off">
-          </label>
-          <div class="id-find">
-            <button type="button" class="btn small" id="read-card">Read from photo</button>
-            <button type="button" class="btn small" id="find-card">Find this card online</button>
-            <span class="hint-inline" id="id-status">Reads the name and number from your front photo, then looks the card up. With a Gemini key saved (Prices → Web search access), Gemini reads it and the front photo is sent to Google; without one, it's read on this phone and only the text is sent.</span>
-          </div>
-          <div id="id-results" class="id-results" hidden></div>
-          <div class="form-grid">
-            <label for="card-subtitle">Subtitle<input id="card-subtitle" placeholder="e.g. Inquisitive" autocomplete="off"></label>
-            <label for="card-type">Card type<input id="card-type" placeholder="e.g. Champion Unit" autocomplete="off"></label>
-            <label for="card-set">Set<input id="card-set" placeholder="Set" autocomplete="off"></label>
-            <label for="card-set-code">Set code<input id="card-set-code" placeholder="e.g. VEN" autocomplete="off"></label>
-            <label for="card-number">Number<input id="card-number" placeholder="No." autocomplete="off"></label>
-            <label for="card-rarity">Rarity<select id="card-rarity"></select></label>
-            <label for="card-finish">Finish<select id="card-finish"></select></label>
-            <label for="card-language">Language<select id="card-language"></select></label>
-            <label for="card-year">Year<input id="card-year" inputmode="numeric" placeholder="e.g. 2026" autocomplete="off"></label>
-          </div>
-          <button type="button" class="btn small" id="done-details">Done</button>
-        </div>
-      </section>
 
-      <!-- reference image of the confirmed card -->
-      <section class="card-panel reference-panel reveal" id="reference-panel" aria-labelledby="reference-title" hidden>
-        <div class="panel-head">
-          <h2 id="reference-title">Reference</h2>
-          <button type="button" class="link-btn" id="clear-reference">Remove</button>
+        <h2 class="group-title">Estimated grades</h2>
+        <div class="group" id="estimates">
+          <div class="row notice" id="score-missing" hidden>
+            <svg class="ic"><use href="#i-warn"/></svg>
+            <span class="row-main"><span class="row-title">Incomplete: best case, not a grade</span><span class="row-sub">Not checked yet: <span id="score-missing-list"></span>.</span>
+              <button type="button" class="btn plain inline" id="go-checklist">Open checklist</button></span>
+          </div>
+          <div id="tiles"></div>
+          <button type="button" class="row row-btn" id="open-subgrades"><span class="row-main"><span class="row-title">Subgrades and breakdowns</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+          <div class="row"><span class="row-main"><span class="row-title">Rank in History</span></span><span class="row-value num" id="rank-value">—</span></div>
         </div>
-        <div class="reference-body">
+        <p class="footnote" id="best-line"></p>
+
+        <h2 class="group-title">Condition</h2>
+        <div class="group">
+          <button type="button" class="row row-btn" data-pane="pane-centering"><span class="row-main"><span class="row-title">Centering</span></span><span class="row-value num" id="centering-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="pane-edges"><span class="row-main"><span class="row-title">Corners &amp; edges</span></span><span class="row-value" id="scancheck-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="pane-surface"><span class="row-main"><span class="row-title">Surface</span></span><span class="row-value" id="surface-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="pane-defects"><span class="row-main"><span class="row-title">Defects &amp; checklist</span></span><span class="row-value" id="defect-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+        </div>
+
+        <h2 class="group-title">Prices</h2>
+        <div class="group">
+          <button type="button" class="row row-btn" data-pane="prices-panel"><span class="row-main"><span class="row-title">Prices</span><span class="row-sub" id="prices-summary"></span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+        </div>
+
+        <p class="footnote" id="disclaimer"></p>
+        <div class="group">
+          <button type="button" class="row row-btn danger-text" id="new-scan"><span class="row-main"><span class="row-title">New scan</span></span></button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DETAIL: CENTERING ============ -->
+  <section class="screen pane" id="pane-centering" aria-labelledby="pc-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <h1 class="nav-title" id="pc-title">Centering</h1>
+      <span class="nav-side end"></span>
+    </header>
+    <div class="content">
+      <div class="seg side-seg" role="tablist" aria-label="Card side">
+        <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
+        <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
+      </div>
+      <div class="guide-wrap" id="guide-wrap">
+        <canvas id="guide-canvas" aria-label="Scan with centering guides. Drag a line to move it."></canvas>
+        <div class="guide-empty" id="guide-empty">
+          <p id="guide-empty-text">No photo for this side.</p>
+          <label class="btn tinted" for="retake-file">Add photo</label>
+        </div>
+        <span class="busy-note" role="status">Measuring…</span>
+      </div>
+      <p class="footnote">Drag the <span class="swatch outer"></span> card-edge and <span class="swatch inner"></span> frame lines if they're off.</p>
+      <div class="group">
+        <label class="row field-row" for="ratio-lr"><span class="row-label">Left / right</span><span class="ratio"><input id="ratio-lr" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other num">/ <span id="lr-other"></span></span></span></label>
+        <label class="row field-row" for="ratio-tb"><span class="row-label">Top / bottom</span><span class="ratio"><input id="ratio-tb" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other num">/ <span id="tb-other"></span></span></span></label>
+        <div class="row"><span class="row-main"><span class="row-sub status" id="conf"></span></span></div>
+      </div>
+      <div class="group" id="guide-actions">
+        <button type="button" class="row row-btn" id="adjust-outline"><span class="row-main"><span class="row-title accent">Adjust outline</span></span></button>
+        <label class="row row-btn" for="retake-file"><span class="row-main"><span class="row-title accent">Retake photo</span></span><input type="file" id="retake-file" accept="image/*" class="file-hidden"></label>
+      </div>
+      <div class="outline-bar" id="outline-bar" hidden>
+        <p class="footnote">Drag the four yellow corners onto the card's real corners (for rounded corners, where the straight edges would meet). The card is then re-flattened from your photo and re-graded.</p>
+        <div class="button-pair">
+          <button type="button" class="btn tinted" id="outline-cancel">Cancel</button>
+          <button type="button" class="btn filled" id="outline-apply">Apply</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DETAIL: CORNERS & EDGES ============ -->
+  <section class="screen pane" id="pane-edges" aria-labelledby="pe-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <h1 class="nav-title" id="pe-title">Corners &amp; edges</h1>
+      <span class="nav-side end"></span>
+    </header>
+    <div class="content">
+      <div class="seg side-seg" role="tablist" aria-label="Card side">
+        <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
+        <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
+      </div>
+      <p class="footnote">Automatic checks on your photo. "Nothing found" never means the card is perfect: it only covers what this photo can show.</p>
+      <div id="scancheck-body"></div>
+      <h2 class="group-title">Checked by eye</h2>
+      <div class="group" id="edges-checks"></div>
+    </div>
+  </section>
+
+  <!-- ============ DETAIL: SURFACE ============ -->
+  <section class="screen pane" id="pane-surface" aria-labelledby="ps-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <h1 class="nav-title" id="ps-title">Surface</h1>
+      <span class="nav-side end"></span>
+    </header>
+    <div class="content">
+      <div class="seg side-seg" role="tablist" aria-label="Card side">
+        <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
+        <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
+      </div>
+      <p class="footnote">A flat photo can't show the surface (creases, dents, stains, scuffs, scratches, print lines). Inspect the photo for clues, then check the card in hand under angled light.</p>
+      <div class="group">
+        <button type="button" class="row row-btn" id="pane-open-surface"><svg class="ic lead"><use href="#i-loupe"/></svg><span class="row-main"><span class="row-title">Inspect surface</span><span class="row-sub" id="marks-summary"></span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+        <label class="row row-btn" for="angled-file"><svg class="ic lead"><use href="#i-light"/></svg><span class="row-main"><span class="row-title">Add angled-light photo</span><span class="row-sub" id="angled-status">Optional. Helps you spot marks; it doesn't change centering or grades.</span></span>
+          <input type="file" id="angled-file" accept="image/*" class="file-hidden"></label>
+      </div>
+      <div id="surface-check"></div>
+      <h2 class="group-title">Checked</h2>
+      <div class="group" id="surface-checks"></div>
+      <h2 class="group-title">Surface defects</h2>
+      <ol class="group defect-list" id="surface-defects"></ol>
+    </div>
+  </section>
+
+  <!-- ============ DETAIL: DEFECTS & CHECKLIST ============ -->
+  <section class="screen pane" id="pane-defects" aria-labelledby="pd-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <h1 class="nav-title" id="pd-title">Defects</h1>
+      <span class="nav-side end"></span>
+    </header>
+    <div class="content">
+      <p class="footnote" id="condition-hint">Tap the card where you see wear. Check under a bright light, tilting the card.</p>
+      <h2 class="group-title">Checklist</h2>
+      <div class="inspect" id="inspect">
+        <div class="group" id="all-checks"></div>
+        <p class="footnote">Checked means you looked under good light and listed everything you found below. Unchecked areas aren't assumed flawless. Where the photo can't show an area, only a check on the card in hand counts.</p>
+      </div>
+      <h2 class="group-title">Logged defects</h2>
+      <ol class="group defect-list" id="defect-list"></ol>
+      <h2 class="group-title">Add a defect</h2>
+      <p class="footnote">Tap a spot on a card map, or tap the photo on the Review screen.</p>
+      <div class="maps">
+        <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
+        <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DETAIL: PRICES ============ -->
+  <section class="screen pane" id="prices-panel" aria-labelledby="pp-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <h1 class="nav-title" id="pp-title">Prices</h1>
+      <span class="nav-side end"><button type="button" class="nav-btn" id="refresh-prices">Update</button></span>
+    </header>
+    <div class="content prices">
+      <div id="cs-prices">
+        <h2 class="group-title">Recent sales (CardSight)</h2>
+        <div class="group pad" id="cs-body"></div>
+      </div>
+      <div id="rb-prices" hidden>
+        <h2 class="group-title">TCGplayer prices (Riftbound)</h2>
+        <div class="group pad" id="rb-body"></div>
+      </div>
+      <h2 class="group-title">PriceCharting</h2>
+      <div class="group pad" id="prices-body"></div>
+      <div id="web-prices">
+        <h2 class="group-title">Web search (Gemini)</h2>
+        <div class="group pad">
+          <button type="button" class="btn tinted wide" id="web-search">Search the web for prices</button>
+          <p class="footnote tight status" id="web-status" role="status"></p>
+          <div id="web-results"></div>
+        </div>
+      </div>
+      <div class="group">
+        <button type="button" class="row row-btn" data-goto="settings"><span class="row-main"><span class="row-title accent">API keys in Settings</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DETAIL: SUBGRADES & BREAKDOWNS ============ -->
+  <section class="screen pane" id="pane-company" aria-labelledby="pb-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <h1 class="nav-title" id="pb-title">Breakdowns</h1>
+      <span class="nav-side end"></span>
+    </header>
+    <div class="content">
+      <h2 class="group-title">TAG subgrades <span class="title-note">out of 1000</span></h2>
+      <div class="group pad"><div class="subgrades" id="subgrades"></div></div>
+      <h2 class="group-title">By company</h2>
+      <div class="group" id="companies"></div>
+    </div>
+  </section>
+
+  <!-- ============ HISTORY ============ -->
+  <section class="screen" id="history-screen" aria-labelledby="history-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"></span>
+      <h1 class="nav-title" id="history-title">History</h1>
+      <span class="nav-side end"></span>
+    </header>
+    <div class="content">
+      <ul id="history-list" class="group history-list"></ul>
+      <p class="footnote">Saved cards live only in this browser. Back them up in Settings.</p>
+    </div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="screen" id="settings-screen" aria-labelledby="settings-title" hidden>
+    <header class="navbar">
+      <span class="nav-side"></span>
+      <h1 class="nav-title" id="settings-title">Settings</h1>
+      <span class="nav-side end"></span>
+    </header>
+    <div class="content">
+      <h2 class="group-title">Appearance</h2>
+      <div class="group pad">
+        <div class="seg" id="theme-seg" role="radiogroup" aria-label="Appearance">
+          <button type="button" role="radio" data-theme-choice="system" aria-checked="true">System</button>
+          <button type="button" role="radio" data-theme-choice="light" aria-checked="false">Light</button>
+          <button type="button" role="radio" data-theme-choice="dark" aria-checked="false">Dark</button>
+        </div>
+      </div>
+
+      <h2 class="group-title">API access</h2>
+      <p class="footnote">Keys stay on this device. They're never included in backups, History or drafts, and each is only sent to its own service.</p>
+      <div class="group">
+        <details class="row-details" id="gm-settings">
+          <summary class="row row-btn"><span class="row-main"><span class="row-title">Gemini</span><span class="row-sub">Card reading and web price search</span></span><span class="row-value" id="gm-state"></span><svg class="ic chev"><use href="#i-chevron"/></svg></summary>
+          <div class="details-body">
+            <p class="footnote tight">With this key, Gemini reads your card from the front photo (free; the photo is sent to Google, and on Google's free tier it may be used to improve their products). Web search asks Gemini what this card recently sold for, and shows the sources. Get a key at aistudio.google.com. Google only allows web search on keys with billing turned on (5,000 searches a month are then free; each card search uses a few, plus a fraction of a cent). Results aren't saved, as Google's terms require.</p>
+            <label for="gm-key" class="field">Gemini API key<input id="gm-key" type="password" autocomplete="off" spellcheck="false" placeholder="AQ.… or AIza…"></label>
+            <label for="gm-model" class="field">Model<select id="gm-model"></select></label>
+            <div class="button-pair">
+              <button type="button" class="btn tinted" id="gm-remove">Remove</button>
+              <button type="button" class="btn filled" id="gm-save">Save key</button>
+            </div>
+            <p class="footnote tight status" id="gm-status" role="status"></p>
+          </div>
+        </details>
+        <details class="row-details" id="pc-settings">
+          <summary class="row row-btn"><span class="row-main"><span class="row-title">PriceCharting</span><span class="row-sub">Graded prices (paid subscription)</span></span><span class="row-value" id="pc-state"></span><svg class="ic chev"><use href="#i-chevron"/></svg></summary>
+          <div class="details-body">
+            <p class="footnote tight">Graded prices come from PriceCharting's API, which needs your own paid PriceCharting subscription. Paste the 40-character token from its Subscription page (API/Download). It's only sent to pricecharting.com. PriceCharting licenses this data for your own use.</p>
+            <label for="pc-token" class="field">API token<input id="pc-token" type="password" autocomplete="off" spellcheck="false" placeholder="40 letters and digits"></label>
+            <div class="button-pair">
+              <button type="button" class="btn tinted" id="pc-remove">Remove</button>
+              <button type="button" class="btn filled" id="pc-save">Save token</button>
+            </div>
+            <p class="footnote tight status" id="pc-status" role="status"></p>
+          </div>
+        </details>
+        <details class="row-details" id="cs-settings">
+          <summary class="row row-btn"><span class="row-main"><span class="row-title">CardSight</span><span class="row-sub">Recent sales, Pokémon</span></span><span class="row-value" id="cs-state"></span><svg class="ic chev"><use href="#i-chevron"/></svg></summary>
+          <div class="details-body">
+            <p class="footnote tight">Recent sales come from CardSight AI with your own API key (free plan: 750 calls a month, no charges; each card lookup uses 2, and answers are kept for a day). It's only sent to CardSight. CardSight's terms don't allow sharing the key.</p>
+            <label for="cs-key" class="field">CardSight API key<input id="cs-key" type="password" autocomplete="off" spellcheck="false" placeholder="Your CardSight key"></label>
+            <div class="button-pair">
+              <button type="button" class="btn tinted" id="cs-remove">Remove</button>
+              <button type="button" class="btn filled" id="cs-save">Save key</button>
+            </div>
+            <p class="footnote tight status" id="cs-status" role="status"></p>
+          </div>
+        </details>
+      </div>
+
+      <h2 class="group-title">Backup</h2>
+      <p class="footnote">Saved cards live only in this browser. Copy a backup now and then, and restore it here on this or another device. Photos and keys aren't included.</p>
+      <div class="group">
+        <button id="copy-backup" type="button" class="row row-btn"><span class="row-main"><span class="row-title accent">Copy backup</span></span></button>
+        <!--SITE_ONLY_START--><button id="download-backup" type="button" class="row row-btn" hidden><span class="row-main"><span class="row-title accent">Download backup</span></span></button><!--SITE_ONLY_END-->
+        <label class="row row-btn" for="restore-file"><span class="row-main"><span class="row-title accent">Restore from file</span></span><input id="restore-file" type="file" accept="application/json,.json,text/plain" class="file-hidden"></label>
+      </div>
+      <div class="group pad">
+        <label for="backup-text" class="field">Backup text<textarea id="backup-text" rows="4" placeholder="Paste a backup here, then tap Restore pasted backup" spellcheck="false"></textarea></label>
+        <button id="restore-text" type="button" class="btn tinted wide">Restore pasted backup</button>
+      </div>
+
+      <h2 class="group-title">About</h2>
+      <p class="footnote">Photo checks, centering and grade estimates run on this device. Card lookups and prices only send the card's details (or, with a Gemini key, the front photo) to the service you use. Estimates are theoretical: no grading company is affiliated with this app.</p>
+    </div>
+  </section>
+
+  <nav class="tabbar" aria-label="Main">
+    <button type="button" data-tab="scan" aria-current="page"><svg class="ic"><use href="#i-scan"/></svg><span>Scan</span></button>
+    <button type="button" data-tab="history"><svg class="ic"><use href="#i-history"/></svg><span>History</span></button>
+    <button type="button" data-tab="settings"><svg class="ic"><use href="#i-settings"/></svg><span>Settings</span></button>
+  </nav>
+</div>
+
+<!-- Card details sheet -->
+<div class="sheet-backdrop" id="details-sheet" hidden>
+  <div class="sheet tall" role="dialog" aria-modal="true" aria-labelledby="details-title">
+    <header class="sheet-bar">
+      <span class="nav-side"></span>
+      <h2 class="nav-title" id="details-title">Card details</h2>
+      <span class="nav-side end"><button type="button" class="nav-btn strong" id="done-details">Done</button></span>
+    </header>
+    <div class="sheet-body" id="details-form">
+      <div class="group">
+        <label class="row field-row" for="collector-line"><span class="row-label">Collector line</span><input id="collector-line" placeholder="e.g. VEN · SP3/006 · EN" autocomplete="off"></label>
+      </div>
+      <p class="footnote">Printed at the bottom of the card.</p>
+      <div class="button-pair">
+        <button type="button" class="btn tinted" id="read-card">Read from photo</button>
+        <button type="button" class="btn tinted" id="find-card">Find online</button>
+      </div>
+      <p class="footnote status" id="id-status" role="status">Reads the name and number from your front photo, then looks the card up. With a Gemini key saved (Settings), Gemini reads it and the front photo is sent to Google; without one, it's read on this device and only the text is sent.</p>
+      <div id="id-results" class="id-results" hidden></div>
+
+      <div class="group" id="details-view-wrap">
+        <label class="row field-row" for="card-subtitle"><span class="row-label">Subtitle</span><input id="card-subtitle" placeholder="e.g. Inquisitive" autocomplete="off"></label>
+        <label class="row field-row" for="card-type"><span class="row-label">Card type</span><input id="card-type" placeholder="e.g. Champion Unit" autocomplete="off"></label>
+        <label class="row field-row" for="card-set"><span class="row-label">Set</span><input id="card-set" placeholder="Set" autocomplete="off"></label>
+        <label class="row field-row" for="card-set-code"><span class="row-label">Set code</span><input id="card-set-code" placeholder="e.g. VEN" autocomplete="off"></label>
+        <label class="row field-row" for="card-number"><span class="row-label">Number</span><input id="card-number" placeholder="No." autocomplete="off"></label>
+        <label class="row field-row" for="card-rarity"><span class="row-label">Rarity</span><select id="card-rarity"></select></label>
+        <label class="row field-row" for="card-finish"><span class="row-label">Finish</span><select id="card-finish"></select></label>
+        <label class="row field-row" for="card-language"><span class="row-label">Language</span><select id="card-language"></select></label>
+        <label class="row field-row" for="card-year"><span class="row-label">Year</span><input id="card-year" inputmode="numeric" placeholder="e.g. 2026" autocomplete="off"></label>
+      </div>
+      <dl class="details" id="details-view" hidden></dl>
+
+      <div id="reference-panel" hidden>
+        <h2 class="group-title">Reference</h2>
+        <div class="group pad reference-body">
           <img id="reference-img" alt="Reference image of the identified card">
           <div class="reference-text">
             <p id="reference-name" class="reference-name"></p>
-            <p id="reference-source" class="hint"></p>
-            <p id="reference-checks" class="hint"></p>
-            <p class="hint">Support evidence only. A reference card can have its own wear, and its grade is never applied to yours.</p>
+            <p id="reference-source" class="footnote tight"></p>
+            <p id="reference-checks" class="footnote tight"></p>
+            <p class="footnote tight">Support evidence only. A reference card can have its own wear, and its grade is never applied to yours.</p>
+            <button type="button" class="btn plain inline danger-text" id="clear-reference">Remove reference</button>
           </div>
         </div>
-      </section>
-
-      <section class="card-panel prices-panel reveal" id="prices-panel" aria-labelledby="prices-title">
-        <div class="panel-head">
-          <h2 id="prices-title">Prices</h2>
-          <button type="button" class="link-btn strong" id="refresh-prices">Update</button>
-        </div>
-        <div class="cs-prices" id="cs-prices">
-          <h3 class="sc-sub">Recent sales (CardSight)</h3>
-          <div id="cs-body"></div>
-        </div>
-        <div class="cs-prices" id="rb-prices" hidden>
-          <h3 class="sc-sub">TCGplayer prices (Riftbound)</h3>
-          <div id="rb-body"></div>
-        </div>
-        <div id="prices-body"></div>
-        <div class="web-prices" id="web-prices">
-          <h3 class="sc-sub">Web search (Gemini)</h3>
-          <div class="id-find">
-            <button type="button" class="btn small" id="web-search">Search the web for prices</button>
-            <span class="hint-inline" id="web-status"></span>
-          </div>
-          <div id="web-results"></div>
-        </div>
-        <details class="pc-settings" id="cs-settings">
-          <summary>Sales data access (CardSight, Pokémon)</summary>
-          <p class="hint">Recent sales come from CardSight AI with your own API key (free plan: 750 calls a month, no charges; each card lookup uses 2, and answers are kept for a day). The key stays on this phone only, is only sent to CardSight, and isn't included in backups. CardSight's terms don't allow sharing the key.</p>
-          <label for="cs-key" class="note-label">CardSight API key<input id="cs-key" type="password" autocomplete="off" spellcheck="false" placeholder="Your CardSight key"></label>
-          <div class="row-actions">
-            <button type="button" class="btn small" id="cs-save">Save key</button>
-            <button type="button" class="btn small ghost" id="cs-remove">Remove</button>
-            <span class="hint-inline" id="cs-status"></span>
-          </div>
-        </details>
-        <details class="pc-settings" id="gm-settings">
-          <summary>Gemini key: card reading and web search</summary>
-          <p class="hint">With this key, Gemini reads your card from the front photo (free; the photo is sent to Google, and on Google's free tier it may be used to improve their products). Web search asks Gemini to search the web for what this card recently sold for, and shows the sources. It uses your own Gemini API key from aistudio.google.com (Get API key). Google only allows web search on keys with billing turned on (5,000 searches a month are then free; each card search uses a few, plus a fraction of a cent). The key stays on this phone only and is only sent to Google. Results aren't saved, as Google's terms require.</p>
-          <label for="gm-key" class="note-label">Gemini API key<input id="gm-key" type="password" autocomplete="off" spellcheck="false" placeholder="AQ.… or AIza…"></label>
-          <label for="gm-model" class="note-label">Model<select id="gm-model"></select></label>
-          <div class="row-actions">
-            <button type="button" class="btn small" id="gm-save">Save key</button>
-            <button type="button" class="btn small ghost" id="gm-remove">Remove</button>
-            <span class="hint-inline" id="gm-status"></span>
-          </div>
-        </details>
-        <details class="pc-settings" id="pc-settings">
-          <summary>PriceCharting access</summary>
-          <p class="hint">Graded prices come from PriceCharting's API, which needs your own paid PriceCharting subscription. Paste the 40-character token from its Subscription page (API/Download). It stays on this phone only: it's never saved in backups, History or drafts, and it's only sent to pricecharting.com. PriceCharting licenses this data for your own use.</p>
-          <label for="pc-token" class="note-label">API token<input id="pc-token" type="password" autocomplete="off" spellcheck="false" placeholder="40 letters and digits"></label>
-          <div class="row-actions">
-            <button type="button" class="btn small" id="pc-save">Save token</button>
-            <button type="button" class="btn small ghost" id="pc-remove">Remove</button>
-            <span class="hint-inline" id="pc-status"></span>
-          </div>
-        </details>
-      </section>
-
-      <div class="metrics reveal" id="metrics"></div>
-
-      <!-- eight subgrades -->
-      <section class="card-panel reveal" aria-labelledby="subgrades-title">
-        <div class="panel-head">
-          <h2 id="subgrades-title">Subgrades</h2>
-          <span class="panel-note">Scores out of 1000</span>
-        </div>
-        <div class="subgrades" id="subgrades"></div>
-      </section>
-
-      <!-- every company -->
-      <section class="reveal" aria-labelledby="tiles-title">
-        <h2 id="tiles-title" class="section-title">Estimated grade by company</h2>
-        <div class="tiles" id="tiles"></div>
-        <p class="best-line" id="best-line"></p>
-      </section>
-
-      <!-- photo quality and suspected edge/corner damage -->
-      <details class="card-panel section reveal" id="scancheck-section" open>
-        <summary><h2>Scan check</h2><span class="summary-value" id="scancheck-summary"></span></summary>
-        <div class="section-body">
-          <p class="hint">Automatic checks on your photos. "Nothing found" never means the card is perfect: it only covers what this photo can show.</p>
-          <div class="segmented" role="tablist" aria-label="Side">
-            <button type="button" data-side="front" aria-selected="true">Front</button>
-            <button type="button" data-side="back" aria-selected="false">Back</button>
-          </div>
-          <div id="scancheck-body"></div>
-        </div>
-      </details>
-
-      <!-- defects -->
-      <details class="card-panel section reveal" id="condition-section" open>
-        <summary><h2>DINGS</h2><span class="summary-value" id="defect-summary"></span></summary>
-        <div class="section-body">
-          <p class="hint" id="condition-hint">Tap where you see wear. Check under a bright light, tilting the card.</p>
-          <div class="inspect" id="inspect">
-            <p class="inspect-hint">Checked means you looked under good light and listed everything you found in DINGS. Unchecked areas aren't assumed flawless. Where the photo can't show an area, only a check on the card in hand counts.</p>
-            <div class="inspect-grid">
-              <fieldset class="inspect-side" data-side="front">
-                <legend>Front</legend>
-                <label class="check"><input type="checkbox" data-side="front" data-comp="corners"><span>Corners checked</span></label>
-                <label class="check"><input type="checkbox" data-side="front" data-comp="edges"><span>Edges checked</span></label>
-                <label class="check"><input type="checkbox" data-side="front" data-comp="surface"><span>Surface checked</span></label>
-              </fieldset>
-              <fieldset class="inspect-side" data-side="back">
-                <legend>Back</legend>
-                <label class="check"><input type="checkbox" data-side="back" data-comp="corners"><span>Corners checked</span></label>
-                <label class="check"><input type="checkbox" data-side="back" data-comp="edges"><span>Edges checked</span></label>
-                <label class="check"><input type="checkbox" data-side="back" data-comp="surface"><span>Surface checked</span></label>
-              </fieldset>
-            </div>
-          </div>
-          <ol class="defect-list" id="defect-list"></ol>
-          <details class="map-picker">
-            <summary>Pick a spot on a card map instead</summary>
-            <div class="maps">
-              <figure class="map" data-side="front"><figcaption>Front</figcaption></figure>
-              <figure class="map" data-side="back"><figcaption>Back</figcaption></figure>
-            </div>
-          </details>
-        </div>
-      </details>
-
-      <!-- centering -->
-      <details class="card-panel section reveal" id="centering-section">
-        <summary><h2>Centering measurements</h2><span class="summary-value" id="centering-summary"></span></summary>
-        <div class="section-body">
-          <div class="segmented" role="tablist" aria-label="Side">
-            <button type="button" role="tab" data-side="front" aria-selected="true">Front</button>
-            <button type="button" role="tab" data-side="back" aria-selected="false">Back</button>
-          </div>
-          <div class="guide-wrap" id="guide-wrap">
-            <canvas id="guide-canvas" aria-label="Scan with centering guides"></canvas>
-            <div class="guide-empty" id="guide-empty">
-              <p id="guide-empty-text">No photo for this side.</p>
-              <label class="btn small" for="retake-file">Add photo</label>
-            </div>
-          </div>
-          <p class="hint">Drag the <span class="swatch outer"></span> card-edge and <span class="swatch inner"></span> frame lines if they're off.</p>
-          <div class="ratio-row">
-            <label for="ratio-lr">Left / right<span class="ratio"><input id="ratio-lr" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other" id="lr-other"></span></span></label>
-            <label for="ratio-tb">Top / bottom<span class="ratio"><input id="ratio-tb" type="number" inputmode="decimal" min="50" max="100" step="0.1"><span class="ratio-other" id="tb-other"></span></span></label>
-          </div>
-          <div class="row-actions" id="guide-actions">
-            <span class="conf" id="conf"></span>
-            <div class="row-buttons">
-              <button type="button" class="btn small ghost" id="adjust-outline">Adjust outline</button>
-              <label class="btn small ghost" for="retake-file">Retake photo</label>
-            </div>
-            <input type="file" id="retake-file" accept="image/*" hidden>
-          </div>
-          <div class="outline-bar" id="outline-bar" hidden>
-            <p class="hint">Drag the four yellow corners onto the card's real corners (for rounded corners, where the straight edges would meet). The card is then re-flattened from your photo and re-graded.</p>
-            <div class="row-buttons">
-              <button type="button" class="btn small ghost" id="outline-cancel">Cancel</button>
-              <button type="button" class="btn small primary" id="outline-apply">Apply</button>
-            </div>
-          </div>
-        </div>
-      </details>
-
-      <!-- company breakdown -->
-      <section class="breakdown reveal" aria-labelledby="breakdown-title">
-        <h2 id="breakdown-title" class="section-title">Company breakdowns</h2>
-        <div id="companies"></div>
-      </section>
-
-      <p class="disclaimer" id="disclaimer"></p>
+      </div>
     </div>
-
-    <div class="action-bar">
-      <button type="button" class="btn ghost" id="new-scan">New scan</button>
-      <button type="button" class="btn primary" id="save-card">Save to History</button>
-    </div>
-  </section>
+  </div>
 </div>
 
 <!-- Defect sheet -->
 <div class="sheet-backdrop" id="defect-sheet" hidden>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
-    <div class="sheet-grip" aria-hidden="true"></div>
-    <h2 id="sheet-title">Add defect</h2>
-    <p class="sheet-sub" id="sheet-where"></p>
-    <fieldset class="chips-field">
-      <legend>What do you see?</legend>
-      <div class="choice-chips" id="type-chips"></div>
-    </fieldset>
-    <fieldset class="chips-field">
-      <legend>How bad?</legend>
-      <div class="segmented sev" id="sev-seg">
-        <button type="button" data-sev="micro">Micro</button>
-        <button type="button" data-sev="minor">Minor</button>
-        <button type="button" data-sev="moderate">Moderate</button>
-        <button type="button" data-sev="major">Major</button>
+    <header class="sheet-bar">
+      <span class="nav-side"><button type="button" class="nav-btn" id="sheet-cancel">Cancel</button></span>
+      <h2 class="nav-title" id="sheet-title">Add defect</h2>
+      <span class="nav-side end"><button type="button" class="nav-btn strong" id="sheet-add" disabled>Add</button></span>
+    </header>
+    <div class="sheet-body">
+      <p class="footnote" id="sheet-where"></p>
+      <p class="footnote" id="sheet-evidence" hidden></p>
+      <fieldset class="chips-field">
+        <legend class="group-title">What do you see?</legend>
+        <div class="choice-chips" id="type-chips"></div>
+      </fieldset>
+      <fieldset class="chips-field">
+        <legend class="group-title">How bad?</legend>
+        <div class="seg sev" id="sev-seg">
+          <button type="button" data-sev="micro" aria-pressed="false">Micro</button>
+          <button type="button" data-sev="minor" aria-pressed="false">Minor</button>
+          <button type="button" data-sev="moderate" aria-pressed="false">Moderate</button>
+          <button type="button" data-sev="major" aria-pressed="false">Major</button>
+        </div>
+        <p class="footnote" id="sev-hint">Micro: only under magnification · Minor: close look · Moderate: arm's length · Major: heavy damage</p>
+      </fieldset>
+      <div class="group">
+        <label for="defect-note" class="row field-row"><span class="row-label">Note</span><input id="defect-note" placeholder="Optional" autocomplete="off"></label>
       </div>
-      <p class="sheet-hint" id="sev-hint">Micro: only under magnification · Minor: close look · Moderate: arm's length · Major: heavy damage</p>
-    </fieldset>
-    <label for="defect-note" class="note-label">Note<input id="defect-note" placeholder="Optional" autocomplete="off"></label>
-    <div class="sheet-actions">
-      <button type="button" class="btn ghost" id="sheet-cancel">Cancel</button>
-      <button type="button" class="btn primary" id="sheet-add" disabled>Add defect</button>
     </div>
   </div>
 </div>
 
-<!-- History sheet -->
-<div class="sheet-backdrop" id="history" hidden>
-  <div class="sheet tall" role="dialog" aria-modal="true" aria-labelledby="history-title">
-    <div class="sheet-head">
-      <h2 id="history-title">History</h2>
-      <button type="button" class="btn small ghost" id="close-history">Done</button>
-    </div>
-    <ul id="history-list" class="history-list"></ul>
-    <details class="backup">
-      <summary>Backup &amp; restore</summary>
-      <p class="hint">Saved cards live only in this browser. Copy a backup now and then, and paste it back here to restore it on this or another device.</p>
-      <div class="backup-actions">
-        <button id="copy-backup" type="button" class="btn small">Copy backup</button>
-        <!--SITE_ONLY_START--><button id="download-backup" type="button" class="btn small" hidden>Download backup</button><!--SITE_ONLY_END-->
-        <label class="btn small ghost" for="restore-file">Restore from file<input id="restore-file" type="file" accept="application/json,.json,text/plain" hidden></label>
+<!-- Surface viewer -->
+<div class="viewer-modal" id="surface-viewer" role="dialog" aria-modal="true" aria-labelledby="sv-title" hidden>
+  <header class="navbar">
+    <span class="nav-side"><button type="button" class="nav-btn" id="sv-reset"><span>Reset</span></button></span>
+    <h2 class="nav-title" id="sv-title">Inspect surface</h2>
+    <span class="nav-side end"><button type="button" class="nav-btn strong" id="sv-done">Done</button></span>
+  </header>
+  <div class="sv-body">
+    <div class="sv-stage-wrap">
+      <div class="sv-top">
+        <div class="seg sv-side" role="tablist" aria-label="Card side">
+          <button type="button" role="tab" data-sv-side="front" aria-selected="true">Front</button>
+          <button type="button" role="tab" data-sv-side="back" aria-selected="false">Back</button>
+        </div>
+        <div class="seg sv-source" id="sv-source" role="radiogroup" aria-label="Photo" hidden>
+          <button type="button" role="radio" data-sv-source="photo" aria-checked="true">Photo</button>
+          <button type="button" role="radio" data-sv-source="angled" aria-checked="false">Angled light</button>
+        </div>
       </div>
-      <label for="backup-text" class="note-label">Backup text<textarea id="backup-text" rows="4" placeholder="Paste a backup here, then tap Restore pasted backup" spellcheck="false"></textarea></label>
-      <button id="restore-text" type="button" class="btn small">Restore pasted backup</button>
-    </details>
+      <div class="sv-stage" id="sv-stage">
+        <canvas id="sv-canvas" role="img" aria-label="Card photo. Pinch or scroll to zoom, drag to pan."></canvas>
+        <p class="sv-empty" id="sv-empty" hidden>No photo for this side.</p>
+        <span class="sv-zoom num" id="sv-zoom" aria-hidden="true">1×</span>
+      </div>
+    </div>
+    <div class="sv-panel">
+      <div class="sv-tools">
+        <div class="seg compact" id="sv-view" role="radiogroup" aria-label="View">
+          <button type="button" role="radio" data-sv-view="original" aria-checked="true">Original</button>
+          <button type="button" role="radio" data-sv-view="filtered" aria-checked="false">Filtered</button>
+        </div>
+        <div class="chip-scroll" id="sv-filters" role="radiogroup" aria-label="Filter"></div>
+        <p class="footnote tight" id="sv-filter-note"></p>
+        <label class="slider-row" for="sv-intensity" id="sv-intensity-row"><span>Intensity</span><input type="range" id="sv-intensity" min="0" max="100" value="60"><span class="num" id="sv-intensity-val">60</span></label>
+      </div>
+      <div class="sv-marks">
+        <button type="button" class="btn filled wide" id="sv-find"><svg class="ic"><use href="#i-loupe"/></svg><span>Find possible marks</span></button>
+        <p class="footnote tight status" id="sv-status" role="status"></p>
+        <ol class="group mark-list" id="sv-list"></ol>
+        <div class="mark-detail" id="sv-detail" hidden></div>
+        <p class="footnote tight" id="sv-runner-note" hidden></p>
+        <p class="footnote tight">Filters change this view only. Grades, centering and saved results always use the original photo. Everything runs on this device.</p>
+      </div>
+    </div>
   </div>
 </div>
 

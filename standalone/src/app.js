@@ -1,4 +1,5 @@
-/* Card Grading Lab: standalone app. Two screens: scan, then report. Everything runs in the browser. */
+/* Card Grading Lab: standalone app. Tabs: Scan (then Review and its detail screens), History, Settings.
+   Everything runs in the browser. */
 "use strict";
 
 const CRITERIA = window.GRADING_CRITERIA;
@@ -56,6 +57,122 @@ const GAMES = {
   },
 };
 const gameInfo = (g) => GAMES[g] || GAMES.pokemon;
+
+/* ---------------------------------------------------------------- optional modules (thin adapters) */
+
+// The scan-confidence, surface-tool and background-worker modules are separate files. Until they are part of
+// the build, these adapters keep the app working: the fallbacks below are deliberately minimal.
+const CONF_LABEL = { high: "High", medium: "Medium", low: "Low", cannot_assess: "Cannot assess", not_scanned: "Not scanned", assessing: "Assessing scan…" };
+const CONF_RANK = { cannot_assess: 0, low: 1, medium: 2, high: 3 };
+const CONF_AREAS = [["outline", "Outline"], ["centering", "Centering"], ["corners_edges", "Corners & edges"], ["surface_visibility", "Surface visibility"]];
+
+const FallbackConfidence = {
+  notScanned: () => ({ level: "not_scanned", label: CONF_LABEL.not_scanned, areas: null, surfaceLimited: false, summary: "No photo of this side yet.", reasons: [], actions: [] }),
+  assessing: () => ({ level: "assessing", label: CONF_LABEL.assessing, areas: null, surfaceLimited: false, summary: "", reasons: [], actions: [] }),
+  // Minimal stand-in: rates what the scan and the photo check already report. The real rules live in confidence.js.
+  assess({ scan, quality, evidence, outlineAdjusted }) {
+    if (!scan) return this.notScanned();
+    const area = (level, reason) => ({ level, reason });
+    const cardConf = scan.confidence ? scan.confidence.card : 0, borders = scan.confidence ? scan.confidence.borders : 0;
+    const unread = evidence && (evidence.lr === "unread" || evidence.tb === "unread");
+    const blocked = (quality && quality.blocked) || [];
+    const areas = {
+      outline: outlineAdjusted ? area("high", "Outline set by hand.") : area(cardConf >= 0.8 ? "high" : cardConf >= 0.6 ? "medium" : "low", cardConf >= 0.8 ? "The card's outline was found clearly." : "The card's outline was hard to find."),
+      centering: unread ? area("low", "A border couldn't be read; line up the guides by hand.") : area(borders >= 0.8 ? "high" : borders >= 0.6 ? "medium" : "low", borders >= 0.8 ? "The printed borders read clearly." : "The printed borders were hard to read."),
+      corners_edges: !quality ? area("cannot_assess", "The photo check couldn't run.")
+        : quality.verdict === "rescan" ? area("cannot_assess", "This photo can't support a reliable check.")
+        : blocked.length ? area("low", "Part of the edges or corners can't be seen in this photo.")
+        : area(quality.verdict === "ok" ? "high" : "medium", quality.verdict === "ok" ? "Sharpness, glare and framing look fine." : "Usable, with some limits."),
+      surface_visibility: area("low", "A flat photo can't show surface wear."),
+    };
+    const levels = ["outline", "centering", "corners_edges"].map((k) => areas[k].level);
+    const level = levels.reduce((a, b) => (CONF_RANK[b] < CONF_RANK[a] ? b : a), "high");
+    const actions = [];
+    if (quality && quality.verdict === "rescan") actions.push({ id: "retake", label: "Retake photo" });
+    else if (areas.outline.level === "low") actions.push({ id: "adjust_outline", label: "Adjust outline" });
+    actions.push({ id: "angled_light", label: "Add angled-light photo" });
+    const summary = level === "high" ? "Outline, borders and corners read clearly." : level === "cannot_assess" ? "This photo can't support a reliable check." : "Some of this photo was hard to read.";
+    return { level, label: CONF_LABEL[level], areas, surfaceLimited: true, summary, reasons: levels.filter((l) => l !== "high").length ? [summary] : [], actions };
+  },
+  combine(front, back) {
+    const sides = { front, back };
+    const missing = SIDES.filter((s) => !sides[s] || sides[s].level === "not_scanned");
+    if (SIDES.some((s) => sides[s] && sides[s].level === "assessing")) return { level: "assessing", label: CONF_LABEL.assessing, reasons: [], missing };
+    const scored = SIDES.map((s) => sides[s]).filter((c) => c && c.level in CONF_RANK);
+    if (!scored.length) return { level: "not_scanned", label: CONF_LABEL.not_scanned, reasons: [], missing };
+    const level = scored.map((c) => c.level).reduce((a, b) => (CONF_RANK[b] < CONF_RANK[a] ? b : a), "high");
+    return { level, label: CONF_LABEL[level], reasons: scored.flatMap((c) => c.reasons || []), missing };
+  },
+};
+const Confidence = () => (window.ScanConfidence && typeof window.ScanConfidence.assess === "function" ? window.ScanConfidence : FallbackConfidence);
+
+const SURFACE_FILTERS = [
+  ["original", "Original"], ["grayscale", "Grayscale"], ["contrast", "Contrast"], ["red", "Red"], ["green", "Green"],
+  ["blue", "Blue"], ["invert", "Invert"], ["difference", "Color difference"],
+];
+const surfaceApi = () => (window.Surface && typeof window.Surface.filter === "function" ? window.Surface : null);
+
+/** Runs scans, mark finding and filters off the main thread when the worker module is present. */
+function mainThreadRunner(reason) {
+  const jobs = new Map();  // coalesceKey -> job
+  const work = {
+    scan(p) {
+      const scan = Vision.scan(p.pixels, p.mode || "auto", p.corners || null);
+      let quality = null, check = null;
+      try {
+        quality = Inspect.quality(p.pixels, scan);
+        check = Inspect.edgesAndCorners(scan, { quality, face: p.face, ...(p.printedMask ? { printedMask: p.printedMask } : {}) });
+      } catch (_) { quality = null; check = null; }
+      return { scan, quality, check };
+    },
+    marks(p) {
+      const api = surfaceApi();
+      if (!api || typeof api.findMarks !== "function") return { status: "unavailable", candidates: [], cannotAssess: [], note: "Mark finding isn't available in this build." };
+      return api.findMarks(p.scan, p.options || {});
+    },
+    filter(p) {
+      const api = surfaceApi();
+      if (!api) throw new Error("Filters aren't available in this build.");
+      return api.filter(p.src, p.options || {});
+    },
+  };
+  return {
+    mode: "main-thread",
+    unavailableReason: reason,
+    run(kind, payload, { coalesceKey } = {}) {
+      if (coalesceKey && jobs.has(coalesceKey)) this.cancel(coalesceKey);
+      return new Promise((resolve, reject) => {
+        const job = { reject, done: false };
+        if (coalesceKey) jobs.set(coalesceKey, job);
+        // A short delay lets the busy state paint first (and lets a newer request replace this one).
+        setTimeout(() => {
+          if (job.done) return;
+          job.done = true;
+          if (coalesceKey && jobs.get(coalesceKey) === job) jobs.delete(coalesceKey);
+          try { resolve(work[kind](payload)); } catch (err) { reject(err); }
+        }, kind === "filter" ? 30 : 40);
+      });
+    },
+    cancel(key) {
+      const job = jobs.get(key);
+      if (!job) return;
+      jobs.delete(key);
+      if (!job.done) { job.done = true; job.reject({ stale: true }); }
+    },
+    dispose() { for (const key of [...jobs.keys()]) this.cancel(key); },
+  };
+}
+
+let runnerInstance = null;
+function runner() {
+  if (runnerInstance) return runnerInstance;
+  if (window.ScanWorker && typeof window.ScanWorker.create === "function") {
+    try { runnerInstance = window.ScanWorker.create({ sources: window.SCAN_WORKER_SOURCES || null }); } catch (_) { runnerInstance = null; }
+  }
+  if (!runnerInstance) runnerInstance = mainThreadRunner("Background processing isn't available here, so the page can pause briefly while a photo is measured.");
+  return runnerInstance;
+}
+const isStale = (err) => !!(err && (err.stale || err.cancelled));
 
 const FINISHES = ["", "Non-foil", "Holo", "Reverse holo", "Foil", "Etched / textured", "Metal"];
 const LANGUAGES = { EN: "English", JP: "Japanese", ZH: "Chinese", KO: "Korean", FR: "French", DE: "German", IT: "Italian", ES: "Spanish", PT: "Portuguese" };
@@ -119,7 +236,29 @@ const state = {
   example: false,
   report: null,
   savedId: null,
+  tab: "scan",      // scan | history | settings
+  pane: null,       // detail screen open over Review (element id), or null
+  // Revision tokens: every async result carries the card revision and, for one side, the photo revision it
+  // was started for; a result whose token no longer matches is dropped (see isCurrent()).
+  cardRev: 0,
+  pendingRev: { front: "", back: "" },   // latest photo/outline requested per side (the scan in flight)
+  conf: { front: null, back: null },     // scan confidence per side (ScanConfidence result)
+  confAnnounced: { front: "", back: "" },
+  marks: { front: null, back: null },    // transient mark-finding results per side: never saved
+  angled: { front: null, back: null },   // transient angled-light photos per side (view only): never saved
+  lookup: { status: "idle", text: "" },  // card identification status for the Card details row
 };
+
+let revCounter = 0;
+const newRev = () => `${Date.now().toString(36)}.${(++revCounter).toString(36)}`;
+const cardToken = () => ({ card: state.cardRev });
+const sideToken = (side) => ({ card: state.cardRev, side, rev: state.scans[side] ? state.scans[side].rev : "" });
+function isCurrent(t) {
+  if (!t || t.card !== state.cardRev) return false;
+  if (t.pending) return state.pendingRev[t.side] === t.pending;
+  if (t.side) return !!state.scans[t.side] && state.scans[t.side].rev === t.rev;
+  return true;
+}
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -135,19 +274,30 @@ const whereText = (d) => {
   return d.location === "surface" ? `${d.side} surface` : `${d.side} ${pretty(d.location)} ${comp === "corners" ? "corner" : "edge"}`;
 };
 
+// User-facing wording: what older text calls a "DING" is a defect. Stored data keeps its names.
+const uiText = (s) => String(s == null ? "" : s).replace(/\bDING([Ss])?\b/g, (m, plural) => (plural ? "defects" : "defect"));
+
 function toast(msg) {
   const t = $("#toast");
-  t.textContent = msg;
+  t.textContent = uiText(msg);
   t.hidden = false;
   clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => (t.hidden = true), 2800);
+  toast.timer = setTimeout(() => (t.hidden = true), 3200);
 }
+
+function announce(msg) {
+  const live = $("#live");
+  live.textContent = "";
+  setTimeout(() => { live.textContent = msg; }, 30);
+}
+
+const svgIcon = (name, cls = "ic") => `<svg class="${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
 /* ---------------------------------------------------------------- storage */
 
 // Drafts v3 add the inspection record (inspected, centering_evidence). A v2 draft still resumes, but under
 // the current rules its uninspected areas leave the grade incomplete.
-const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v3", draftV2: "cardGradingLab.draft.v2", game: "cardGradingLab.game" };
+const KEYS = { cards: "cardGradingLab.cards.v1", draft: "cardGradingLab.draft.v3", draftV2: "cardGradingLab.draft.v2", game: "cardGradingLab.game", theme: "cardGradingLab.theme" };
 
 const localStore = {
   read(key, fallback) {
@@ -349,45 +499,147 @@ function neutralizeUnreadSides(scan) {
   return unmeasured;
 }
 
-function applyScan(side, scan, photo = null) {
+/** Store a finished scan for one side. `out` is the scan job's result: {scan, quality, check}. */
+function applyScanResult(side, out, photo, { rev, outlineAdjusted = false } = {}) {
+  const scan = out.scan;
   const img = canvasFromRGBA(scan.warped);
   const unmeasured = neutralizeUnreadSides(scan);
   state.scans[side] = {
     img, lines: scan.lines, width: scan.width, height: scan.height, margin: scan.margin,
     confidence: scan.confidence.borders,
     photo, corners: scan.corners,  // kept for this session so the outline can be adjusted by hand
-    result: scan, quality: null, check: null,  // full scan, photo-quality gate, edge/corner candidates
+    result: scan, quality: out.quality || null, check: out.check || null,  // full scan, photo-quality gate, edge/corner candidates
+    rev: rev || newRev(), outlineAdjusted,
   };
+  state.pendingRev[side] = state.scans[side].rev;
   state.evidence[side] = { lr: unmeasured.lr ? "unread" : "measured", tb: unmeasured.tb ? "unread" : "measured" };
-  state.photoLimits[side] = [...FLAT_PHOTO_LIMITS];  // the quality check below adds what else this photo can't show
+  // Whatever its quality, a flat photo can't show the surface; the quality check adds what else it can't show.
+  state.photoLimits[side] = out.quality ? Grading.photoLimitComponents([...out.quality.blocked, ...FLAT_PHOTO_LIMITS]) : [...FLAT_PHOTO_LIMITS];
+  state.dismissed[side] = [];
   state.thumbs[side] = thumbnail(img, scan.margin);
   state.centering[side] = centeringFromLines(scan.lines);
-  runInspection(side);
+  // Mark candidates belong to the photo they were found in; an angled-light photo to the card it showed.
+  state.marks[side] = null;
+  if (!outlineAdjusted) state.angled[side] = null;
+  // Defects marked at a spot on an earlier photo: the spot may have moved. Never dropped: the user re-checks.
+  for (const d of state.defects) if (d.side === side && d.region && d.scan_revision !== state.scans[side].rev) d.recheck = true;
+  assessConfidence(side);
+  sv.invalidate(side);
+}
+
+function assessConfidence(side) {
+  const s = state.scans[side];
+  if (!s || !s.result) { state.conf[side] = s ? null : Confidence().notScanned(); return; }
+  const input = { scan: s.result, quality: s.quality, check: s.check, evidence: state.evidence[side], outlineAdjusted: !!s.outlineAdjusted };
+  try {
+    state.conf[side] = Confidence().assess(input);
+  } catch (_) {
+    state.conf[side] = FallbackConfidence.assess(input);
+  }
+}
+
+// Front only: a confirmed, readable reference marks the card's printed white so it isn't taken for whitening.
+// (Also run with force after the reference is removed, to drop the mask again.)
+function refineWithReference(side, { force = false } = {}) {
+  const s = state.scans[side];
+  if (side !== "front" || !s || !s.photo || !s.result || !s.quality) return;
+  const usable = !!(state.reference && state.reference.rgba && state.reference.usable);
+  if (!usable && !force) return;
+  const token = sideToken(side), ref = state.reference;
+  setTimeout(() => {
+    if (!isCurrent(token) || state.reference !== ref) return;
+    try {
+      const opts = { quality: s.quality, face: side };
+      if (usable) opts.printedMask = Identify.printedMask(ref.rgba, s.result.warped, s.margin);
+      s.check = Inspect.edgesAndCorners(s.result, opts);
+    } catch (_) { /* keep the previous check */ }
+    renderScanCheck();
+    viewer.render();
+    if (state.view === "report") runGrade();
+  }, 20);
+}
+
+const scanPayload = (pixels, side, corners = null) => ({
+  // A worker may take ownership of the buffer it's given: send a copy and keep the photo here.
+  pixels: runner().mode === "worker" ? { width: pixels.width, height: pixels.height, data: new Uint8ClampedArray(pixels.data) } : pixels,
+  mode: "auto", corners, face: side,
+});
+
+function setSideBusy(side, on) {
+  const slot = $(`.slot[data-side="${side}"]`);
+  if (slot) {
+    slot.classList.toggle("busy", on);
+    $(".slot-busy", slot).textContent = on ? "Measuring…" : "";
+  }
+  if (state.activeSide === side) $("#guide-wrap").classList.toggle("busy", on);
+}
+
+function scanToasts(side) {
+  const ev = state.evidence[side];
+  const um = { lr: ev.lr === "unread", tb: ev.tb === "unread" };
+  const q = state.scans[side].quality;
+  const failed = q && q.verdict === "rescan" ? Object.values(q.checks).find((c) => c.status === "fail") : null;
+  if (failed) toast(`${cap(side)}: this photo can't support a reliable check. ${failed.note}`);
+  else if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In Centering, line up the pink guides with the printed frame.`);
+  else if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the border was hard to read. Check the guide lines in Centering.`);
+}
+
+function announceConfidence(side) {
+  const s = state.scans[side], c = state.conf[side];
+  if (!s || !c || c.level === "assessing" || state.confAnnounced[side] === s.rev) return;
+  state.confAnnounced[side] = s.rev;
+  announce(`${cap(side)} scanned. Scan confidence: ${CONF_LABEL[c.level] || c.label}.${c.surfaceLimited ? " Limited: surface needs inspection." : ""}`);
+}
+
+/** Run a scan job for one side and apply it if it is still the latest request for that card and side. */
+async function runScan(side, pixels, { corners = null, outlineAdjusted = false } = {}) {
+  const pending = newRev();
+  state.pendingRev[side] = pending;
+  const token = { card: state.cardRev, side, pending };
+  setSideBusy(side, true);
+  state.conf[side] = Confidence().assessing();
+  state.marks[side] = null;   // candidates from the old photo no longer apply
+  sv.invalidate(side);
+  renderConfidence();
+  let ok = false;
+  try {
+    const out = await runner().run("scan", scanPayload(pixels, side, corners), { coalesceKey: `scan-${side}` });
+    if (!isCurrent(token)) return false;
+    applyScanResult(side, out, pixels, { rev: pending, outlineAdjusted });
+    refineWithReference(side);
+    ok = true;
+    return true;
+  } catch (err) {
+    if (isStale(err) || !isCurrent(token)) return false;
+    toast((err && err.timeout ? "Measuring this photo took too long. Try again, or try another photo." : err && err.message) || "Couldn't measure this photo.");
+    return false;
+  } finally {
+    if (isCurrent(token)) {
+      // This was the latest request for the side: it's finished either way.
+      if (!ok) { state.pendingRev[side] = state.scans[side] ? state.scans[side].rev : ""; assessConfidence(side); }
+      setSideBusy(side, false);
+      renderConfidence();
+    }
+  }
 }
 
 async function scanFile(side, file) {
   leaveExample();
-  const slot = $(`.slot[data-side="${side}"]`);
-  slot.classList.add("busy");
-  $("#guide-wrap").classList.toggle("busy", state.view === "report");
+  const card = state.cardRev;
+  setSideBusy(side, true);
+  let pixels;
   try {
-    const pixels = await readImage(file);
-    await new Promise((r) => setTimeout(r, 30));  // let the busy overlay paint
-    applyScan(side, Vision.scan(pixels, "auto"), pixels);
-    const ev = state.evidence[side];
-    const um = { lr: ev.lr === "unread", tb: ev.tb === "unread" };
-    const q = state.scans[side].quality;
-    const failed = q && q.verdict === "rescan" ? Object.values(q.checks).find((c) => c.status === "fail") : null;
-    if (failed) toast(`${cap(side)}: this photo can't support a reliable check. ${failed.note}`);
-    else if (um.lr || um.tb) toast(`${cap(side)}: couldn't read the ${um.lr && um.tb ? "border" : um.lr ? "left/right border" : "top/bottom border"} (full-art card or glare). In the report, line up the pink guides with the printed frame.`);
-    else if (state.scans[side].confidence < 0.6) toast(`${cap(side)}: the border was hard to read. Check the guide lines in the report.`);
+    pixels = await readImage(file);
   } catch (err) {
-    toast(err.message || "Couldn't measure this photo.");
-  } finally {
-    slot.classList.remove("busy");
-    $("#guide-wrap").classList.remove("busy");
+    if (card === state.cardRev) { setSideBusy(side, false); toast(err.message || "Couldn't open this photo."); }
+    return;
   }
+  if (card !== state.cardRev) return;
+  const ok = await runScan(side, pixels);
   renderSlots();
+  if (!ok) return;
+  scanToasts(side);
+  announceConfidence(side);
   if (state.view === "report") {
     state.activeSide = side;
     renderCentering();
@@ -400,17 +652,126 @@ function renderSlots() {
     const slot = $(`.slot[data-side="${side}"]`);
     const img = $(".slot-img", slot);
     const thumb = state.thumbs[side];
-    const done = !!state.scans[side];
+    const done = !!thumb;
     slot.classList.toggle("done", done);
     img.hidden = !done;
     if (done) img.src = thumb;
     $(".slot-meta", slot).textContent = done
       ? `${splitText(state.centering[side].lr)} · ${splitText(state.centering[side].tb)}`
-      : "Tap to add photo";
+      : "No photo";
   }
-  const front = !!state.scans.front, back = !!state.scans.back;
-  $("#get-report").disabled = !(front && back);
-  $("#front-only").hidden = !(front && !back);
+  const front = !!state.thumbs.front, back = !!state.thumbs.back;
+  const busy = SIDES.some((s) => state.conf[s] && state.conf[s].level === "assessing");
+  $("#review-card").disabled = !(front && back) || busy;
+  $("#front-only").hidden = !(front && !back) || busy;
+  $("#clear-card").hidden = !(front || back);
+  renderConfidence();
+}
+
+/* ---------------------------------------------------------------- scan confidence */
+
+function confState(side) {
+  if (state.conf[side]) return state.conf[side];
+  return state.scans[side] ? Confidence().assessing() : Confidence().notScanned();
+}
+
+const confWhyOpen = { front: false, back: false };
+
+/** One side's confidence: segmented bar + label, the summary, an action, and "Why this rating?". */
+function confidenceRow(side, { detail = true, compact = false } = {}) {
+  const c = confState(side);
+  const row = document.createElement("div");
+  row.className = "conf-row";
+  row.dataset.side = side;
+  row.dataset.level = c.level;
+  const label = CONF_LABEL[c.level] || c.label;
+  row.innerHTML = `<div class="conf-head"><span class="conf-side"></span><span class="cbar" data-level="${c.level}" aria-hidden="true"><i></i><i></i><i></i></span><span class="conf-label" data-level="${c.level}"></span></div>`;
+  $(".conf-side", row).textContent = cap(side);
+  $(".conf-label", row).textContent = label;
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `${cap(side)} scan confidence`);
+  if (c.surfaceLimited && c.level !== "assessing" && c.level !== "not_scanned") {
+    const lim = document.createElement("span");
+    lim.className = "conf-limited";
+    lim.innerHTML = `${svgIcon("warn")}<span>Limited — surface needs inspection</span>`;
+    $(".conf-head", row).append(lim);
+  }
+  if (!detail) return row;
+  if (c.summary) {
+    const p = document.createElement("p");
+    p.className = "conf-summary";
+    p.textContent = c.summary;
+    row.append(p);
+  }
+  // On the Scan screen only the actions that fix a weak scan are offered; Review offers all of them.
+  const actions = (c.actions || []).filter((a) => ["retake", "adjust_outline", "angled_light"].includes(a.id) && (!compact || a.id !== "angled_light"));
+  if (actions.length && c.level !== "assessing" && c.level !== "not_scanned") {
+    const box = document.createElement("div");
+    box.className = "conf-actions";
+    for (const a of actions.slice(0, 2)) {
+      if (a.id === "adjust_outline" && !(state.scans[side] && state.scans[side].photo)) continue;
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn tinted";
+      b.dataset.confAction = a.id;
+      b.dataset.side = side;
+      b.textContent = a.label || { retake: "Retake photo", adjust_outline: "Adjust outline", angled_light: "Add angled-light photo" }[a.id];
+      box.append(b);
+    }
+    if (box.children.length) row.append(box);
+  }
+  if (c.areas) {
+    const det = document.createElement("details");
+    det.className = "conf-why";
+    det.open = !!confWhyOpen[side];
+    det.addEventListener("toggle", () => { confWhyOpen[side] = det.open; });
+    det.innerHTML = "<summary>Why this rating?</summary><dl></dl>";
+    const dl = $("dl", det);
+    for (const [key, name] of CONF_AREAS) {
+      const a = c.areas[key];
+      if (!a) continue;
+      const dt = document.createElement("dt");
+      dt.textContent = name;
+      const dd = document.createElement("dd");
+      const b = document.createElement("b");
+      b.textContent = CONF_LABEL[a.level] || a.level;
+      dd.append(b, ` · ${a.reason || ""}`);
+      dl.append(dt, dd);
+    }
+    row.append(det);
+  }
+  return row;
+}
+
+function renderConfidence() {
+  const scanBox = $("#scan-conf");
+  scanBox.innerHTML = "";
+  if (SIDES.some((s) => state.thumbs[s] || (state.conf[s] && state.conf[s].level === "assessing"))) {
+    for (const side of SIDES) scanBox.append(confidenceRow(side, { compact: true }));
+  }
+  scanBox.previousElementSibling.hidden = !scanBox.children.length;
+  const rv = $("#review-conf");
+  rv.innerHTML = "";
+  if (state.view === "report") {
+    const other = state.activeSide === "front" ? "back" : "front";
+    rv.append(confidenceRow(state.activeSide), confidenceRow(other, { detail: false }));
+  }
+  const r = runnerInstance;
+  const note = $("#runner-note");
+  note.hidden = !(r && r.mode === "main-thread" && SIDES.some((s) => state.scans[s]));
+  note.textContent = r ? r.unavailableReason || "Scans run on the main thread here, so the page can pause briefly." : "";
+}
+
+function confAction(id, side) {
+  if (id === "retake") { $(`#file-${side}`).click(); return; }
+  if (id === "adjust_outline") {
+    state.activeSide = side;
+    if (state.view !== "report") setView("report");
+    pushPane("pane-centering");
+    if (state.scans[side] && state.scans[side].photo) setOutlineMode(true);
+    return;
+  }
+  if (id === "angled_light") { state.activeSide = side; $("#angled-file").click(); }
 }
 
 /* ---------------------------------------------------------------- centering editor */
@@ -615,19 +976,18 @@ async function applyOutline() {
   if (!s || !s.photo || !guide.outline) return setOutlineMode(false);
   const H = Vision.warpMatrix(s.corners, s.margin);
   const corners = guide.outline.map(([x, y]) => Vision.applyH(H, x, y));
-  $("#guide-wrap").classList.add("busy");
-  await new Promise((r) => setTimeout(r, 30));
-  try {
-    leaveExample();
-    applyScan(side, Vision.scan(s.photo, "auto", corners), s.photo);
-    renderSlots();
+  leaveExample();
+  setOutlineMode(false);
+  const card = state.cardRev;
+  const ok = await runScan(side, s.photo, { corners, outlineAdjusted: true });
+  if (card !== state.cardRev) return;
+  renderSlots();
+  if (ok) {
     toast("Outline applied. The card was re-flattened and re-graded.");
-  } finally {
-    $("#guide-wrap").classList.remove("busy");
-    setOutlineMode(false);
-    renderCentering();
-    runGrade();
+    announceConfidence(side);
   }
+  renderCentering();
+  runGrade();
 }
 
 function renderRatioInputs() {
@@ -645,18 +1005,23 @@ function renderRatioInputs() {
   conf.textContent = !s
     ? (um ? `Not measured, so it counts as ${share}. Add a photo or type the ratios.` : ev.lr === "typed" || ev.tb === "typed" ? "Typed in" : "Measured from the photo")
     : um ? `Couldn't read the ${um} border: drag the pink guides onto the printed frame`
-    : `Border detection ${Math.round(s.confidence * 100)}%`;
+    : s.confidence >= 0.8 ? "Measured from the photo. The borders read clearly."
+    : s.confidence >= 0.6 ? "Measured from the photo. Check the guide lines."
+    : "The borders were hard to read: check the guide lines.";
   conf.classList.toggle("low", !!um || (!!s && s.confidence < 0.6));
 }
 
 function renderCentering() {
   const s = state.scans[state.activeSide];
   $("#adjust-outline").hidden = !(s && s.photo);
-  $$("#centering-section .segmented button, #scancheck-section .segmented button, .viewer-side button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
+  $$(".side-seg button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.side === state.activeSide)));
+  $("#guide-wrap").classList.toggle("busy", !!(state.conf[state.activeSide] && state.conf[state.activeSide].level === "assessing"));
   viewer.render();
   guide.show();
   renderRatioInputs();
   renderScanCheck();
+  renderSurfacePane();
+  renderConfidence();
 }
 
 /* ---------------------------------------------------------------- defects */
@@ -686,34 +1051,45 @@ function buildMap(fig, side) {
   fig.append(svg);
 }
 
-function openSheet(side, location) {
+function openSheet(side, location, opts = {}) {
   const comp = COMPONENT_OF[location];
-  state.sheet = { side, location, type: null, severity: null };
+  state.sheet = { side, location, type: null, severity: null, mark: opts.mark || null };
   $("#sheet-where").textContent = cap(whereText({ side, location }));
+  const ev = $("#sheet-evidence");
+  ev.hidden = !opts.mark;
+  if (opts.mark) ev.textContent = `From a possible mark: ${opts.mark.reason || "found in the photo"}. Choose what it is and how bad it is: the detection confidence is not a severity.`;
   const chips = $("#type-chips");
   chips.innerHTML = "";
-  for (const [key, spec] of Object.entries(CRITERIA.defects.types)) {
-    if (!spec.applies_to.includes(comp)) continue;
+  const suggested = (opts.mark && opts.mark.suggestedTypes) || [];
+  const types = Object.entries(CRITERIA.defects.types).filter(([, spec]) => spec.applies_to.includes(comp));
+  types.sort(([a], [b]) => (suggested.includes(a) ? suggested.indexOf(a) : 99) - (suggested.includes(b) ? suggested.indexOf(b) : 99));
+  for (const [key, spec] of types) {
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.type = key;
     b.textContent = spec.label;
+    if (suggested.includes(key)) {
+      const s = document.createElement("span");
+      s.className = "sugg";
+      s.textContent = "Suggested";
+      b.append(s);
+    }
     b.addEventListener("click", () => { state.sheet.type = key; updateSheet(); });
     chips.append(b);
   }
   $("#defect-note").value = "";
   updateSheet();
-  $("#defect-sheet").hidden = false;
+  openDialog("#defect-sheet", opts.opener || document.activeElement);
 }
 
 function closeSheet() {
-  $("#defect-sheet").hidden = true;
+  closeDialog("#defect-sheet");
 }
 
 function updateSheet() {
   const { type, severity } = state.sheet;
-  $$("#type-chips button").forEach((b) => b.classList.toggle("active", b.dataset.type === type));
-  $$("#sev-seg button").forEach((b) => b.classList.toggle("active", b.dataset.sev === severity));
+  $$("#type-chips button").forEach((b) => { b.classList.toggle("active", b.dataset.type === type); b.setAttribute("aria-pressed", String(b.dataset.type === type)); });
+  $$("#sev-seg button").forEach((b) => { b.classList.toggle("active", b.dataset.sev === severity); b.setAttribute("aria-pressed", String(b.dataset.sev === severity)); });
   $("#sheet-add").disabled = !(type && severity);
   if (severity) {
     const capValue = type ? CRITERIA.defects.types[type].caps[severity] : null;
@@ -724,11 +1100,37 @@ function updateSheet() {
 
 function addDefectFromSheet() {
   leaveExample();
-  const { side, location, type, severity } = state.sheet;
+  const { side, location, type, severity, mark } = state.sheet;
+  if (!(type && severity)) return;
   const note = $("#defect-note").value.trim();
-  state.defects.push({ side, location, type, severity, note: note || null });
-  markInspected(side, COMPONENT_OF[location]);  // logging a DING there means you looked there
+  const d = { side, location, type, severity, note: note || null };
+  if (mark) {
+    // A possible mark the user confirmed: where it is on the card (normalized), on which photo, and why.
+    d.confirmed = true;
+    d.region = { x: mark.x, y: mark.y, w: mark.w, h: mark.h };
+    d.scan_revision = mark.revision || (state.scans[side] && state.scans[side].rev) || "";
+    d.method = mark.method || "marks";
+    d.evidence = String(mark.reason || "").slice(0, 200);
+    sv.setMarkStatus(side, mark.id, "added");
+  }
+  state.defects.push(d);
+  markInspected(side, COMPONENT_OF[location]);  // logging a defect there means you looked there
   closeSheet();
+  runGrade();
+  if (mark) sv.render();
+}
+
+function removeDefect(d) {
+  leaveExample();
+  const i = state.defects.indexOf(d);
+  if (i >= 0) state.defects.splice(i, 1);
+  runGrade();
+}
+
+function keepDefect(d) {
+  leaveExample();
+  delete d.recheck;
+  if (state.scans[d.side]) d.scan_revision = state.scans[d.side].rev;
   runGrade();
 }
 
@@ -742,40 +1144,54 @@ function paintZones() {
   });
 }
 
+function defectItem(d, i, areas) {
+  const li = document.createElement("li");
+  li.innerHTML = `<span class="ding-no ${d.severity}" aria-hidden="true">${i + 1}</span>
+    <span class="d-text"><span class="d-label"></span><br><span class="where"></span></span>
+    <span class="d-impact"></span>
+    <button type="button" class="icon-btn remove">${svgIcon("trash")}</button>`;
+  $(".d-label", li).textContent = CRITERIA.defects.types[d.type].label;
+  $(".where", li).textContent = uiText(`${cap(d.severity)} · ${whereText(d)}${d.note ? ` · ${d.note}` : ""}`);
+  const area = `${d.side} ${COMPONENT_OF[d.location]}`;
+  if (areas && areas[area] != null) $(".d-impact", li).textContent = `${cap(area)} ${areas[area]}`;
+  const rm = $(".remove", li);
+  rm.setAttribute("aria-label", `Remove defect ${i + 1}: ${CRITERIA.defects.types[d.type].label}, ${whereText(d)}`);
+  rm.addEventListener("click", () => removeDefect(d));
+  if (d.recheck) {
+    const box = document.createElement("span");
+    box.className = "recheck";
+    box.innerHTML = `${svgIcon("warn", "ic small")} Re-check this defect: the photo changed since it was marked.<span class="recheck-btns"><button type="button" class="btn plain inline">Still there</button><button type="button" class="btn plain inline danger-text">Remove</button></span>`;
+    const [keep, drop] = $$("button", box);
+    keep.addEventListener("click", () => keepDefect(d));
+    drop.addEventListener("click", () => removeDefect(d));
+    $(".d-text", li).append(box);
+  }
+  return li;
+}
+
 function renderDefects() {
   const list = $("#defect-list");
   list.innerHTML = "";
   if (!state.defects.length) {
-    list.innerHTML = '<li class="empty">No DINGS logged. Areas ticked as checked above count as flawless; unchecked areas leave the grade incomplete. Tap the card above where you see wear.</li>';
+    list.innerHTML = '<li class="empty">No defects logged. Areas ticked as checked count as flawless; unchecked areas leave the grade incomplete.</li>';
   }
   const areas = state.report && state.report.grades.TAG.subgrades;
-  state.defects.forEach((d, i) => {
-    const li = document.createElement("li");
-    li.innerHTML = `<span class="ding-no ${d.severity}" aria-hidden="true">${i + 1}</span>
-      <span class="d-text"><span class="d-label"></span><br><span class="where"></span></span>
-      <span class="d-impact"></span>
-      <button type="button" class="remove" aria-label="Remove DING ${i + 1}">✕</button>`;
-    $(".d-label", li).textContent = CRITERIA.defects.types[d.type].label;
-    $(".where", li).textContent = `${cap(d.severity)} · ${whereText(d)}${d.note ? ` · ${d.note}` : ""}`;
-    const area = `${d.side} ${COMPONENT_OF[d.location]}`;
-    if (areas && areas[area] != null) $(".d-impact", li).textContent = `${cap(area)} ${areas[area]}`;
-    $(".remove", li).addEventListener("click", () => {
-      leaveExample();
-      state.defects.splice(i, 1);
-      runGrade();
-    });
-    list.append(li);
-  });
+  state.defects.forEach((d, i) => list.append(defectItem(d, i, areas)));
+  const surf = $("#surface-defects");
+  surf.innerHTML = "";
+  state.defects.forEach((d, i) => { if (d.location === "surface") surf.append(defectItem(d, i, areas)); });
+  if (!surf.children.length) surf.innerHTML = '<li class="empty">No surface defects logged.</li>';
   const n = state.defects.length;
+  const recheck = state.defects.filter((d) => d.recheck).length;
   const checked = SIDES.reduce((k, side) => k + COMPONENTS.filter((c) => isInspected(side, c)).length, 0);
-  $("#defect-summary").textContent = `${n ? `${n} logged` : "None logged"} · ${checked}/6 checked`;
+  $("#defect-summary").textContent = recheck ? `${recheck} to re-check` : `${n ? `${n} logged` : "None"} · ${checked}/6 checked`;
   paintZones();
   renderInspect();
 }
 
 /* ---------------------------------------------------------------- inspection checklist */
 
-// Same rules as the engine: a component with a DING logged on that side has been looked at, unless the
+// Same rules as the engine: a component with a defect logged on that side has been looked at, unless the
 // photo can't show it; then only a check on the card in hand counts.
 const hasDefect = (side, comp) => state.defects.some((d) => d.side === side && COMPONENT_OF[d.location] === comp);
 const photoLimited = (side, comp) => state.photoLimits[side].includes(comp);
@@ -796,25 +1212,40 @@ function setInspected(side, comp, on) {
   runGrade();
 }
 
-function renderInspect() {
-  let all = true;
-  for (const box of $$("#inspect input[type=checkbox]")) {
-    const { side, comp } = box.dataset;
-    const limited = photoLimited(side, comp);
-    const locked = !limited && hasDefect(side, comp);  // can't be unchecked while a DING is logged there
-    box.checked = isInspected(side, comp);
-    box.disabled = locked;
-    const row = box.closest(".check");
-    row.classList.toggle("locked", locked);
-    row.classList.toggle("limited", limited);
-    const span = $("span", row);
-    span.textContent = `${cap(comp)} ${limited ? "checked in hand" : "checked"}`;
-    span.dataset.hint = comp === "surface" ? "A flat photo can't show it: tilt the card under a light" : "Photo can't show these: check the card in hand";
-    row.title = !limited ? "" : comp === "surface"
-      ? "A flat photo can't show scratches, print lines, dents, creases or gloss loss. Tilt the card under a light, log what you find, then tick."
-      : "The photo can't show these. Check the card in hand under good light, then tick.";
-    all = all && box.checked;
+function checkRow(side, comp, row = null) {
+  const limited = photoLimited(side, comp);
+  const locked = !limited && hasDefect(side, comp);  // can't be unchecked while a defect is logged there
+  if (!row) {
+    row = document.createElement("label");
+    row.innerHTML = '<span class="row-main"><span class="row-title"></span><span class="row-sub"></span></span><input type="checkbox">';
   }
+  row.className = "row check-row" + (locked ? " locked" : "") + (limited ? " limited" : "");
+  const box = $("input", row);
+  box.dataset.side = side;
+  box.dataset.comp = comp;
+  box.checked = isInspected(side, comp);
+  box.disabled = locked;
+  $(".row-title", row).textContent = `${cap(side)} ${comp} ${limited ? "checked in hand" : "checked"}`;
+  $(".row-sub", row).textContent = locked ? "A defect is logged here, so it counts as looked at."
+    : !limited ? "Looked at under good light; anything found is logged."
+    : comp === "surface" ? "A flat photo can't show scratches, print lines, dents, creases or gloss loss. Tilt the card under a light, log what you find, then tick."
+    : "The photo can't show these. Check the card in hand under good light, then tick.";
+  return row;
+}
+
+function renderInspect() {
+  const fill = (sel, combos) => {
+    // Update rows in place so a checkbox keeps keyboard focus after it's toggled.
+    const box = $(sel);
+    if (box.children.length !== combos.length) {
+      box.innerHTML = "";
+      for (const [side, comp] of combos) box.append(checkRow(side, comp));
+    } else combos.forEach(([side, comp], i) => checkRow(side, comp, box.children[i]));
+  };
+  fill("#all-checks", SIDES.flatMap((s) => COMPONENTS.map((c) => [s, c])));
+  fill("#edges-checks", SIDES.flatMap((s) => ["corners", "edges"].map((c) => [s, c])));
+  fill("#surface-checks", SIDES.map((s) => [s, "surface"]));
+  const all = SIDES.every((s) => COMPONENTS.every((c) => isInspected(s, c)));
   $("#inspect").classList.toggle("incomplete", !all);
 }
 
@@ -917,7 +1348,10 @@ const viewer = {
       if (d.side !== side) return;
       const k = (seen[d.location] = (seen[d.location] || 0) + 1) - 1;
       let [fx, fy] = MARKER_POS[d.location];
-      if (d.location === "surface" && k) {
+      if (d.region) {  // a confirmed mark: drawn where it was found
+        fx = d.region.x + d.region.w / 2;
+        fy = d.region.y + d.region.h / 2;
+      } else if (d.location === "surface" && k) {
         fx += 0.2 * Math.cos(k * 2.2);
         fy += 0.18 * Math.sin(k * 2.2);
       } else if (k) {
@@ -949,24 +1383,6 @@ const QUALITY_TEXT = { ok: "Photo OK", warn: "Usable, with limits", rescan: "Ret
 // loss): that needs the card tilted under a light, so the surface only counts once checked in hand.
 const FLAT_PHOTO_LIMITS = ["surface"];
 
-function runInspection(side) {
-  const s = state.scans[side];
-  if (!s || !s.photo || !s.result) return;
-  state.dismissed[side] = [];
-  try {
-    s.quality = Inspect.quality(s.photo, s.result);
-    state.photoLimits[side] = Grading.photoLimitComponents([...s.quality.blocked, ...FLAT_PHOTO_LIMITS]);
-    const opts = { quality: s.quality, face: side };
-    if (side === "front" && state.reference && state.reference.rgba && state.reference.usable) {
-      opts.printedMask = Identify.printedMask(state.reference.rgba, s.result.warped, s.margin);
-    }
-    s.check = Inspect.edgesAndCorners(s.result, opts);
-  } catch (err) {
-    s.quality = null;
-    s.check = null;
-  }
-}
-
 const blockedText = (item) => {
   const [comp, where] = item.split(":");
   return where ? `${pretty(where)} ${comp === "corners" ? "corner" : "edge"}` : comp;
@@ -975,11 +1391,11 @@ const blockedText = (item) => {
 function scanCheckLine(text, cls = "") {
   const li = document.createElement("li");
   if (cls) li.className = cls;
-  li.textContent = text;
+  li.textContent = uiText(text);
   return li;
 }
 
-// A photo-check spot, and whether the user has dealt with it: added as a DING (same side, place and type) or
+// A photo-check spot, and whether the user has dealt with it: added as a defect (same side, place and type) or
 // dismissed as "Not wear". Spots left open count as unconfirmed possible wear.
 const flagKey = (d) => [d.side, d.location, d.type, d.severity].join("|");
 const flagAdded = (d) => state.defects.some((x) => x.side === d.side && x.location === d.location && x.type === d.type);
@@ -998,7 +1414,7 @@ function pendingFlags() {
 }
 
 // In-hand surface check, in order of how much each costs a grade (TAG's reports: a crease means a median grade
-// of 2, a dent 4, play wear 5). Each maps to a DING type from defects.yaml.
+// of 2, a dent 4, play wear 5). Each maps to a defect type from defects.yaml.
 const SURFACE_CHECKS = [
   ["crease", "Crease or wrinkle", "crease"],
   ["dent", "Dent or indentation", "indentation"],
@@ -1010,73 +1426,103 @@ const SURFACE_CHECKS = [
 ];
 
 function surfaceChecklist(side) {
-  const det = document.createElement("details");
-  det.className = "sc-surface";
+  const wrap = document.createElement("div");
+  wrap.className = "sc-surface";
   const done = state.inHand[side].includes("surface");
-  det.innerHTML = `<summary class="link-btn"></summary><p class="hint"></p><div class="sc-surface-rows"></div><button type="button" class="btn small">Save surface check</button>`;
-  $("summary", det).textContent = done ? `Surface checked in hand (${side})` : `Check the ${side} surface in hand`;
-  $("p", det).textContent = "Tilt the card under a light and look for each of these, worst first. Choose how bad anything you find is; leave the rest as “Not seen”.";
-  const rows = $(".sc-surface-rows", det);
+  wrap.innerHTML = `<h2 class="group-title"></h2><p class="footnote"></p><div class="group sc-surface-rows"></div><button type="button" class="btn filled wide"></button>`;
+  $("h2", wrap).textContent = `Check in hand · ${side}`;
+  $("p", wrap).textContent = done
+    ? `The ${side} surface is checked in hand. Saving again adds anything else you found.`
+    : "Tilt the card under a light and look for each of these, worst first. Choose how bad anything you find is; leave the rest as “Not seen”.";
+  const rows = $(".sc-surface-rows", wrap);
   for (const [id, label] of SURFACE_CHECKS) {
     const row = document.createElement("label");
-    row.className = "sc-surface-row";
+    row.className = "row sc-surface-row";
+    row.setAttribute("for", `surf-${side}-${id}`);
     row.innerHTML = `<span></span><select id="surf-${side}-${id}"><option value="">Not seen</option><option value="micro">Tiny</option><option value="minor">Minor</option><option value="moderate">Obvious</option><option value="major">Heavy</option></select>`;
     $("span", row).textContent = label;
     rows.append(row);
   }
-  $("button", det).addEventListener("click", () => {
+  const btn = $("button", wrap);
+  btn.textContent = done ? `Save ${side} surface check again` : `Save ${side} surface check`;
+  btn.addEventListener("click", () => {
     leaveExample();
     for (const [id, label, type] of SURFACE_CHECKS) {
-      const sev = $(`#surf-${side}-${id}`, det).value;
+      const sev = $(`#surf-${side}-${id}`, wrap).value;
       if (sev) state.defects.push({ side, location: "surface", type, severity: sev, note: `In-hand surface check: ${label.toLowerCase()}` });
     }
     // Checked in hand: the surface counts as assessed for this side, with whatever was logged.
     if (!state.inHand[side].includes("surface")) state.inHand[side] = COMPONENTS.filter((c) => c === "surface" || state.inHand[side].includes(c));
     runGrade();
-    renderScanCheck();
+    toast(`${cap(side)} surface checked in hand.`);
   });
-  return det;
+  return wrap;
+}
+
+function renderSurfacePane() {
+  const side = state.activeSide;
+  const box = $("#surface-check");
+  // Keep anything already chosen in the in-hand checklist when it's redrawn.
+  const kept = Object.fromEntries($$("select", box).map((s) => [s.id, s.value]));
+  box.innerHTML = "";
+  box.append(surfaceChecklist(side));
+  for (const s of $$("select", box)) if (kept[s.id]) s.value = kept[s.id];
+  const parts = SIDES.map((s) => (state.inHand[s].includes("surface") ? `${cap(s)} checked` : null)).filter(Boolean);
+  $("#surface-summary").textContent = parts.length === 2 ? "Checked in hand" : parts.length ? parts[0] : "Check in hand";
+  const m = state.marks[side];
+  const open = m && m.candidates ? m.candidates.filter((c) => c.status === "pending").length : 0;
+  $("#marks-summary").textContent = !m ? "Zoom, filter and find possible marks in your photo."
+    : m.status === "running" ? "Looking for possible marks…"
+    : m.candidates && m.candidates.length ? `${m.candidates.length} possible mark${m.candidates.length === 1 ? "" : "s"} · ${open} to review`
+    : "No visible marks found in this photo.";
+  const a = state.angled[side];
+  $("#angled-status").textContent = a ? (a.status === "busy" ? "Measuring the angled-light photo…" : `Added for the ${side}. Switch to it in Inspect surface.`) : "Optional. Helps you spot marks; it doesn't change centering or grades.";
 }
 
 function renderScanCheck() {
   const body = $("#scancheck-body");
   const parts = SIDES.map((side) => {
     const q = state.scans[side] && state.scans[side].quality;
-    return q ? `${cap(side)}: ${QUALITY_TEXT[q.verdict].toLowerCase()}` : null;
+    if (!q) return null;
+    const open = (state.scans[side].check ? state.scans[side].check.defects : []).filter((d) => { const f = { ...d, side: d.side || side }; return !flagAdded(f) && !state.dismissed[f.side].includes(flagKey(f)); }).length;
+    return open ? `${open} to review` : null;
   }).filter(Boolean);
-  $("#scancheck-summary").textContent = parts.join(" · ") || "No photos";
-  if (!body) return;
+  const checked = SIDES.reduce((k, s) => k + ["corners", "edges"].filter((c) => isInspected(s, c)).length, 0);
+  $("#scancheck-summary").textContent = parts.length ? parts.join(" · ") : `${checked}/4 checked`;
   body.innerHTML = "";
   const side = state.activeSide, s = state.scans[side];
+  const group = document.createElement("div");
+  group.className = "group pad";
+  body.append(group);
   if (!s || !s.photo) {
     const p = document.createElement("p");
-    p.className = "hint";
+    p.className = "footnote tight";
     p.textContent = s ? "The photo isn't kept after you reload the page, so it can't be checked again. Rescan it to check the photo." : `No ${side} photo, so nothing can be checked here. Photos of both sides are needed for a full assessment.`;
-    body.append(p);
+    group.append(p);
     return;
   }
   const q = s.quality, c = s.check;
   if (!q || !c) {
     const p = document.createElement("p");
-    p.className = "hint";
-    p.textContent = "The checks couldn't run on this photo. Try scanning it again.";
-    body.append(p);
+    p.className = "footnote tight";
+    p.textContent = state.conf[side] && state.conf[side].level === "assessing" ? "Assessing scan…" : "The checks couldn't run on this photo. Try scanning it again.";
+    group.append(p);
     return;
   }
   const head = document.createElement("div");
   head.className = "sc-verdict";
   head.innerHTML = `<span class="chip ${q.verdict}"></span>`;
-  $(".chip", head).textContent = QUALITY_TEXT[q.verdict];
-  body.append(head);
+  $(".chip", head).innerHTML = `${svgIcon(q.verdict === "ok" ? "check" : "warn", "ic small")}<span></span>`;
+  $(".chip span", head).textContent = QUALITY_TEXT[q.verdict];
+  group.append(head);
 
   const problems = Object.entries(q.checks).filter(([, v]) => v.status !== "ok");
   const ul = document.createElement("ul");
   ul.className = "sc-list";
   if (problems.length) for (const [, v] of problems) ul.append(scanCheckLine(v.note, v.status));
   else ul.append(scanCheckLine("Sharpness, glare, resolution and framing look fine."));
-  if (q.blocked.length) ul.append(scanCheckLine(`This photo can't show: ${q.blocked.map(blockedText).join(", ")}. Rescan with better light, or check those by eye and log them in DINGS.`, "warn"));
-  ul.append(scanCheckLine("A flat photo can't show the surface (creases, dents, stains, scuffs, scratches, print lines). Tilt the card under a light and use the surface check below; it logs what you find and marks the surface as checked in hand."));
-  body.append(ul);
+  if (q.blocked.length) ul.append(scanCheckLine(`This photo can't show: ${q.blocked.map(blockedText).join(", ")}. Rescan with better light, or check those by eye and log them in Defects.`, "warn"));
+  group.append(ul);
 
   const toggle = document.createElement("label");
   toggle.className = "sc-toggle";
@@ -1084,59 +1530,62 @@ function renderScanCheck() {
   const box = $("input", toggle);
   box.checked = state.showSuspects;
   box.addEventListener("change", () => { state.showSuspects = box.checked; viewer.render(); });
-  body.append(toggle);
+  group.append(toggle);
 
-  const sub = document.createElement("p");
-  sub.className = "sc-sub";
-  sub.textContent = "Edges and corners";
-  body.append(sub);
+  const title = document.createElement("h2");
+  title.className = "group-title";
+  title.textContent = "Edges and corners";
+  body.append(title);
   const sum = document.createElement("p");
-  sum.className = "sc-summary";
-  sum.textContent = c.summary;
+  sum.className = "footnote";
+  sum.textContent = uiText(c.summary);
   body.append(sum);
 
   const open = c.defects.filter((d) => { const f = { ...d, side: d.side || side }; return !flagAdded(f) && !state.dismissed[f.side].includes(flagKey(f)); });
   if (open.length) {
     const why = document.createElement("p");
-    why.className = "hint";
-    why.textContent = "Until you check these by eye, each counts as possible wear: that area's best case stays at 9 at most. Add the real ones to DINGS and mark the rest “Not wear”.";
+    why.className = "footnote";
+    why.textContent = "Until you check these by eye, each counts as possible wear: that area's best case stays at 9 at most. Add the real ones to Defects and mark the rest “Not wear”.";
     body.append(why);
   }
+  const cands = document.createElement("div");
+  cands.className = "group";
   for (const d of open) {
     const row = document.createElement("div");
     row.className = "sc-cand";
     const label = CRITERIA.defects.types[d.type] ? CRITERIA.defects.types[d.type].label : pretty(d.type);
-    row.innerHTML = "<div><b></b><small></small></div><span class=\"sc-cand-btns\"><button type=\"button\" class=\"btn small\">Add to DINGS</button><button type=\"button\" class=\"btn small ghost\">Not wear</button></span>";
+    row.innerHTML = "<div><b></b><small></small></div><span class=\"sc-cand-btns\"><button type=\"button\" class=\"btn tinted\">Add to Defects</button><button type=\"button\" class=\"btn tinted\">Not wear</button></span>";
     $("b", row).textContent = `${label} · ${cap(d.severity)} · ${whereText(d)}`;
-    $("small", row).textContent = d.note || "";
+    $("small", row).textContent = uiText(d.note || "");
     const [add, notWear] = $$("button", row);
+    add.setAttribute("aria-label", `Add ${label}, ${whereText(d)} to Defects`);
+    notWear.setAttribute("aria-label", `${label}, ${whereText(d)}: not wear`);
     add.addEventListener("click", () => {
       leaveExample();
       state.defects.push({ side: d.side || side, location: d.location, type: d.type, severity: d.severity, note: `Auto-detected: ${d.note || label}`.slice(0, 200) });
       markInspected(d.side || side, COMPONENT_OF[d.location]);
       runGrade();
-      renderScanCheck();
     });
     notWear.addEventListener("click", () => {
       leaveExample();
       state.dismissed[d.side || side].push(flagKey({ ...d, side: d.side || side }));
       runGrade();
-      renderScanCheck();
     });
-    body.append(row);
+    cands.append(row);
   }
+  if (cands.children.length) body.append(cands);
   if (state.dismissed[side].length) {
     const undo = document.createElement("button");
     undo.type = "button";
-    undo.className = "link-btn";
+    undo.className = "btn plain";
     undo.textContent = `Show the ${state.dismissed[side].length} spot${state.dismissed[side].length > 1 ? "s" : ""} marked “Not wear” again`;
-    undo.addEventListener("click", () => { state.dismissed[side] = []; runGrade(); renderScanCheck(); });
+    undo.addEventListener("click", () => { state.dismissed[side] = []; runGrade(); });
     body.append(undo);
   }
-  body.append(surfaceChecklist(side));
   const det = document.createElement("details");
-  det.innerHTML = "<summary class=\"link-btn\">What this can't tell you</summary><ul class=\"sc-limits\"></ul>";
-  for (const l of c.limitations) { const li = document.createElement("li"); li.textContent = l; $("ul", det).append(li); }
+  det.className = "group row-details";
+  det.innerHTML = `<summary class="row row-btn"><span class="row-main"><span class="row-title">What this can't tell you</span></span>${svgIcon("chevron", "ic chev")}</summary><ul class="sc-limits"></ul>`;
+  for (const l of c.limitations) { const li = document.createElement("li"); li.textContent = uiText(l); $("ul", det).append(li); }
   body.append(det);
 }
 
@@ -1174,7 +1623,8 @@ function clearReference() {
   const had = !!state.reference;
   state.reference = null;
   $("#reference-panel").hidden = true;
-  if (had && state.scans.front) { runInspection("front"); renderScanCheck(); viewer.render(); }
+  if (had && state.scans.front) refineWithReference("front", { force: true });
+  if (had) sv.render();
 }
 
 function showReference() {
@@ -1221,17 +1671,22 @@ async function prepareReference(ref) {
 
 async function setReference(ref) {
   if (state.reference && state.reference.objectUrl) URL.revokeObjectURL(state.reference.objectUrl);
+  const token = cardToken();
   state.reference = ref;
   showReference();
   await prepareReference(ref);
-  if (state.reference !== ref) return;  // replaced meanwhile
+  if (state.reference !== ref || !isCurrent(token)) return;  // replaced meanwhile, or another card now
   showReference();
-  runInspection("front");
-  renderScanCheck();
-  viewer.render();
+  refineWithReference("front");
+  sv.render();
 }
 
-function setStatus(text) { $("#id-status").textContent = text; }
+/** Identification status: the full text in the details sheet, a short state on the Card details row. */
+function setStatus(text, short = "") {
+  $("#id-status").textContent = text;
+  state.lookup = { status: short ? "busy" : "idle", text: short };
+  $("#id-row-status").textContent = short;
+}
 
 function confirmCandidate(c) {
   leaveExample();
@@ -1262,9 +1717,9 @@ function confirmCandidate(c) {
   loadRiftPrices();
 }
 
-function idNote(box, text) {
+function idNote(box, text, cls = "") {
   const p = document.createElement("p");
-  p.className = "id-note";
+  p.className = `id-note ${cls}`.trim();
   p.textContent = text;
   box.append(p);
 }
@@ -1272,7 +1727,7 @@ function idNote(box, text) {
 function renderManualReference(box) {
   const wrap = document.createElement("div");
   wrap.className = "id-manual";
-  wrap.innerHTML = '<label>Use your own reference image (link or file)<input type="url" placeholder="https://… image link" autocomplete="off"></label><input type="file" accept="image/png,image/jpeg,image/webp"><button type="button" class="btn small">Use this reference</button>';
+  wrap.innerHTML = '<label>Use your own reference image (link or file)<input type="url" placeholder="https://… image link" autocomplete="off"></label><input type="file" accept="image/png,image/jpeg,image/webp"><button type="button" class="btn tinted">Use this reference</button>';
   $("button", wrap).addEventListener("click", async () => {
     const file = $("input[type=file]", wrap).files[0];
     const url = $("input[type=url]", wrap).value.trim();
@@ -1292,14 +1747,26 @@ function renderCandidates(res, reading = null) {
   box.innerHTML = "";
   box.hidden = false;
   if (reading) idNote(box, `Read from your photo${reading.source === "gemini" ? " by Gemini" : ""}: ${[reading.name && `"${reading.name}"`, reading.number, reading.set_code, reading.set_name].filter(Boolean).join(" · ")}. ${reading.source === "gemini" ? "AI reading" : "Text recognition"} can misread a letter or digit, so compare the pictures before you pick.`);
+  if (res.timedOut) {
+    idNote(box, `The lookup timed out after ${LOOKUP_DEADLINE_MS / 1000} seconds. Check the connection and try again, or fill in the details by hand.`, "warn");
+    renderManualReference(box);
+    setStatus("Lookup timed out.", "Timed out");
+    return;
+  }
+  if (res.offline) {
+    idNote(box, "You're offline. Card lookup needs a connection; you can fill in the details by hand, or supply a reference image file.", "warn");
+    renderManualReference(box);
+    setStatus("Offline: card lookup needs a connection.", "Offline");
+    return;
+  }
   if (res.error || !res.candidates.length) {
     idNote(box, res.error || "No matching card found.");
     idNote(box, "Nothing is being used as a reference. You can fill in the details by hand, or supply a reference image yourself.");
     renderManualReference(box);
-    setStatus("Not identified.");
+    setStatus("Not identified.", "Not identified");
     return;
   }
-  setStatus(res.needs_confirmation ? "Several cards could match. Pick yours, or none." : "Check this is your exact card, including the variant.");
+  setStatus(res.needs_confirmation ? "Several cards could match. Pick yours, or none." : "Check this is your exact card, including the variant.", res.candidates.length > 1 ? `${Math.min(6, res.candidates.length)} possible matches` : "Confirm the match");
   idNote(box, "Look closely at the artwork, frame and any foil pattern: alternate versions of the same number look alike. Nothing is used until you confirm.");
   for (const c of res.candidates.slice(0, 6)) {
     const row = document.createElement("div");
@@ -1313,12 +1780,14 @@ function renderCandidates(res, reading = null) {
     const line = document.createElement("span");
     line.textContent = [c.set_name, c.number, c.rarity, c.variant].filter(Boolean).join(" · ");
     const ev = document.createElement("span");
-    ev.textContent = ` ${Math.round(c.confidence * 100)}% match: ${(c.evidence || []).join("; ")}`;
+    const strength = c.confidence >= 0.8 ? "Strong match" : c.confidence >= 0.5 ? "Possible match" : "Weak match";
+    ev.textContent = ` ${strength}: ${(c.evidence || []).join("; ")}`;
     info.append(b, line, document.createElement("br"), ev);
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "btn small";
+    btn.className = "btn tinted";
     btn.textContent = "This is my card";
+    btn.setAttribute("aria-label", `This is my card: ${c.name}${line.textContent ? `, ${line.textContent}` : ""}`);
     btn.addEventListener("click", () => confirmCandidate(c));
     row.append(img, info, btn);
     box.append(row);
@@ -1326,18 +1795,72 @@ function renderCandidates(res, reading = null) {
   renderManualReference(box);
 }
 
+/* ---------------------------------------------------------------- card lookup: de-duplicated, with a deadline */
+
+const LOOKUP_DEADLINE_MS = 30000;
+const offline = () => typeof navigator !== "undefined" && navigator.onLine === false;
+const lookupKey = (q) => JSON.stringify(["game", "set_code", "number", "name", "language"].map((k) => String((q && q[k]) || "").trim().toLowerCase()));
+
+/**
+ * One identification attempt ("read"): the same query is looked up once, the same request is sent once
+ * (Identify's own fallbacks repeat broader requests), and everything stops at one overall deadline.
+ */
+function lookupSession({ deadlineMs = LOOKUP_DEADLINE_MS, fetchImpl = (...a) => window.fetch(...a) } = {}) {
+  const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+  const requests = new Map(), queries = new Map();
+  let timedOut = false, timer = null;
+  const expired = new Promise((resolve) => { timer = setTimeout(() => { timedOut = true; if (ctrl) ctrl.abort(); resolve({ timedOut: true }); }, deadlineMs); });
+  const fetchOnce = (url, init = {}) => {
+    if (timedOut) return Promise.reject(new Error("The lookup timed out."));
+    const key = `${(init && init.method) || "GET"} ${url} ${(init && typeof init.body === "string" && init.body) || ""}`;
+    if (!requests.has(key)) requests.set(key, fetchImpl(url, ctrl ? { ...init, signal: ctrl.signal } : init));
+    return requests.get(key).then((r) => (r && typeof r.clone === "function" ? r.clone() : r));
+  };
+  return {
+    get timedOut() { return timedOut; },
+    requests,
+    candidates(q) {
+      const key = lookupKey(q);
+      if (!queries.has(key)) {
+        const p = Identify.candidates(q, { fetch: fetchOnce }).catch(() => ({ candidates: [], error: "The lookup failed (offline, or this page can't reach the card database)." }));
+        queries.set(key, Promise.race([p, expired]));
+      }
+      return queries.get(key);
+    },
+    /** Try each query in turn (skipping repeats) until one finds candidates; stops at the deadline. */
+    async firstMatch(list) {
+      let res = { candidates: [] };
+      const seen = new Set();
+      for (const q of list) {
+        const key = lookupKey(q);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        res = await this.candidates(q);
+        if (res.timedOut || timedOut) return { candidates: [], timedOut: true };
+        if (res.candidates && res.candidates.length) break;
+      }
+      return res;
+    },
+    close() { clearTimeout(timer); },
+  };
+}
+
 async function findCard() {
   const btn = $("#find-card");
   const c = assessment().card;
   if (!c.set_code && !c.number && !c.name) { setStatus("Enter a set code and number (or a name) first."); return; }
+  const token = cardToken();
+  if (offline()) { renderCandidates({ candidates: [], offline: true }); return; }
   btn.disabled = true;
-  setStatus("Looking it up…");
+  setStatus("Looking it up…", "Looking it up…");
+  const session = lookupSession();
   let res;
   try {
-    res = await Identify.candidates({ game: state.game, set_code: c.set_code, number: c.number, name: c.name, language: c.language }, { fetch: (...a) => window.fetch(...a) });
-  } catch (err) {
-    res = { candidates: [], error: "The lookup failed (offline, or this page can't reach the card database)." };
+    res = await session.firstMatch([{ game: state.game, set_code: c.set_code, number: c.number, name: c.name, language: c.language }]);
+  } finally {
+    session.close();
   }
+  if (!isCurrent(token)) return;
   btn.disabled = false;
   renderCandidates(res);
 }
@@ -1369,37 +1892,46 @@ function frontJpegBase64() {
 async function readFromPhoto({ auto = false } = {}) {
   const src = ocrSource();
   if (!src) { if (!auto) setStatus("Add a front photo first."); return; }
+  // Results belong to this card and this front photo: a new photo or another card drops them.
+  const token = sideToken("front");
+  if (offline()) {
+    if (!auto) renderCandidates({ candidates: [], offline: true });
+    else setStatus("Offline: card lookup needs a connection.", "Offline");
+    return;
+  }
   const btn = $("#read-card");
   btn.disabled = true;
-  setDetailsEditing(true);
   let reading = null, note = "";
   if (gmKey()) {
     // With a Gemini key the card is read by Gemini (the front photo goes to Google); far more accurate
     // than the on-phone reader. If it fails, fall back to the on-phone reader.
-    setStatus("Reading the card with Gemini (sends the front photo to Google)…");
+    setStatus("Reading the card with Gemini (sends the front photo to Google)…", "Reading card…");
     try {
       reading = await GeminiID.identify(frontJpegBase64(), { apiKey: gmKey(), fetch: (...a) => window.fetch(...a) });
       if (!reading.found) reading = null;
     } catch (err) {
-      note = `${(err && err.message) || "Gemini couldn't read the card."} Using the on-phone reader instead. `;
+      note = `${(err && err.message) || "Gemini couldn't read the card."} Using the on-device reader instead. `;
       reading = null;
     }
+    if (!isCurrent(token)) return;
   }
   if (!reading) {
-    if (!recognizer) recognizer = CardOCR.browserRecognizer(setStatus);
-    setStatus(`${note}Reading the card…`);
+    if (!recognizer) recognizer = CardOCR.browserRecognizer((t) => { if (isCurrent(token)) setStatus(t, "Reading card…"); });
+    setStatus(`${note}Reading the card…`, "Reading card…");
     try {
       reading = await CardOCR.read(src, state.game, recognizer);
     } catch (err) {
+      if (!isCurrent(token)) return;
       btn.disabled = false;
-      setStatus(`${note}${(err && err.message) || "Couldn't read the card."} Type the name and number, then tap Find this card online.`);
+      setStatus(`${note}${(err && err.message) || "Couldn't read the card."} Type the name and number, then tap Find online.`, "Couldn't read the card");
       return;
     }
+    if (!isCurrent(token)) return;
   }
   btn.disabled = false;
-  if (reading.game && reading.game !== state.game) toast(`This looks like a ${gameInfo(reading.game).label} card. Switch the game on the scan screen if it is.`);
+  if (reading.game && reading.game !== state.game) toast(`This looks like a ${gameInfo(reading.game).label} card. Switch the game on the Scan screen if it is.`);
   if (!reading.found) {
-    setStatus("Couldn't read the name or number from this photo (glare, a holo pattern, or a non-English card). Type them, then tap Find this card online.");
+    setStatus("Couldn't read the name or number from this photo (glare, a holo pattern, or a non-English card). Type them, then tap Find online.", "Couldn't read the card");
     return;
   }
   leaveExample();
@@ -1416,18 +1948,18 @@ async function readFromPhoto({ auto = false } = {}) {
   }
   renderDetails();
   saveDraft();
-  setStatus("Looking it up…");
-  let res = { candidates: [] };
-  for (const q of CardOCR.queries(reading, state.game)) {
-    try {
-      res = await Identify.candidates(q, { fetch: (...a) => window.fetch(...a) });
-    } catch (err) {
-      res = { candidates: [], error: "The lookup failed (offline, or this page can't reach the card database)." };
-    }
-    if (res.candidates && res.candidates.length) break;
+  setStatus("Looking it up…", "Looking it up…");
+  const session = lookupSession();
+  let res;
+  try {
+    res = await session.firstMatch(CardOCR.queries(reading, state.game));
+  } finally {
+    session.close();
   }
+  if (!isCurrent(token)) return;
   renderCandidates(res, reading);
 }
+
 
 /* ---------------------------------------------------------------- prices */
 
@@ -1439,7 +1971,8 @@ function priceCard() {
   const c = assessment().card;
   return { game: c.game, name: $("#card-name").value.trim(), set_name: c.set_name, number: c.number, finish: c.finish };
 }
-const priceKey = (c) => [c.game, c.name, c.set_name, c.number, c.finish].map((v) => String(v || "").toLowerCase()).join("|");
+// The card revision is part of the key: an answer for a card that has since been replaced is dropped.
+const priceKey = (c) => [state.cardRev, c.game, c.name, c.set_name, c.number, c.finish].map((v) => String(v == null ? "" : v).toLowerCase()).join("|");
 
 async function loadPrices({ force = false } = {}) {
   const card = priceCard();
@@ -1521,9 +2054,9 @@ function renderPrices() {
   const card = priceCard();
   const has = !!(card.name && card.number);
   $("#refresh-prices").hidden = !has;
-  $("#pc-status").textContent = pcToken() ? "A token is saved on this phone." : "";
+  $("#pc-status").textContent = pcToken() ? "A token is saved on this device." : "";
   if (!has) {
-    priceNote(box, "Confirm which card this is first: Card details → Read from photo, or Find this card online.");
+    priceNote(box, "Confirm which card this is first: Card details → Read from photo, or Find online.");
     renderWebPrices();
     return;
   }
@@ -1533,7 +2066,7 @@ function renderPrices() {
   if (!stale && p.status === "loading") priceNote(box, "Looking up prices…");
   if (!stale && p.status === "error") priceNote(box, p.error, "warn");
   // Riftbound: the TCGplayer section above already says where graded prices come from.
-  if ((p.status === "no-token" || !pcToken()) && state.game === "pokemon" && !csKey()) priceNote(box, "For graded prices, add a CardSight key (Sales data access, below), or open the card on PriceCharting to see every grade.");
+  if ((p.status === "no-token" || !pcToken()) && state.game === "pokemon" && !csKey()) priceNote(box, "For graded prices, add a CardSight key in Settings, or open the card on PriceCharting to see every grade.");
   if (!stale && p.status === "ok" && p.product) {
     const prod = p.product;
     const head = document.createElement("div");
@@ -1635,19 +2168,19 @@ async function loadCardSight({ force = false, chooseId = null } = {}) {
 }
 
 function renderCardSight() {
+  renderPriceMeta();
   const wrap = $("#cs-prices"), box = $("#cs-body");
   if (!box) return;
   const pokemon = state.game === "pokemon";
   wrap.hidden = !pokemon;
-  $("#cs-settings").hidden = !pokemon;
-  $("#cs-status").textContent = csKey() ? "A key is saved on this phone." : "";
+  $("#cs-status").textContent = csKey() ? "A key is saved on this device." : "";
   if (!pokemon) return;
   box.innerHTML = "";
   const card = priceCard();
   const c = state.cs;
   const stale = c.key && c.key !== priceKey(card);
   if (!card.name) { priceNote(box, "Confirm which card this is first."); return; }
-  if (!csKey() || c.status === "no-key") { priceNote(box, "Add your CardSight API key (Sales data access, below) to see recent sales, raw and graded."); return; }
+  if (!csKey() || c.status === "no-key") { priceNote(box, "Add your CardSight API key in Settings to see recent sales, raw and graded."); return; }
   if (stale) { priceNote(box, "The card details changed. Tap Update for this card's sales."); return; }
   if (c.status === "loading") { priceNote(box, "Looking up recent sales…"); return; }
   if (c.status === "error") { priceNote(box, c.error, "warn"); return; }
@@ -1781,6 +2314,7 @@ async function loadRiftPrices() {
 }
 
 function renderRiftPrices() {
+  renderPriceMeta();
   const wrap = $("#rb-prices"), box = $("#rb-body");
   if (!box) return;
   wrap.hidden = state.game !== "riftbound";
@@ -1835,8 +2369,8 @@ const gmModel = () => { try { return (pcStorage() && pcStorage().getItem(GM_MODE
 async function webSearch() {
   const card = { ...priceCard(), set_code: $("#card-set-code").value.trim(), language: $("#card-language").value };
   const key = priceKey(card);
-  if (!card.name) { state.web = { key, status: "error", error: "Confirm which card this is first: Card details → Read from photo, or Find this card online." }; renderWebPrices(); return; }
-  if (!gmKey()) { state.web = { key, status: "error", error: "Add your Gemini API key first (Web search access, below)." }; $("#gm-settings").open = true; renderWebPrices(); return; }
+  if (!card.name) { state.web = { key, status: "error", error: "Confirm which card this is first: Card details → Read from photo, or Find online." }; renderWebPrices(); return; }
+  if (!gmKey()) { state.web = { key, status: "error", error: "Add your Gemini API key in Settings first (API access → Gemini)." }; renderWebPrices(); return; }
   state.web = { key, status: "loading" };
   renderWebPrices();
   try {
@@ -1848,7 +2382,30 @@ async function webSearch() {
   renderWebPrices();
 }
 
+/** The Prices row on Review and the key states in Settings. */
+function renderPriceMeta() {
+  const set = (id, on) => { const el = $(id); if (el) el.textContent = on ? "Saved" : "Not set"; };
+  set("#gm-state", gmKey());
+  set("#pc-state", pcToken());
+  set("#cs-state", csKey());
+  const card = priceCard();
+  const fresh = (x) => x && x.status !== "idle" && x.key === priceKey(card);
+  const p = state.price, c = state.cs, r = state.rb;
+  let text;
+  if (!card.name && !card.number) text = "Identify the card first";
+  else if ([p, c, r, state.web].some((x) => fresh(x) && x.status === "loading")) text = "Looking up prices…";
+  else if (fresh(p) && p.status === "ok" && p.product) text = `PriceCharting · ungraded ${Prices.money(p.product.prices["loose-price"])}`;
+  else if (fresh(c) && c.status === "ok") text = "Recent sales from CardSight";
+  else if (fresh(r) && r.status === "ok") text = "TCGplayer market prices";
+  else if ([p, c, r].some((x) => fresh(x) && x.status === "error")) text = offline() ? "Offline" : "Couldn't load prices";
+  else if (!pcToken() && !csKey() && !gmKey() && state.game === "pokemon") text = "Market links · add API keys in Settings for more";
+  else text = "Market links and searches";
+  const el = $("#prices-summary");
+  if (el) el.textContent = text;
+}
+
 function renderWebPrices() {
+  renderPriceMeta();
   const box = $("#web-results");
   if (!box) return;
   box.innerHTML = "";
@@ -1856,8 +2413,8 @@ function renderWebPrices() {
   const w = state.web;
   const stale = w.key && w.key !== priceKey({ ...card });
   $("#web-search").disabled = w.status === "loading";
-  $("#web-status").textContent = w.status === "loading" ? "Searching… (10-30 s)" : gmKey() ? "" : "Needs your Gemini API key.";
-  $("#gm-status").textContent = gmKey() ? "A key is saved on this phone." : "";
+  $("#web-status").textContent = w.status === "loading" ? "Searching… (10-30 s)" : gmKey() ? "" : "Needs your Gemini API key (Settings).";
+  $("#gm-status").textContent = gmKey() ? "A key is saved on this device." : "";
   if (w.status === "error" && !stale) priceNote(box, w.error, "warn");
   if (w.status !== "ok" || stale) {
     if (stale && w.status === "ok") priceNote(box, "The card details changed. Search again for this card.");
@@ -2018,43 +2575,32 @@ function renderTiles(report) {
     const incomplete = g.complete === false;
     const tile = document.createElement("button");
     tile.type = "button";
-    tile.className = "tile" + (best ? " best" : "") + (incomplete ? " incomplete" : "");
+    tile.className = "row row-btn tile" + (best ? " best" : "") + (incomplete ? " incomplete" : "");
     tile.dataset.co = g.company;
-    tile.innerHTML = `<span class="tile-co">${g.company}${best ? '<span class="tile-badge">Best shot</span>' : ""}</span>
-      ${incomplete ? '<span class="tile-flag">Incomplete</span>' : ""}
-      <span class="tile-grade"></span><span class="tile-label"></span><span class="tile-sub"></span>`;
-    $(".tile-grade", tile).innerHTML = bigGradeHTML(g);
-    $(".tile-label", tile).textContent = (incomplete ? "Up to " : "") +
-      baseLabel(g).replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
-    $(".tile-sub", tile).textContent = g.company === "TAG" && g.score != null ? `${incomplete ? "≤ " : ""}${g.score} / 1000` : g.qualifiers.length ? g.qualifiers.join(" · ") : " ";
-    tile.addEventListener("click", () => {
-      const d = $(`.company[data-co="${g.company}"]`);
-      d.open = true;
-      d.scrollIntoView({ behavior: "smooth", block: "center" });
-    });
+    tile.innerHTML = `<span class="tile-co">${g.company}</span><span class="tile-label"></span><span class="tile-sub"></span><span class="tile-grade"><span class="tile-num"></span>${svgIcon("chevron", "ic chev")}</span>`;
+    $(".tile-num", tile).innerHTML = bigGradeHTML(g);
+    const label = (incomplete ? "Up to " : "") + baseLabel(g).replace(/\s*\d+(\.\d)?$/, "").replace(/ 10 \(Black Label\)$/, " · Black Label");
+    $(".tile-label", tile).textContent = label;
+    if (incomplete) $(".tile-label", tile).insertAdjacentHTML("beforeend", ' <span class="tile-flag">Incomplete</span>');
+    if (best) $(".tile-label", tile).insertAdjacentHTML("beforeend", ' <span class="tile-badge">Best</span>');
+    $(".tile-sub", tile).textContent = g.company === "TAG" && g.score != null ? `${incomplete ? "≤ " : ""}${g.score} / 1000` : g.qualifiers.length ? g.qualifiers.join(" · ") : "";
+    tile.setAttribute("aria-label", `${g.company}: ${bigGrade(g)}, ${label}${incomplete ? ", incomplete" : ""}${best ? ", best" : ""}. Show breakdown.`);
+    tile.addEventListener("click", () => openCompany(g.company, tile));
     box.append(tile);
   }
   const line = $("#best-line");
-  line.classList.toggle("incomplete", !top);
+  line.classList.toggle("warn", !top);
   line.textContent = !top
-    ? `Incomplete: not checked yet: ${report.unassessed.join(", ")}. These are ceilings, not grades.`
+    ? "These are ceilings, not grades, until every area is checked."
     : top.tier >= 99
       ? "This card looks altered, so no company would give it a number."
-      : `Your best shot is ${top.company} ${top.label}. Tap a grade for the breakdown.`;
+      : `Best estimate: ${top.company} ${top.label}. Tap a grade for the breakdown.`;
 }
 
 function renderScore(report) {
-  const g = report.grades.TAG;
-  const altered = g.tier >= 99;
   const incomplete = report.complete === false;
-  $(".score-block").classList.toggle("incomplete", incomplete);
-  $("#score-incomplete").hidden = !incomplete;
   $("#score-missing").hidden = !incomplete;
   $("#score-missing-list").textContent = incomplete ? report.unassessed.join(", ") : "";
-  $("#score-grade").innerHTML = bigGradeHTML(g);
-  $("#score-label").textContent = altered ? g.label : (incomplete ? "Up to " : "") + baseLabel(g).replace(/\s*\d+(\.\d)?$/, "");
-  $("#score-num").textContent = altered ? "—" : incomplete ? `≤ ${g.score}` : g.score;
-  $("#score-bar").style.width = altered ? "0%" : `${Math.max(0, ((g.score - 100) / 900) * 100)}%`;
   const f = state.centering.front, b = state.centering.back;
   $("#centering-summary").textContent = `${splitText(Math.max(f.lr, f.tb))} · ${splitText(Math.max(b.lr, b.tb))}`;
 }
@@ -2065,22 +2611,7 @@ function renderMetrics(report) {
   const others = localStore.cards().map((c) => ({ c, r: currentReport(c) }))
     .filter(({ c, r }) => c.id !== state.savedId && r && r.complete !== false && r.grades.TAG.score != null);
   const rank = score == null ? null : 1 + others.filter(({ r }) => r.grades.TAG.score > score).length;
-  const f = state.centering.front, ev = state.evidence.front;
-  const items = [
-    [String(state.defects.length), "DINGS"],
-    [rank == null ? "—" : `#${rank}/${others.length + 1}`, "Rank in History"],
-    [ev.lr === "unread" || ev.tb === "unread" ? (state.scans.front ? "Check guides" : "Not measured") : splitText(Math.max(f.lr, f.tb)), "Front centering"],
-  ];
-  const box = $("#metrics");
-  box.innerHTML = "";
-  for (const [value, label] of items) {
-    const div = document.createElement("div");
-    div.className = "metric";
-    div.innerHTML = "<b></b><span></span>";
-    $("b", div).textContent = value;
-    $("span", div).textContent = label;
-    box.append(div);
-  }
+  $("#rank-value").textContent = rank == null ? (report.complete === false ? "After checking" : "—") : `#${rank} of ${others.length + 1}`;
 }
 
 function renderSubgrades(report) {
@@ -2088,7 +2619,7 @@ function renderSubgrades(report) {
   const areas = report.grades.TAG.subgrades;
   box.innerHTML = "";
   if (report.grades.TAG.tier >= 99) {
-    box.innerHTML = '<p class="hint" style="grid-column: 1 / -1">No subgrades: the card is logged as altered.</p>';
+    box.innerHTML = '<p class="footnote tight" style="grid-column: 1 / -1">No subgrades: the card is logged as altered.</p>';
     return;
   }
   box.insertAdjacentHTML("beforeend", '<span></span><span class="col-head">Front</span><span class="col-head">Back</span>');
@@ -2099,19 +2630,17 @@ function renderSubgrades(report) {
     box.append(name);
     for (const side of SIDES) {
       const v = areas[`${side} ${comp}`];
-      const cell = document.createElement("div");
+      const cell = document.createElement("span");
       if (v == null) {  // not inspected: no score, only a ceiling
         cell.className = "sub-cell unchecked";
-        cell.innerHTML = '<b>Not checked</b><span class="sbar"></span>';
+        cell.innerHTML = "<b>Not checked</b>";
         cell.setAttribute("aria-label", `${side} ${comp} not checked`);
-        box.append(cell);
-        continue;
+      } else {
+        cell.className = "sub-cell";
+        cell.innerHTML = "<b></b>";
+        $("b", cell).textContent = v;
+        cell.setAttribute("aria-label", `${side} ${comp} ${v} out of 1000`);
       }
-      cell.className = `sub-cell ${v >= 950 ? "good" : v >= 850 ? "warn" : "bad"}`;
-      cell.innerHTML = '<b></b><span class="sbar"><span></span></span>';
-      $("b", cell).textContent = v;
-      $(".sbar span", cell).style.width = `${Math.max(2, ((v - 100) / 900) * 100)}%`;
-      cell.setAttribute("aria-label", `${side} ${comp} ${v} out of 1000`);
       box.append(cell);
     }
   }
@@ -2132,7 +2661,7 @@ function renderCompanies(report) {
     d.className = "company" + (g.complete === false ? " incomplete" : "");
     d.dataset.co = g.company;
     d.open = open.has(g.company);
-    d.innerHTML = `<summary><span class="co-code">${g.company}</span><span class="co-label"></span><span class="co-grade"></span></summary>
+    d.innerHTML = `<summary class="row row-btn"><span class="co-code">${g.company}</span><span class="co-label"></span><span class="co-grade"></span>${svgIcon("chevron", "ic chev")}</summary>
       <div class="co-body"><div class="chips"></div><p class="co-alt"></p><ul class="why"></ul><ul class="notes"></ul></div>`;
     $(".co-label", d).textContent = g.label;
     $(".co-grade", d).textContent = bigGrade(g);
@@ -2157,17 +2686,26 @@ function renderCompanies(report) {
     const why = $(".why", d);
     for (const r of g.limiting_factors.length ? g.limiting_factors : ["Nothing is holding this card back at this company."]) {
       const li = document.createElement("li");
-      li.textContent = r;
+      li.textContent = uiText(r);
       why.append(li);
     }
     const notes = $(".notes", d);
     for (const n of g.notes) {
       const li = document.createElement("li");
-      li.textContent = n;
+      li.textContent = uiText(n);
       notes.append(li);
     }
     box.append(d);
   }
+}
+
+function openCompany(company, opener) {
+  pushPane("pane-company", opener);
+  const d = $(`.company[data-co="${company}"]`);
+  if (!d) return;
+  d.open = true;
+  d.scrollIntoView({ block: "start" });
+  $("summary", d).focus({ preventScroll: true });
 }
 
 function renderReport() {
@@ -2180,8 +2718,10 @@ function renderReport() {
   renderTiles(report);
   renderDefects();
   renderScanCheck();
+  renderSurfacePane();
   renderCompanies(report);
   renderPrices();
+  renderConfidence();
   viewer.render();
   $("#disclaimer").textContent = report.disclaimer;
 }
@@ -2202,35 +2742,14 @@ function fillSelect(sel, options, labels = null) {
 
 function renderDetails() {
   const c = assessment().card;
-  const rows = [
-    ["Game", gameInfo(state.game).label],
-    ["Set", [c.set_name, c.set_code && `(${c.set_code})`].filter(Boolean).join(" ")],
-    ["Number", c.number],
-    ["Rarity", c.rarity],
-    ["Finish", c.finish],
-    ["Card type", c.card_type],
-    ["Language", c.language ? LANGUAGES[c.language] || c.language : ""],
-    ["Year", c.year],
-  ];
-  const dl = $("#details-view");
-  dl.innerHTML = "";
-  for (const [k, v] of rows) {
-    const div = document.createElement("div");
-    div.innerHTML = "<dt></dt><dd></dd>";
-    $("dt", div).textContent = k;
-    const dd = $("dd", div);
-    dd.textContent = v || "Not set";
-    dd.classList.toggle("empty", !v);
-    dl.append(div);
-  }
-  $("#identity-sub").textContent = [c.subtitle, c.card_type].filter(Boolean).join(" · ");
+  const line = [[c.set_name, c.set_code && `(${c.set_code})`].filter(Boolean).join(" "), c.number, c.rarity, c.finish].filter(Boolean).join(" · ");
+  $("#identity-sub").textContent = line || "Set, number and rarity not set";
+  $("#game-chip").textContent = gameInfo(state.game).label;
 }
 
-function setDetailsEditing(on) {
-  $("#details-form").hidden = !on;
-  $("#details-view").hidden = on;
-  $("#edit-details").textContent = on ? "Close" : "Edit";
-  $("#edit-details").setAttribute("aria-expanded", String(on));
+function setDetailsEditing(on, opener = null) {
+  if (on) openDialog("#details-sheet", opener || document.activeElement);
+  else closeDialog("#details-sheet");
 }
 
 function clearDetails() {
@@ -2280,23 +2799,123 @@ function setGame(game, { remember = true } = {}) {
   renderGame();
 }
 
-/* ---------------------------------------------------------------- views */
+/* ---------------------------------------------------------------- navigation: tabs, Review, detail screens, dialogs */
 
-function setView(view, { animate = true } = {}) {
+const scrollMem = {};
+let paneOpener = null;
+
+function currentScreenId() {
+  if (state.tab !== "scan") return `${state.tab}-screen`;
+  if (state.view !== "report") return "scan-screen";
+  return state.pane || "report-screen";
+}
+
+function showScreens() {
+  const id = currentScreenId();
+  for (const el of $$(".screen")) el.hidden = el.id !== id;
+  $$(".tabbar button").forEach((b) => (b.dataset.tab === state.tab ? b.setAttribute("aria-current", "page") : b.removeAttribute("aria-current")));
+  $("#app").dataset.view = state.view;
+  $("#app").dataset.tab = state.tab;
+}
+
+function focusScreenTitle() {
+  const h = $(`#${currentScreenId()} .nav-title`);
+  if (!h) return;
+  h.tabIndex = -1;
+  h.focus({ preventScroll: true });
+}
+
+function leaveScreen() {
+  scrollMem[currentScreenId()] = window.scrollY;
+  if (guide.outline) setOutlineMode(false);
+}
+
+function setTab(tab) {
+  if (tab === state.tab) {
+    if (tab === "scan" && state.pane) popPane();
+    else window.scrollTo({ top: 0 });
+    return;
+  }
+  leaveScreen();
+  state.tab = tab;
+  if (tab === "history") renderHistory();
+  if (tab === "settings") renderSettings();
+  showScreens();
+  window.scrollTo({ top: scrollMem[currentScreenId()] || 0 });
+  focusScreenTitle();
+}
+
+function pushPane(id, opener = null) {
+  if (state.tab !== "scan" || state.view !== "report") return;
+  leaveScreen();
+  paneOpener = opener || document.activeElement;
+  state.pane = id;
+  if (id === "pane-centering") guide.show();
+  showScreens();
+  window.scrollTo({ top: 0 });
+  focusScreenTitle();
+}
+
+function popPane() {
+  if (!state.pane) return;
+  leaveScreen();
+  state.pane = null;
+  showScreens();
+  window.scrollTo({ top: scrollMem["report-screen"] || 0 });
+  if (paneOpener && paneOpener.isConnected && !paneOpener.closest("[hidden]")) paneOpener.focus({ preventScroll: true });
+  else focusScreenTitle();
+  paneOpener = null;
+}
+
+const dialogOpeners = {};
+const DIALOGS = ["#surface-viewer", "#details-sheet", "#defect-sheet"];  // lowest to topmost
+
+function updateInert() {
+  const open = DIALOGS.filter((sel) => !$(sel).hidden);
+  $("#app").inert = open.length > 0;
+  $("#surface-viewer").inert = !$("#surface-viewer").hidden && open.length > 1;
+  $("#details-sheet").inert = !$("#details-sheet").hidden && !$("#defect-sheet").hidden;
+  document.body.style.overflow = open.length ? "hidden" : "";
+  $("#app").dataset.modal = !$("#surface-viewer").hidden ? "viewer" : open.length ? "sheet" : "";
+}
+
+function openDialog(sel, opener) {
+  const el = $(sel);
+  dialogOpeners[sel] = opener && opener !== document.body ? opener : null;
+  el.hidden = false;
+  updateInert();
+  const target = $(".sheet-bar .nav-title, .navbar .nav-title", el);
+  if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); }
+}
+
+function closeDialog(sel) {
+  const el = $(sel);
+  if (el.hidden) return;
+  el.hidden = true;
+  updateInert();
+  const o = dialogOpeners[sel];
+  dialogOpeners[sel] = null;
+  if (o && o.isConnected && !o.closest("[hidden]")) o.focus({ preventScroll: true });
+}
+
+function topDialog() {
+  return [...DIALOGS].reverse().find((sel) => !$(sel).hidden) || null;
+}
+
+function setView(view, { animate = true, focus = true } = {}) {
+  void animate;
+  if (state.view !== view || state.tab !== "scan") leaveScreen();
   state.view = view;
-  $("#app").dataset.view = view;
-  $("#scan-screen").hidden = view !== "scan";
-  $("#report-screen").hidden = view !== "report";
+  state.tab = "scan";
+  state.pane = null;
+  showScreens();
   window.scrollTo({ top: 0 });
   if (view === "report") {
-    const screen = $("#report-screen");
-    screen.classList.remove("enter");
-    if (animate) { void screen.offsetWidth; screen.classList.add("enter"); }
     renderCentering();
     renderDefects();
     runGrade();
     const s = state.scans.front;
-    if (!state.example && !state.autoRead && s && s.photo && !$("#card-name").value.trim() && !$("#card-number").value.trim() && navigator.onLine !== false) {
+    if (!state.example && !state.autoRead && s && s.photo && !$("#card-name").value.trim() && !$("#card-number").value.trim() && !offline()) {
       state.autoRead = true;   // once per card: reading downloads the text reader the first time
       readFromPhoto({ auto: true });
     } else if (!state.example) {
@@ -2308,9 +2927,19 @@ function setView(view, { animate = true } = {}) {
     renderSlots();
     renderResume();
   }
+  if (focus) focusScreenTitle();
 }
 
+/* ---------------------------------------------------------------- card lifecycle */
+
 function resetCard() {
+  // A new card: every async answer still in flight belongs to the old one and is dropped (isCurrent()).
+  state.cardRev++;
+  for (const side of SIDES) {
+    try { runner().cancel(`scan-${side}`); runner().cancel(`marks-${side}`); runner().cancel(`angled-${side}`); } catch (_) { /* ignore */ }
+    setSideBusy(side, false);
+  }
+  try { runner().cancel("filter"); } catch (_) { /* ignore */ }
   state.scans = { front: null, back: null };
   state.thumbs = { front: null, back: null };
   state.centering = { front: { lr: 50, tb: 50 }, back: { lr: 50, tb: 50 } };
@@ -2320,6 +2949,11 @@ function resetCard() {
   state.inHand = { front: [], back: [] };
   state.dismissed = { front: [], back: [] };
   state.evidence = { front: { lr: "unread", tb: "unread" }, back: { lr: "unread", tb: "unread" } };
+  state.pendingRev = { front: "", back: "" };
+  state.conf = { front: null, back: null };
+  state.confAnnounced = { front: "", back: "" };
+  state.marks = { front: null, back: null };
+  state.angled = { front: null, back: null };
   state.activeSide = "front";
   state.example = false;
   state.report = null;
@@ -2332,10 +2966,14 @@ function resetCard() {
   state.rb = { key: "", status: "idle" };
   state.autoRead = false;
   clearReference();
+  sv.reset();
   $("#id-results").hidden = true;
+  $("#find-card").disabled = false;
+  $("#read-card").disabled = false;
+  setStatus("Reads the name and number from your front photo, then looks the card up. With a Gemini key saved (Settings), Gemini reads it and the front photo is sent to Google; without one, it's read on this device and only the text is sent.");
   $("#card-name").value = "";
   clearDetails();
-  setDetailsEditing(false);
+  for (const sel of DIALOGS) closeDialog(sel);
   $("#example-note").hidden = true;
 }
 
@@ -2346,15 +2984,36 @@ function newScan() {
   setView("scan");
 }
 
+/** A destructive button that needs a second tap within a few seconds. */
+function armed(btn, label, action) {
+  const title = $(".row-title", btn) || btn;
+  const original = title.textContent;
+  btn.addEventListener("click", () => {
+    if (btn.dataset.armed) {
+      delete btn.dataset.armed;
+      title.textContent = original;
+      action();
+      return;
+    }
+    btn.dataset.armed = "1";
+    title.textContent = label;
+    setTimeout(() => { if (btn.dataset.armed) { delete btn.dataset.armed; title.textContent = original; } }, 3000);
+  });
+}
+
+const hasCardData = () => !!(state.thumbs.front || state.thumbs.back || state.defects.length || $("#card-name").value.trim());
+
 /* ---------------------------------------------------------------- example + drafts */
 
-function showExample() {
+async function showExample() {
   resetCard();
+  const token = cardToken();
   const ex = gameInfo(state.game).example;
   for (const side of SIDES) {
-    const photo = samplePhoto(side, state.game);
-    applyScan(side, Vision.scan(photo), photo);
+    await runScan(side, samplePhoto(side, state.game));
+    if (!isCurrent(token)) return;
   }
+  renderSlots();
   state.defects = ex.defects.map((d) => ({ ...d }));
   // The example card was fully inspected (in hand too), so it shows a complete grade.
   state.inspected = { front: [...COMPONENTS], back: [...COMPONENTS] };
@@ -2380,16 +3039,18 @@ function saveDraft() {
 function renderResume() {
   const draft = localStore.draft();
   const btn = $("#resume");
-  btn.hidden = !(draft && draft.centering);
-  if (!btn.hidden) btn.textContent = `Resume ${draft.card && draft.card.name ? draft.card.name : "last card"}`;
+  btn.hidden = !(draft && draft.centering) || hasCardData();
+  if (!btn.hidden) $("#resume-text").textContent = `Resume ${draft.card && draft.card.name ? draft.card.name : "last card"}`;
 }
 
 function loadAssessment(a, thumbs) {
   resetCard();
   setGame((a.card && a.card.game) || "pokemon", { remember: false });
-  $("#card-name").value = a.card.name || "";
-  fillDetails(a.card);
+  $("#card-name").value = (a.card && a.card.name) || "";
+  fillDetails(a.card || {});
   state.centering = { front: { ...a.centering.front }, back: { ...a.centering.back } };
+  // Only confirmed defects are kept (unconfirmed photo-check flags are recomputed from a photo). Stored field
+  // names are unchanged since the first version, so older saves load as they are.
   state.defects = (a.defects || []).filter((d) => d.confirmed !== false).map((d) => ({ ...d }));
   // Older saves have no inspection record: their areas start unchecked. Their centering was typed or
   // measured before saving (the grading engine's default when evidence is missing).
@@ -2403,6 +3064,10 @@ function loadAssessment(a, thumbs) {
     back: { lr: "typed", tb: "typed", ...(ev.back || {}) },
   };
   state.thumbs = { front: (thumbs && thumbs.front) || null, back: (thumbs && thumbs.back) || null };
+  for (const side of SIDES) {
+    // Photos aren't kept after saving: there's nothing to rate until the side is photographed again.
+    state.conf[side] = { ...Confidence().notScanned(), summary: state.thumbs[side] ? "Photos aren't kept after saving. Retake this side to rate the scan." : "No photo of this side." };
+  }
   setView("report");
 }
 
@@ -2426,47 +3091,57 @@ function renderHistory() {
   list.innerHTML = "";
   const cards = localStore.cards();
   if (!cards.length) {
-    list.innerHTML = '<li class="empty">No saved cards yet. Scan a card and tap Save to History.</li>';
+    list.innerHTML = '<li class="empty">No saved cards yet. Review a card and tap Save.</li>';
     return;
   }
   for (const c of cards) {
+    if (!c || !c.assessment) continue;
     const li = document.createElement("li");
     li.innerHTML = `${c.front_thumb ? '<img alt="">' : '<span class="ph"></span>'}
-      <div><div class="h-name"></div><div class="h-meta"></div><div class="h-grades"></div></div>
-      <button type="button" class="del" aria-label="Delete saved card">✕</button>`;
+      <div class="h-body"><div class="h-name"></div><div class="h-meta"></div><div class="h-grades"></div></div>
+      <button type="button" class="icon-btn del"></button>`;
     if (c.front_thumb) $("img", li).src = c.front_thumb;
-    const card = c.assessment.card;
+    const card = c.assessment.card || {};
     $(".h-name", li).textContent = card.name || "Unnamed card";
     $(".h-meta", li).textContent = [gameInfo(card.game).label, card.set_name, card.number, card.rarity, new Date(c.created_at).toLocaleDateString()].filter(Boolean).join(" · ");
     const report = currentReport(c);
     $(".h-grades", li).textContent = report ? Object.values(report.grades).map((g) => `${g.company} ${bigGrade(g)}`).join(" · ") : "";
-    if (report && report.complete === false) $(".h-grades", li).insertAdjacentHTML("afterbegin", '<span class="h-flag">Incomplete</span> · ');
-    li.addEventListener("click", () => {
-      $("#history").hidden = true;
+    if (report && report.complete === false) $(".h-grades", li).insertAdjacentHTML("afterbegin", '<span class="h-flag">Incomplete</span> ');
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    li.setAttribute("aria-label", `Open ${card.name || "unnamed card"}${report ? `: ${$(".h-grades", li).textContent}` : ""}`);
+    const open = () => {
       loadAssessment(c.assessment, { front: c.front_thumb, back: c.back_thumb });
+      state.savedId = c.id;
       toast("Loaded from History");
-    });
+    };
+    li.addEventListener("click", open);
+    li.addEventListener("keydown", (e) => { if (e.target === li && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); open(); } });
     const del = $(".del", li);
+    const idle = () => { del.innerHTML = svgIcon("trash"); del.classList.remove("danger"); del.setAttribute("aria-label", `Delete ${card.name || "unnamed card"}`); };
+    idle();
     del.addEventListener("click", (e) => {
       e.stopPropagation();
       if (del.dataset.armed) {  // second tap confirms
         localStore.saveCards(localStore.cards().filter((x) => x.id !== c.id));
         renderHistory();
         toast("Deleted");
+        const first = $("#history-list li");
+        if (first) first.focus();
         return;
       }
       del.dataset.armed = "1";
       del.textContent = "Delete";
       del.classList.add("danger");
-      setTimeout(() => { if (del.isConnected) { delete del.dataset.armed; del.textContent = "✕"; del.classList.remove("danger"); } }, 3000);
+      del.setAttribute("aria-label", `Confirm: delete ${card.name || "unnamed card"}`);
+      setTimeout(() => { if (del.isConnected) { delete del.dataset.armed; idle(); } }, 3000);
     });
     list.append(li);
   }
 }
 
 function openHistory() {
-  renderHistory();
-  $("#history").hidden = false;
+  setTab("history");
 }
 
 function saveCard() {
@@ -2477,7 +3152,7 @@ function saveCard() {
   cards.unshift({
     id: state.savedId,
     created_at: new Date().toISOString(),
-    assessment: assessment(),
+    assessment: assessment(),   // confirmed defects and evidence only: no filter previews, marks or keys
     report: state.report,
     front_thumb: state.thumbs.front,
     back_thumb: state.thumbs.back,
@@ -2486,7 +3161,7 @@ function saveCard() {
     toast(`Saved. ${cards.length} card${cards.length === 1 ? "" : "s"} in History.`);
     renderMetrics(state.report);
   }
-  else toast("This browser isn't letting the app save. Copy a backup from History to keep your cards.");
+  else toast("This browser isn't letting the app save. Copy a backup in Settings to keep your cards.");
 }
 
 function backupText() {
@@ -2501,7 +3176,7 @@ function restoreFrom(text) {
     toast("That isn't a Card Grading Lab backup. Paste the whole backup text.");
     return;
   }
-  const incoming = Array.isArray(data) ? data : data.cards;
+  const incoming = Array.isArray(data) ? data : data && data.cards;
   if (!Array.isArray(incoming)) {
     toast("That isn't a Card Grading Lab backup.");
     return;
@@ -2526,46 +3201,635 @@ function restoreFrom(text) {
   toast(added ? `Restored ${added} card${added === 1 ? "" : "s"}.` : "Those cards are already here.");
 }
 
+/* ---------------------------------------------------------------- settings */
+
+let themeSetByApp = false;
+function applyTheme(choice, { remember = true } = {}) {
+  const c = ["light", "dark"].includes(choice) ? choice : "system";
+  const root = document.documentElement;
+  if (c === "system") { if (themeSetByApp) root.removeAttribute("data-theme"); themeSetByApp = false; }
+  else { root.setAttribute("data-theme", c); themeSetByApp = true; }
+  if (remember) localStore.write(KEYS.theme, c);
+  $$("#theme-seg button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.themeChoice === c)));
+  viewer.render();
+  sv.render();
+}
+
+function renderSettings() {
+  renderPriceMeta();
+  $("#gm-status").textContent = gmKey() ? "A key is saved on this device." : "";
+  $("#pc-status").textContent = pcToken() ? "A token is saved on this device." : "";
+  $("#cs-status").textContent = csKey() ? "A key is saved on this device." : "";
+}
+
+/* ---------------------------------------------------------------- surface inspection viewer */
+
+// View-only tools: zoom, pan, filters and possible-mark finding. The original scan is never changed, and
+// nothing here reaches grading unless the user adds a mark as a defect (then it's an ordinary confirmed defect).
+const MARK_STATE_TEXT = { pending: "To review", added: "Added as a defect", dismissed: "Dismissed", check_in_hand: "Check in hand" };
+
+const sv = {
+  side: "front",
+  source: "photo",        // photo | angled
+  kind: "original",       // chosen filter
+  showFiltered: false,    // the Original/Filtered toggle
+  intensity: 60,
+  zoom: 1, panX: 0, panY: 0,
+  selected: null,         // selected candidate id
+  cache: new Map(),       // filter key -> canvas (transient, never saved)
+  filterBusy: false,
+  filterError: "",
+  pointers: new Map(),
+  gesture: null,
+
+  init() {
+    this.canvas = $("#sv-canvas");
+    this.ctx = this.canvas.getContext("2d");
+    const filters = $("#sv-filters");
+    for (const [kind, label] of SURFACE_FILTERS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "radio");
+      b.dataset.kind = kind;
+      b.textContent = label;
+      b.addEventListener("click", () => this.setKind(kind));
+      filters.append(b);
+    }
+    $$("[data-sv-side]").forEach((b) => b.addEventListener("click", () => { this.side = b.dataset.svSide; this.source = "photo"; this.selected = null; this.resetView(); this.render(); }));
+    $$("[data-sv-source]").forEach((b) => b.addEventListener("click", () => { this.source = b.dataset.svSource; this.selected = null; this.render(); }));
+    $$("[data-sv-view]").forEach((b) => b.addEventListener("click", () => { this.showFiltered = b.dataset.svView === "filtered" && this.kind !== "original"; this.render(); }));
+    const slider = $("#sv-intensity");
+    slider.addEventListener("input", () => {
+      this.intensity = Number(slider.value);
+      $("#sv-intensity-val").textContent = String(this.intensity);
+      this.render();   // coalesced: only the latest value's filter is kept
+    });
+    $("#sv-reset").addEventListener("click", () => { this.kind = "original"; this.showFiltered = false; this.intensity = 60; slider.value = "60"; $("#sv-intensity-val").textContent = "60"; this.selected = null; this.resetView(); this.render(); });
+    $("#sv-done").addEventListener("click", () => this.close());
+    $("#sv-find").addEventListener("click", () => this.findMarks());
+    const c = this.canvas;
+    c.tabIndex = 0;
+    c.addEventListener("pointerdown", (e) => this.onDown(e));
+    c.addEventListener("pointermove", (e) => this.onMove(e));
+    c.addEventListener("pointerup", (e) => this.onUp(e));
+    c.addEventListener("pointercancel", (e) => this.onUp(e));
+    c.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const r = c.getBoundingClientRect();
+      this.zoomAt(e.clientX - r.left, e.clientY - r.top, Math.exp(-e.deltaY * 0.0025));
+    }, { passive: false });
+    c.addEventListener("dblclick", (e) => {
+      const r = c.getBoundingClientRect();
+      this.zoomAt(e.clientX - r.left, e.clientY - r.top, this.zoom > 1.5 ? 1 / this.zoom : 3 / this.zoom);
+    });
+    c.addEventListener("keydown", (e) => {
+      const r = c.getBoundingClientRect(), step = 40;
+      const keys = {
+        "+": () => this.zoomAt(r.width / 2, r.height / 2, 1.25), "=": () => this.zoomAt(r.width / 2, r.height / 2, 1.25),
+        "-": () => this.zoomAt(r.width / 2, r.height / 2, 0.8), "0": () => { this.resetView(); this.draw(); },
+        ArrowLeft: () => this.panBy(step, 0), ArrowRight: () => this.panBy(-step, 0), ArrowUp: () => this.panBy(0, step), ArrowDown: () => this.panBy(0, -step),
+      };
+      if (keys[e.key]) { e.preventDefault(); keys[e.key](); }
+    });
+    window.addEventListener("resize", () => { if (this.isOpen()) this.draw(); });
+  },
+
+  isOpen() { return !$("#surface-viewer").hidden; },
+
+  open(side, opener) {
+    this.side = side;
+    this.source = "photo";
+    this.selected = null;
+    this.resetView();
+    openDialog("#surface-viewer", opener);
+    this.render();
+  },
+
+  close() {
+    try { runner().cancel("filter"); } catch (_) { /* ignore */ }
+    closeDialog("#surface-viewer");
+    renderSurfacePane();
+  },
+
+  reset() {
+    this.cache.clear();
+    this.kind = "original";
+    this.showFiltered = false;
+    this.selected = null;
+    this.filterError = "";
+    if (this.canvas && this.isOpen()) closeDialog("#surface-viewer");
+  },
+
+  /** A new photo or outline for this side: transient previews and candidates no longer apply. */
+  invalidate(side) {
+    for (const k of [...this.cache.keys()]) if (k.startsWith(`${side}|`)) this.cache.delete(k);
+    if (this.side === side) this.selected = null;
+    if (this.canvas && this.isOpen()) this.render();
+  },
+
+  // The flattened image being viewed: the scan, or the angled-light photo of the same side.
+  src() {
+    const a = state.angled[this.side];
+    if (this.source === "angled" && a && a.result) return { img: a.img, result: a.result, margin: a.margin, width: a.width, height: a.height, rev: a.rev, kind: "angled" };
+    const s = state.scans[this.side];
+    if (s && s.result) return { img: s.img, result: s.result, margin: s.margin, width: s.width, height: s.height, rev: s.rev, kind: "photo" };
+    return null;
+  },
+
+  diffReference() {
+    const r = state.reference;
+    if (this.side !== "front") return { ok: false, why: "A reference image shows the card's front only." };
+    if (!r) return { ok: false, why: "Needs a confirmed reference image: Card details → Find online, then confirm your card." };
+    if (!r.rgba || !r.usable) return { ok: false, why: "The confirmed reference image can't be compared pixel by pixel." };
+    return { ok: true, reference: r.rgba };
+  },
+
+  filterAvailable(kind) {
+    if (kind === "original") return { ok: true };
+    if (!surfaceApi()) return { ok: false, why: "Filters aren't available in this build." };
+    if (kind === "difference") return this.diffReference();
+    return { ok: true };
+  },
+
+  setKind(kind) {
+    if (!this.filterAvailable(kind).ok) return;
+    this.kind = kind;
+    this.showFiltered = kind !== "original";
+    this.render();
+  },
+
+  setMarkStatus(side, id, status) {
+    const m = state.marks[side];
+    const c = m && m.candidates ? m.candidates.find((x) => x.id === id) : null;
+    if (c) c.status = status;
+  },
+
+  resetView() { this.zoom = 1; this.panX = 0; this.panY = 0; },
+
+  /* ----- geometry */
+  layout() {
+    const src = this.src();
+    const c = this.canvas, dpr = window.devicePixelRatio || 1;
+    const cw = c.clientWidth || 1, ch = c.clientHeight || 1;
+    if (c.width !== Math.round(cw * dpr) || c.height !== Math.round(ch * dpr)) { c.width = Math.round(cw * dpr); c.height = Math.round(ch * dpr); }
+    if (!src) return null;
+    const w = src.width - 2 * src.margin, h = src.height - 2 * src.margin;
+    const fit = Math.min(cw / w, ch / h) * 0.94;
+    const s = fit * this.zoom;
+    return { src, cw, ch, dpr, w, h, s, x0: cw / 2 + this.panX - (w * s) / 2, y0: ch / 2 + this.panY - (h * s) / 2 };
+  },
+
+  clampPan() {
+    const L = this.layout();
+    if (!L) return;
+    const mx = Math.max(0, (L.w * L.s - L.cw) / 2) + L.cw * 0.25, my = Math.max(0, (L.h * L.s - L.ch) / 2) + L.ch * 0.25;
+    this.panX = Math.max(-mx, Math.min(mx, this.panX));
+    this.panY = Math.max(-my, Math.min(my, this.panY));
+  },
+
+  zoomAt(x, y, factor) {
+    const L = this.layout();
+    if (!L) return;
+    const z = Math.max(1, Math.min(8, this.zoom * factor));
+    const k = z / this.zoom;
+    this.panX = x - L.cw / 2 - (x - L.cw / 2 - this.panX) * k;
+    this.panY = y - L.ch / 2 - (y - L.ch / 2 - this.panY) * k;
+    this.zoom = z;
+    this.clampPan();
+    this.draw();
+  },
+
+  panBy(dx, dy) { this.panX += dx; this.panY += dy; this.clampPan(); this.draw(); },
+
+  zoomTo(c) {
+    const L = this.layout();
+    if (!L) return;
+    // Zoom so the mark fills about 40% of the stage, centred on it.
+    const fit = L.s / this.zoom;
+    const extent = Math.max(c.w * L.w, c.h * L.h, 4) * fit;
+    const z = Math.max(1, Math.min(6, (0.4 * Math.min(L.cw, L.ch)) / extent));
+    this.zoom = z;
+    this.panX = -(c.x + c.w / 2 - 0.5) * L.w * fit * z;
+    this.panY = -(c.y + c.h / 2 - 0.5) * L.h * fit * z;
+    this.clampPan();
+  },
+
+  /* ----- pointer gestures: one finger pans, two pinch; a tap selects a mark */
+  onDown(e) {
+    this.canvas.setPointerCapture && this.canvas.setPointerCapture(e.pointerId);
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    this.gesture = { start: Date.now(), moved: 0, x: e.clientX, y: e.clientY };
+  },
+  onMove(e) {
+    const prev = this.pointers.get(e.pointerId);
+    if (!prev) return;
+    const pts = [...this.pointers.values()];
+    if (this.pointers.size === 2) {
+      const other = pts.find((p) => p !== prev);
+      const d0 = Math.hypot(prev.x - other.x, prev.y - other.y);
+      const d1 = Math.hypot(e.clientX - other.x, e.clientY - other.y);
+      const r = this.canvas.getBoundingClientRect();
+      if (d0 > 0) this.zoomAt((e.clientX + other.x) / 2 - r.left, (e.clientY + other.y) / 2 - r.top, d1 / d0);
+    } else {
+      this.panBy(e.clientX - prev.x, e.clientY - prev.y);
+    }
+    if (this.gesture) this.gesture.moved += Math.hypot(e.clientX - prev.x, e.clientY - prev.y);
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  },
+  onUp(e) {
+    const g = this.gesture;
+    this.pointers.delete(e.pointerId);
+    if (g && this.pointers.size === 0 && g.moved < 8 && Date.now() - g.start < 400) {
+      const r = this.canvas.getBoundingClientRect();
+      this.tapAt(e.clientX - r.left, e.clientY - r.top);
+    }
+    if (!this.pointers.size) this.gesture = null;
+  },
+  tapAt(x, y) {
+    const L = this.layout();
+    const m = this.visibleMarks();
+    if (!L || !m.length) return;
+    const u = (x - L.x0) / (L.w * L.s), v = (y - L.y0) / (L.h * L.s);
+    const pad = 14 / (L.w * L.s);
+    const hit = m.find((c) => u >= c.x - pad && u <= c.x + c.w + pad && v >= c.y - pad && v <= c.y + c.h + pad);
+    if (hit) this.select(hit.id);
+  },
+
+  visibleMarks() {
+    const m = state.marks[this.side];
+    const src = this.src();
+    if (!m || !m.candidates || !src || m.rev !== src.rev) return [];
+    return m.candidates;
+  },
+
+  select(id, { zoom = true } = {}) {
+    this.selected = id;
+    const c = this.visibleMarks().find((x) => x.id === id);
+    if (c && zoom) this.zoomTo(c);
+    this.render();
+    const btn = $(`#sv-list button[data-id="${CSS.escape(id)}"]`);
+    if (btn) btn.focus({ preventScroll: true });
+  },
+
+  /* ----- filters (view only) */
+  filterKey(kind, src) { return `${this.side}|${src.kind}|${src.rev}|${kind}|${kind === "original" ? 0 : this.intensity}`; },
+
+  /** The filtered image for `kind`, or null while it's computed (the canvas redraws when it arrives). */
+  filtered(kind) {
+    const src = this.src();
+    if (!src || kind === "original") return null;
+    const key = this.filterKey(kind, src);
+    if (this.cache.has(key)) return this.cache.get(key);
+    if (!this.filterAvailable(kind).ok) return null;
+    if (this.pendingKey === key) return null;
+    this.pendingKey = key;
+    this.filterBusy = true;
+    this.filterError = "";
+    const token = { card: state.cardRev, side: this.side, rev: src.rev, key };
+    const w = src.result.warped;
+    const opts = { kind, intensity: this.intensity / 100 };
+    if (kind === "difference") opts.reference = this.diffReference().reference;
+    // The scan's pixels are copied: a filter only ever produces a new image for this view.
+    runner().run("filter", { src: { width: w.width, height: w.height, data: new Uint8ClampedArray(w.data) }, options: opts }, { coalesceKey: "filter" })
+      .then((out) => {
+        if (token.card !== state.cardRev || this.pendingKey !== key) return;
+        this.pendingKey = null;
+        this.filterBusy = false;
+        const cur = this.src();
+        if (!cur || cur.rev !== token.rev) return;
+        const img = out && out.data ? out : out && out.image;
+        if (!img || !img.data) throw new Error("The filter returned no image.");
+        if (this.cache.size > 12) this.cache.delete(this.cache.keys().next().value);
+        this.cache.set(key, canvasFromRGBA({ width: img.width, height: img.height, data: new Uint8ClampedArray(img.data) }));
+        this.render();
+      })
+      .catch((err) => {
+        if (isStale(err)) return;
+        if (this.pendingKey === key) { this.pendingKey = null; this.filterBusy = false; this.filterError = (err && err.message) || "The filter couldn't run."; this.render(); }
+      });
+    return null;
+  },
+
+  /* ----- possible marks */
+  async findMarks() {
+    const src = this.src();
+    if (!src) return;
+    const side = this.side;
+    const token = { card: state.cardRev, side, rev: src.rev, kind: src.kind };
+    const base = src.kind === "photo" ? state.scans[side] : null;
+    const options = {
+      quality: base ? base.quality : null, check: base ? base.check : null, side, revision: src.rev,
+      reference: side === "front" && state.reference && state.reference.usable ? state.reference.rgba : null,
+      maxCandidates: 12, timeBudgetMs: 4000,
+    };
+    if (side === "front" && state.reference && state.reference.usable && state.reference.rgba) {
+      try { options.printedMask = Identify.printedMask(state.reference.rgba, src.result.warped, src.margin); } catch (_) { /* no mask */ }
+    }
+    state.marks[side] = { status: "running", rev: src.rev, source: src.kind, candidates: [], cannotAssess: [], note: "" };
+    this.selected = null;
+    this.render();
+    let res;
+    try {
+      res = await runner().run("marks", { scan: src.result, options }, { coalesceKey: `marks-${side}` });
+    } catch (err) {
+      if (isStale(err)) return;
+      res = { status: "error", candidates: [], cannotAssess: [], note: err && err.timeout ? "Looking for marks took too long. Try again." : (err && err.message) || "Mark finding failed." };
+    }
+    const cur = this.src();
+    if (token.card !== state.cardRev || !state.marks[side] || state.marks[side].rev !== token.rev || (this.side === side && cur && cur.rev !== token.rev && cur.kind === token.kind)) return;
+    state.marks[side] = {
+      status: res.status || "done", rev: token.rev, source: token.kind, note: res.note || "",
+      // Candidates are transient: they never enter grading, drafts, History or backups.
+      candidates: (res.candidates || []).map((c, i) => ({ ...c, id: String(c.id != null ? c.id : i + 1), side, revision: token.rev, status: "pending" })),
+      cannotAssess: res.cannotAssess || [],
+    };
+    this.render();
+    renderSurfacePane();
+    const n = state.marks[side].candidates.length;
+    announce(n ? `${n} possible mark${n === 1 ? "" : "s"} found. None is counted until you add it as a defect.` : res.status === "unavailable" ? res.note : "No visible marks found in this photo.");
+  },
+
+  isAdded(c) {
+    return state.defects.some((d) => d.region && d.side === c.side && d.scan_revision === c.revision && d.region.x === c.x && d.region.y === c.y && d.region.w === c.w && d.region.h === c.h);
+  },
+  statusOf(c) { return this.isAdded(c) ? "added" : c.status === "added" ? "pending" : c.status || "pending"; },
+
+  /* ----- drawing */
+  draw() {
+    const { ctx, canvas } = this;
+    const L = this.layout();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    $("#sv-empty").hidden = !!L;
+    $("#sv-zoom").textContent = `${this.zoom < 1.95 ? this.zoom.toFixed(1) : Math.round(this.zoom)}×`;
+    if (!L) return;
+    ctx.setTransform(L.dpr, 0, 0, L.dpr, 0, 0);
+    const m = L.src.margin;
+    const shown = this.showFiltered && this.kind !== "original" ? this.filtered(this.kind) : null;
+    ctx.imageSmoothingEnabled = L.s < 2.5;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(shown || L.src.img, m, m, L.w, L.h, L.x0, L.y0, L.w * L.s, L.h * L.s);
+    const marks = this.marksForDraw();
+    const X = (u) => L.x0 + u * L.w * L.s, Y = (v) => L.y0 + v * L.h * L.s;
+    ctx.save();
+    for (const r of marks.cannot) {
+      ctx.fillStyle = "rgba(128, 128, 136, 0.35)";
+      ctx.fillRect(X(r.x), Y(r.y), r.w * L.w * L.s, r.h * L.h * L.s);
+    }
+    marks.list.forEach((c, i) => {
+      const sel = c.id === this.selected;
+      const st = this.statusOf(c);
+      const x = X(c.x), y = Y(c.y), w = Math.max(6, c.w * L.w * L.s), h = Math.max(6, c.h * L.h * L.s);
+      ctx.setLineDash(st === "dismissed" ? [5, 4] : []);
+      ctx.lineWidth = sel ? 4 : 2.5;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.strokeRect(x - 3, y - 3, w + 6, h + 6);
+      ctx.lineWidth = sel ? 2.5 : 1.5;
+      ctx.strokeStyle = "#ffffff";
+      ctx.strokeRect(x - 3, y - 3, w + 6, h + 6);
+      ctx.setLineDash([]);
+      const r = 11, bx = x - 3, by = y - 3;
+      ctx.beginPath();
+      ctx.arc(bx, by, r, 0, Math.PI * 2);
+      ctx.fillStyle = sel ? "#ffffff" : "#111114";
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = sel ? "#111114" : "#ffffff";
+      ctx.stroke();
+      ctx.fillStyle = sel ? "#111114" : "#ffffff";
+      ctx.font = "700 12px -apple-system, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i + 1), bx, by + 0.5);
+    });
+    ctx.restore();
+  },
+
+  marksForDraw() {
+    const m = state.marks[this.side];
+    const src = this.src();
+    if (!m || !src || m.rev !== src.rev) return { list: [], cannot: [] };
+    return { list: m.candidates || [], cannot: m.cannotAssess || [] };
+  },
+
+  cropTo(canvasEl, img, c, src) {
+    const ctx = canvasEl.getContext("2d");
+    const size = 160;
+    canvasEl.width = size;
+    canvasEl.height = size;
+    ctx.clearRect(0, 0, size, size);
+    if (!img) return;
+    const m = src.margin, w = src.width - 2 * m, h = src.height - 2 * m;
+    const side = Math.max(40, Math.max(c.w * w, c.h * h) * 2.4);
+    const cx = m + (c.x + c.w / 2) * w, cy = m + (c.y + c.h / 2) * h;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(img, cx - side / 2, cy - side / 2, side, side, 0, 0, size, size);
+  },
+
+  /* ----- panel */
+  render() {
+    if (!this.canvas) return;
+    if (!this.isOpen()) return;
+    const src = this.src();
+    $$("[data-sv-side]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.svSide === this.side)));
+    const hasAngled = !!(state.angled[this.side] && state.angled[this.side].result);
+    $("#sv-source").hidden = !hasAngled;
+    if (!hasAngled) this.source = "photo";
+    $$("[data-sv-source]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.svSource === this.source)));
+    // Filter toolbar
+    const notes = [];
+    for (const b of $$("#sv-filters button")) {
+      const av = this.filterAvailable(b.dataset.kind);
+      b.disabled = !av.ok || !src;
+      b.setAttribute("aria-checked", String(b.dataset.kind === this.kind));
+      b.title = av.ok ? "" : av.why;
+      if (!av.ok && b.dataset.kind === "difference" && surfaceApi()) notes.push(`Color difference: ${av.why}`);
+      if (!av.ok && b.dataset.kind === "grayscale") notes.push(av.why);
+    }
+    if (!this.filterAvailable(this.kind).ok) { this.kind = "original"; this.showFiltered = false; }
+    $$("[data-sv-view]").forEach((b) => {
+      b.setAttribute("aria-checked", String((b.dataset.svView === "filtered") === (this.showFiltered && this.kind !== "original")));
+      if (b.dataset.svView === "filtered") b.disabled = this.kind === "original";
+    });
+    if (this.filterBusy && this.showFiltered) notes.push("Applying filter…");
+    if (this.filterError && this.showFiltered) notes.push(this.filterError);
+    $("#sv-filter-note").textContent = notes.join(" ");
+    $("#sv-intensity-row").hidden = ["original", "invert"].includes(this.kind);
+    // Marks
+    const m = state.marks[this.side];
+    const fresh = m && src && m.rev === src.rev;
+    const running = fresh && m.status === "running";
+    $("#sv-find").disabled = !src || running;
+    $("#sv-find span").textContent = running ? "Looking for possible marks…" : fresh && !["running", "unavailable", "error"].includes(m.status) ? "Find possible marks again" : "Find possible marks";
+    const status = $("#sv-status");
+    const list = $("#sv-list");
+    list.innerHTML = "";
+    const detail = $("#sv-detail");
+    detail.hidden = true;
+    detail.innerHTML = "";
+    if (!src) status.textContent = `No ${this.side} photo to inspect. Add one on the Scan screen.`;
+    else if (!fresh) status.textContent = m && m.rev !== src.rev ? "The photo changed, so earlier marks were cleared. Look again." : "Looks for spots that stand out from the card's print. Nothing is counted until you add it as a defect.";
+    else if (running) status.textContent = "Looking for possible marks…";
+    else if (m.status === "unavailable" || m.status === "error") status.textContent = m.note || "Mark finding isn't available.";
+    else if (!m.candidates.length) {
+      status.textContent = "No visible marks found in this photo.";
+      detail.hidden = false;
+      const p = document.createElement("p");
+      p.className = "footnote tight";
+      p.textContent = `${m.note ? `${m.note} ` : ""}That doesn't mean the surface is flawless: it stays unchecked until you check the card in hand under angled light (Surface → Check in hand).`;
+      detail.append(p);
+      if (src.kind === "photo") {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn tinted wide";
+        b.textContent = "Add angled-light photo";
+        b.addEventListener("click", () => { state.activeSide = this.side; $("#angled-file").click(); });
+        detail.append(b);
+      }
+    } else {
+      const open = m.candidates.filter((c) => this.statusOf(c) === "pending").length;
+      status.textContent = `${m.candidates.length} possible mark${m.candidates.length === 1 ? "" : "s"} · ${open} to review. Detection confidence is an uncalibrated heuristic, not a measurement.${m.note ? ` ${m.note}` : ""}`;
+      m.candidates.forEach((c, i) => {
+        const li = document.createElement("li");
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.id = c.id;
+        b.setAttribute("aria-pressed", String(c.id === this.selected));
+        const st = this.statusOf(c);
+        const typeLabel = (c.suggestedTypes || []).map((t) => CRITERIA.defects.types[t] && CRITERIA.defects.types[t].label).filter(Boolean)[0];
+        b.innerHTML = `<span class="mark-no" aria-hidden="true">${i + 1}</span><span class="m-text"><span class="m-title"></span><span class="m-sub"></span></span><span class="m-state"></span>`;
+        $(".m-title", b).textContent = `Possible mark ${i + 1}${typeLabel ? ` · looks like ${typeLabel.toLowerCase()}` : ""}`;
+        $(".m-sub", b).textContent = `Detection confidence: ${cap(c.detection || "low")}`;
+        $(".m-state", b).textContent = MARK_STATE_TEXT[st];
+        b.addEventListener("click", () => this.select(c.id));
+        li.append(b);
+        list.append(li);
+      });
+      const sel = m.candidates.find((c) => c.id === this.selected);
+      if (sel) this.renderDetail(sel, m.candidates.indexOf(sel), src);
+    }
+    $("#sv-runner-note").hidden = !(runnerInstance && runnerInstance.mode === "main-thread");
+    $("#sv-runner-note").textContent = runnerInstance ? runnerInstance.unavailableReason || "" : "";
+    this.draw();
+  },
+
+  renderDetail(c, i, src) {
+    const box = $("#sv-detail");
+    box.hidden = false;
+    const st = this.statusOf(c);
+    const cropKind = this.kind !== "original" ? this.kind : (this.filterAvailable("contrast").ok ? "contrast" : null);
+    const cropLabel = cropKind ? SURFACE_FILTERS.find(([k]) => k === cropKind)[1] : "Filtered";
+    box.innerHTML = `<b></b><div class="mark-crops"><figure><canvas aria-hidden="true"></canvas><figcaption>Original</figcaption></figure><figure><canvas aria-hidden="true"></canvas><figcaption></figcaption></figure></div>
+      <p class="footnote tight m-conf"></p><p class="footnote tight m-reason"></p>
+      <div class="mark-actions"><button type="button" class="btn filled">Add defect</button><button type="button" class="btn tinted">Dismiss</button><button type="button" class="btn tinted">Check in hand</button></div>`;
+    $("b", box).textContent = `Possible mark ${i + 1} · ${MARK_STATE_TEXT[st]}`;
+    $$("figcaption", box)[1].textContent = cropLabel;
+    const [a, b] = $$("canvas", box);
+    this.cropTo(a, src.img, c, src);
+    this.cropTo(b, cropKind ? this.filtered(cropKind) : null, c, src);
+    $(".m-conf", box).textContent = `Detection confidence: ${cap(c.detection || "low")}${c.detectionNote ? ` · ${c.detectionNote}` : ""}. An uncalibrated heuristic: it says how clearly the photo shows something, not how bad it is.`;
+    $(".m-reason", box).textContent = c.reason || "";
+    const [add, dismiss, inHand] = $$(".mark-actions button", box);
+    add.disabled = st === "added";
+    add.addEventListener("click", () => openSheet(c.side, "surface", { mark: c, opener: add }));
+    dismiss.addEventListener("click", () => { c.status = "dismissed"; this.render(); renderSurfacePane(); });
+    inHand.addEventListener("click", () => {
+      c.status = "check_in_hand";
+      toast("Check this spot on the card in hand, then record it in Surface → Check in hand.");
+      this.render();
+      renderSurfacePane();
+    });
+  },
+};
+
+/* ---------------------------------------------------------------- angled-light photo (view only) */
+
+async function addAngledPhoto(side, file) {
+  const s = state.scans[side];
+  const token = { card: state.cardRev, side, rev: s ? s.rev : "" };
+  state.angled[side] = { status: "busy" };
+  renderSurfacePane();
+  try {
+    const pixels = await readImage(file);
+    if (token.card !== state.cardRev) return;
+    const out = await runner().run("scan", scanPayload(pixels, side), { coalesceKey: `angled-${side}` });
+    if (token.card !== state.cardRev || (state.scans[side] ? state.scans[side].rev : "") !== token.rev) return;
+    const scan = out.scan;
+    // Only for looking at: it never changes centering, confidence, photo limits or grades.
+    state.angled[side] = { status: "ready", img: canvasFromRGBA(scan.warped), result: scan, margin: scan.margin, width: scan.width, height: scan.height, rev: newRev() };
+    toast(`Angled-light photo added for the ${side}. Switch to it in Inspect surface.`);
+  } catch (err) {
+    if (isStale(err)) return;
+    if (token.card === state.cardRev) { state.angled[side] = null; toast((err && err.message) || "Couldn't use this photo."); }
+  }
+  renderSurfacePane();
+  if (sv.isOpen()) { if (state.angled[side]) { sv.side = side; sv.source = "angled"; } sv.render(); }
+}
+
 /* ---------------------------------------------------------------- init */
+
+function bindFile(input, handler) {
+  input.addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (f) handler(f);
+  });
+}
 
 function init() {
   guide.init();
+  viewer.init();
+  sv.init();
   for (const fig of $$(".map")) buildMap(fig, fig.dataset.side);
+  applyTheme(localStore.read(KEYS.theme, "system"), { remember: false });
 
-  // Scan screen
+  // Tabs
+  $$(".tabbar button").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.tab)));
+
+  // Scan
   $$("#game-seg button").forEach((b) => b.addEventListener("click", () => setGame(b.dataset.game)));
   setGame(localStore.read(KEYS.game, "pokemon"), { remember: false });
   for (const side of SIDES) {
-    const input = $(`#file-${side}`);
-    input.addEventListener("change", (e) => {
-      const f = e.target.files[0];
-      e.target.value = "";
-      if (f) scanFile(side, f);
-    });
-    const slot = $(`.slot[data-side="${side}"]`);
-    slot.tabIndex = 0;
-    slot.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+    bindFile($(`#file-${side}`), (f) => scanFile(side, f));
+    bindFile($(`#camera-${side}`), (f) => scanFile(side, f));
   }
-  $("#get-report").addEventListener("click", () => setView("report"));
+  $("#review-card").addEventListener("click", () => setView("report"));
   $("#front-only").addEventListener("click", () => setView("report"));
   $("#try-example").addEventListener("click", showExample);
   $("#resume").addEventListener("click", () => {
     const draft = localStore.draft();
     if (draft) loadAssessment(draft, draft.thumbs);
   });
+  armed($("#clear-card"), "Tap to confirm", newScan);
 
-  // Report screen
-  $("#back-to-scan").addEventListener("click", newScan);
-  $("#new-scan").addEventListener("click", newScan);
+  // Review
+  $("#back-to-scan").addEventListener("click", () => (state.example ? newScan() : setView("scan")));
+  armed($("#new-scan"), "Tap again to start a new scan", newScan);
   $("#scan-own").addEventListener("click", newScan);
   $("#save-card").addEventListener("click", saveCard);
-  for (const id of ["#open-history", "#open-history-2"]) $(id).addEventListener("click", openHistory);
-  viewer.init();
-  $$("#centering-section .segmented button, #scancheck-section .segmented button, .viewer-side button").forEach((b) => b.addEventListener("click", () => {
-    if (guide.outline) setOutlineMode(false);
-    state.activeSide = b.dataset.side;
-    renderCentering();
-  }));
+  $("#open-details").addEventListener("click", (e) => setDetailsEditing(true, e.currentTarget));
+  $("#done-details").addEventListener("click", () => setDetailsEditing(false));
+  $$("[data-pane]").forEach((b) => b.addEventListener("click", () => pushPane(b.dataset.pane, b)));
+  $$("[data-pop]").forEach((b) => b.addEventListener("click", popPane));
+  $$("[data-goto]").forEach((b) => b.addEventListener("click", () => setTab(b.dataset.goto)));
+  $("#open-subgrades").addEventListener("click", (e) => pushPane("pane-company", e.currentTarget));
+  for (const id of ["#open-surface", "#pane-open-surface"]) $(id).addEventListener("click", (e) => sv.open(state.activeSide, e.currentTarget));
+  $("#go-checklist").addEventListener("click", (e) => pushPane("pane-defects", e.currentTarget));
+  document.addEventListener("click", (e) => {
+    const act = e.target.closest("[data-conf-action]");
+    if (act) { confAction(act.dataset.confAction, act.dataset.side); return; }
+    const sideBtn = e.target.closest(".side-seg button");
+    if (sideBtn) {
+      if (guide.outline) setOutlineMode(false);
+      state.activeSide = sideBtn.dataset.side;
+      renderCentering();
+    }
+  });
+  // Inspection checklist rows are redrawn as the grade changes; one listener handles all of them.
+  document.addEventListener("change", (e) => {
+    const box = e.target.closest("input[type=checkbox][data-comp]");
+    if (box) setInspected(box.dataset.side, box.dataset.comp, box.checked);
+  });
   for (const [id, key] of [["#ratio-lr", "lr"], ["#ratio-tb", "tb"]]) {
     $(id).addEventListener("input", (e) => {
       const v = parseFloat(e.target.value);
@@ -2581,17 +3845,14 @@ function init() {
   $("#adjust-outline").addEventListener("click", () => setOutlineMode(true));
   $("#outline-cancel").addEventListener("click", () => setOutlineMode(false));
   $("#outline-apply").addEventListener("click", applyOutline);
-  $("#retake-file").addEventListener("change", (e) => {
-    const f = e.target.files[0];
-    e.target.value = "";
-    if (f) scanFile(state.activeSide, f);
-  });
+  bindFile($("#retake-file"), (f) => scanFile(state.activeSide, f));
+  bindFile($("#angled-file"), (f) => addAngledPhoto(state.activeSide, f));
   fillSelect($("#card-finish"), FINISHES);
   fillSelect($("#card-language"), ["", ...Object.keys(LANGUAGES)], { "": "—", ...LANGUAGES });
   $("#card-language").value = "EN";
   for (const id of ["card-name", ...Object.keys(DETAIL_FIELDS)]) {
-    $(`#${id}`).addEventListener("input", () => { leaveExample(); renderDetails(); saveDraft(); });
-    $(`#${id}`).addEventListener("change", () => { leaveExample(); renderDetails(); saveDraft(); });
+    $(`#${id}`).addEventListener("input", () => { leaveExample(); renderDetails(); saveDraft(); renderPriceMeta(); });
+    $(`#${id}`).addEventListener("change", () => { leaveExample(); renderDetails(); saveDraft(); renderPriceMeta(); });
   }
   $("#collector-line").addEventListener("input", (e) => {
     const parsed = parseCollectorLine(e.target.value);
@@ -2605,11 +3866,19 @@ function init() {
   $("#find-card").addEventListener("click", findCard);
   $("#read-card").addEventListener("click", () => readFromPhoto());
   $("#refresh-prices").addEventListener("click", () => { loadPrices({ force: true }); loadCardSight({ force: true }); loadRiftPrices(); });
+  $("#web-search").addEventListener("click", webSearch);
+  $("#clear-reference").addEventListener("click", () => { clearReference(); setStatus("Reference removed."); });
+  // A reference only belongs to the card it was confirmed for: changing what identifies the card drops it.
+  for (const id of ["card-set-code", "card-number", "card-language"]) {
+    $(`#${id}`).addEventListener("input", () => { if (state.reference && state.reference.source !== "user") { clearReference(); setStatus("Details changed: find the card again to get its reference."); } });
+  }
+
+  // Settings
+  $$("#theme-seg button").forEach((b) => b.addEventListener("click", () => applyTheme(b.dataset.themeChoice)));
   $("#cs-save").addEventListener("click", saveCardSightKey);
   $("#cs-remove").addEventListener("click", removeCardSightKey);
   $("#pc-save").addEventListener("click", savePriceToken);
   $("#pc-remove").addEventListener("click", removePriceToken);
-  $("#web-search").addEventListener("click", webSearch);
   $("#gm-save").addEventListener("click", saveGeminiKey);
   $("#gm-remove").addEventListener("click", removeGeminiKey);
   for (const m of WebPrices.MODELS) {
@@ -2619,32 +3888,6 @@ function init() {
     $("#gm-model").append(o);
   }
   $("#gm-model").value = gmModel();
-  $("#clear-reference").addEventListener("click", () => { clearReference(); setStatus("Reference removed."); });
-  // A reference only belongs to the card it was confirmed for: changing what identifies the card drops it.
-  for (const id of ["card-set-code", "card-number", "card-language"]) {
-    $(`#${id}`).addEventListener("input", () => { if (state.reference && state.reference.source !== "user") { clearReference(); setStatus("Details changed: find the card again to get its reference."); } });
-  }
-  $("#edit-details").addEventListener("click", () => setDetailsEditing($("#details-form").hidden));
-  $("#done-details").addEventListener("click", () => setDetailsEditing(false));
-
-  // Inspection checklist
-  for (const box of $$("#inspect input[type=checkbox]")) {
-    box.addEventListener("change", () => setInspected(box.dataset.side, box.dataset.comp, box.checked));
-  }
-  $("#go-checklist").addEventListener("click", () => {
-    $("#condition-section").open = true;
-    $("#inspect").scrollIntoView({ behavior: "smooth", block: "center" });
-  });
-
-  // Defect sheet
-  $$("#sev-seg button").forEach((b) => b.addEventListener("click", () => { state.sheet.severity = b.dataset.sev; updateSheet(); }));
-  $("#sheet-add").addEventListener("click", addDefectFromSheet);
-  $("#sheet-cancel").addEventListener("click", closeSheet);
-  $("#defect-sheet").addEventListener("click", (e) => { if (e.target.id === "defect-sheet") closeSheet(); });
-
-  // History sheet
-  $("#close-history").addEventListener("click", () => ($("#history").hidden = true));
-  $("#history").addEventListener("click", (e) => { if (e.target.id === "history") $("#history").hidden = true; });
   $("#copy-backup").addEventListener("click", () => {
     const text = backupText();
     const box = $("#backup-text");
@@ -2672,19 +3915,25 @@ function init() {
     });
   }
   /*SITE_ONLY_END*/
-  $("#restore-file").addEventListener("change", async (e) => {
-    const f = e.target.files[0];
-    e.target.value = "";
-    if (f) restoreFrom(await f.text());
-  });
+  bindFile($("#restore-file"), async (f) => restoreFrom(await f.text()));
   $("#restore-text").addEventListener("click", () => restoreFrom($("#backup-text").value));
+
+  // Sheets
+  $$("#sev-seg button").forEach((b) => b.addEventListener("click", () => { state.sheet.severity = b.dataset.sev; updateSheet(); }));
+  $("#sheet-add").addEventListener("click", addDefectFromSheet);
+  $("#sheet-cancel").addEventListener("click", closeSheet);
+  $("#defect-sheet").addEventListener("click", (e) => { if (e.target.id === "defect-sheet") closeSheet(); });
+  $("#details-sheet").addEventListener("click", (e) => { if (e.target.id === "details-sheet") setDetailsEditing(false); });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    closeSheet();
-    $("#history").hidden = true;
+    const top = topDialog();
+    if (top === "#surface-viewer") sv.close();
+    else if (top) closeDialog(top);
+    else if (guide.outline) setOutlineMode(false);
+    else if (state.pane) popPane();
   });
 
-  setView("scan", { animate: false });
+  setView("scan", { animate: false, focus: false });
 }
 
 init();
