@@ -112,7 +112,7 @@
     // clusters / texture
     clusterRadiusMm: 3, clusterMax: 4,
     tileMm: 4, tileMarks: 8, tileFrac: 0.12, maxTextureRegions: 12,
-    foilSpecks: 0.6, foilChroma: 35,  // a busy tile is foil-like when most marks are tiny light specks or colour changes everywhere (mean chroma gradient)
+    foilSpecks: 0.45, foilChroma: 35,  // a busy tile is foil-like when most marks are tiny light specks or colour changes everywhere (mean chroma gradient)
     glareShare: 0.3,          // a mark with this share of its pixels in a glare patch is glare, not a mark
     // reflections
     reflectSpan: 0.35, reflectSpanSleeve: 0.2, reflectChroma: 14, plateauRel: 0.4,
