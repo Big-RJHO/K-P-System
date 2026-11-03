@@ -179,28 +179,39 @@
 
   /* ------------------------------------------------------------- network */
 
-  // Request starts are reserved one slot at a time, MIN_GAP_MS apart, at the moment each call asks: callers
-  // arriving together get successive slots instead of computing the same delay and waking together. A slot
-  // is used whether its request succeeds or fails, so a failure never holds up the reservations after it.
-  let nextSlot = 0;
+  // Requests start one at a time, at least MIN_GAP_MS after the previous request ACTUALLY started: each caller
+  // waits for the one before it to start (not just for a reserved time, which a late-running earlier caller could
+  // overrun), then for the gap. The start time is taken right after the request is sent, so the measured gap
+  // between sends is never below MIN_GAP_MS. A failed request still counts as started, so it never holds up the
+  // callers after it.
+  let lastStart = -Infinity;
+  let prevStarted = Promise.resolve();
   const realClock = { now: () => Date.now(), sleep: (ms) => new Promise((r) => setTimeout(r, ms)) };
 
+  /** Wait for this caller's turn; returns started(), to call right after sending the request. */
   async function waitForSlot(clock) {
-    const start = Math.max(clock.now(), nextSlot);
-    nextSlot = start + MIN_GAP_MS;
-    // Timers may fire a millisecond early; never start before the reserved time.
-    for (let left = start - clock.now(); left > 0; left = start - clock.now()) await clock.sleep(left);
+    const myTurn = prevStarted;
+    let markStarted;
+    prevStarted = new Promise((r) => { markStarted = r; });
+    await myTurn;
+    // Timers may fire a millisecond early; loop until the gap has really passed.
+    for (let left = lastStart + MIN_GAP_MS - clock.now(); left > 0; left = lastStart + MIN_GAP_MS - clock.now()) await clock.sleep(left);
+    let done = false;
+    return () => { if (!done) { done = true; lastStart = clock.now(); markStarted(); } };
   }
 
   async function call(path, params, opts) {
     const F = opts.fetch || (typeof fetch === "function" ? fetch : null);
     if (!F) throw new Error("No network available.");
-    await waitForSlot(opts.clock || realClock);
     const qs = Object.entries({ t: opts.token, ...params }).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
     const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
+    const started = await waitForSlot(opts.clock || realClock);
     let r;
     try {
-      r = await fetchJSON(`${BASE}${path}?${qs}`, { fetch: F, timeoutMs, headers: { Accept: "application/json" } });
+      let pending;
+      try { pending = fetchJSON(`${BASE}${path}?${qs}`, { fetch: F, timeoutMs, headers: { Accept: "application/json" } }); }
+      finally { started(); }   // the request has been sent (or failed to send): the next caller's gap starts now
+      r = await pending;
     } catch (err) {
       if (isTimeout(err)) throw new Error(`PriceCharting didn't answer within ${Math.round(timeoutMs / 1000)} seconds. Try again.`);
       throw new Error("PriceCharting couldn't be reached (offline, or this page isn't allowed to contact it).");
@@ -318,5 +329,5 @@
 
   function validToken(t) { return /^[0-9a-f]{40}$/i.test(String(t || "").trim()); }
 
-  return { query, searchUrl, productUrl, pcNumber, rankProducts, gradeKey, search, product, forReport, ladder, fromTcgdex, money, validToken, clearCache, LADDER, _reset: () => { nextSlot = 0; }, TIMEOUT_MS, MIN_GAP_MS };
+  return { query, searchUrl, productUrl, pcNumber, rankProducts, gradeKey, search, product, forReport, ladder, fromTcgdex, money, validToken, clearCache, LADDER, _reset: () => { lastStart = -Infinity; prevStarted = Promise.resolve(); }, TIMEOUT_MS, MIN_GAP_MS };
 });
