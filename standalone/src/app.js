@@ -3667,7 +3667,8 @@ const sv = {
     ctx.clearRect(0, 0, size, size);
     if (!img) return;
     const m = src.margin, w = src.width - 2 * m, h = src.height - 2 * m;
-    const side = Math.max(40, Math.max(c.w * w, c.h * h) * 2.4);
+    // Tight enough that a thin line stays visible at crop size, with some surroundings for context.
+    const side = Math.max(48, Math.max(c.w * w, c.h * h) * 1.35);
     const cx = m + (c.x + c.w / 2) * w, cy = m + (c.y + c.h / 2) * h;
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(img, cx - side / 2, cy - side / 2, side, side, 0, 0, size, size);
@@ -3736,7 +3737,7 @@ const sv = {
       }
     } else {
       const open = m.candidates.filter((c) => this.statusOf(c) === "pending").length;
-      status.textContent = `${m.candidates.length} possible mark${m.candidates.length === 1 ? "" : "s"} · ${open} to review. Detection confidence is an uncalibrated heuristic, not a measurement.${m.status === "timeout" ? " The search stopped at its time limit: run it again to finish." : ""}${m.note ? ` ${m.note}` : ""}`;
+      status.textContent = `${m.candidates.length} possible mark${m.candidates.length === 1 ? "" : "s"} · ${open} to review. ${m.note || "Detection confidence is an uncalibrated heuristic, not a measurement."}${m.status === "timeout" ? " The search stopped at its time limit: run it again to finish." : ""}`;
       m.candidates.forEach((c, i) => {
         const li = document.createElement("li");
         const b = document.createElement("button");
@@ -3780,7 +3781,9 @@ const sv = {
     const [a, b] = $$("canvas", box);
     this.cropTo(a, src.img, c, src);
     this.cropTo(b, cropKind ? this.filtered(cropKind) : null, c, src);
-    $(".m-conf", box).textContent = `Detection confidence: ${cap(c.detection || "low")}${c.detectionNote ? ` · ${c.detectionNote}` : ""}. An uncalibrated heuristic: it says how clearly the photo shows something, not how bad it is.`;
+    const note = String(c.detectionNote || "").replace(/\.+$/, "");
+    const heuristic = /uncalibrated/i.test(note) ? "" : " An uncalibrated heuristic: it says how clearly the photo shows something, not how bad it is.";
+    $(".m-conf", box).textContent = `Detection confidence: ${cap(c.detection || "low")}${note ? ` · ${note}` : ""}.${heuristic}`;
     $(".m-reason", box).textContent = c.reason || "";
     const [add, dismiss, inHand] = $$(".mark-actions button", box);
     add.disabled = st === "added";

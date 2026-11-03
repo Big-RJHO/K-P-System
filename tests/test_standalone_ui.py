@@ -176,7 +176,7 @@ def test_marks_and_filters_never_change_grades(app):
     assert r["afterFind"] is True and r["afterFilters"] is True and r["afterDismissAndInHand"] is True
     assert r["filterPreviews"] >= 4
     assert r["diffDisabled"] is True and "reference" in r["diffWhy"].lower()   # no confirmed reference image
-    assert "uncalibrated heuristic" in r["detail"]
+    assert "uncalibrated heuristic" in r["detail"].lower()
     # Suggested types come first and are marked; the user still chooses (here: surface scratch, moderate).
     suggested = [t for t in scratch["suggestedTypes"] if t in SURFACE_TYPES]
     assert r["sheetSuggested"] == suggested and r["sheetTypes"][: len(suggested)] == suggested
@@ -208,7 +208,7 @@ def test_viewer_with_fixed_marks(app):
     r = run(app, "fakemarks")
     assert "Detection confidence: Medium" in r["listText"] and "Detection confidence: Low" in r["listText"]
     assert r["cannot"] == 1
-    assert "uncalibrated heuristic" in r["detail"] and "A faint line" in r["detail"]
+    assert "uncalibrated heuristic" in r["detail"].lower() and "A faint line" in r["detail"]
     assert "Dismissed" in r["afterDismiss"]
     assert r["unchanged"] is True
     assert r["errors"] == []
