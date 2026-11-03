@@ -6,6 +6,7 @@
 // permission for reports and images). Reads only rendered public pages, as a browser does; never decodes
 // TAG's API responses. Every page load, across all agents, waits for a shared pace (>= 5 s apart).
 // Stops on any block (429 without Retry-After, 403, CAPTCHA or login wall) instead of working around it.
+// Exit codes: 3 blocked, 4 size cap reached, 5 three "not found / temporarily unavailable" pages in a row.
 //
 //   node tagcollect.js year   <year> <agent>                 -> sets in that year with graded totals
 //   node tagcollect.js set    <set-url> <agent>              -> cards x grades with counts and their cert-list URLs
@@ -149,6 +150,7 @@ async function fetchCerts(agent, list) {
   fs.mkdirSync(OUT, { recursive: true });
   const { b, p } = await open(agent, true);
   const out = [];
+  let notFound = 0;
   try {
     for (const cert of list) {
       if (!/^[A-Z0-9]{6,12}$/.test(cert)) { out.push({ cert, error: 'bad cert' }); continue; }
@@ -165,6 +167,16 @@ async function fetchCerts(agent, list) {
       try {
         const text = await go(p, agent, 'https://tagd.co/' + cert, 'text=TAG SCORE');
         await p.waitForTimeout(4000);   // let the two scans finish
+        // TAG sometimes serves "Nothing was found ... temporarily unavailable" instead of the report. Never save a
+        // record without its report and both scans, and stop after 3 in a row in case the site is unavailable.
+        const notFoundPage = /nothing was found|temporarily unavailable/i.test(text);
+        if (notFoundPage || !scans.front || !scans.back) {
+          fs.rmSync(dir, { recursive: true, force: true });
+          out.push({ cert, error: notFoundPage ? 'not-found page' : 'scans missing' });
+          if (++notFound >= 3) { out.push({ stopped: '3 not-found pages in a row' }); console.log(JSON.stringify(out)); process.exitCode = 5; return; }
+          continue;
+        }
+        notFound = 0;
         const fetched_at = new Date().toISOString();
         const r = { ...parse(text, cert), cert, source_url: p.url(), fetched_at, agent };
         fs.writeFileSync(path.join(dir, 'report.txt'), text);
