@@ -68,13 +68,25 @@ def _site_only(text: str, keep: bool) -> str:
     return text
 
 
+WORKER_SOURCES = ("vision.js", "inspect.js", "surface.js")
+
+
+def _worker_sources(keep: bool) -> str:
+    """window.SCAN_WORKER_SOURCES: the modules ScanWorker evaluates inside its Blob-URL worker, as JS strings.
+
+    JSON with every "<" written as \\u003c, so no "</script" or "<!--" can end or confuse the inline script."""
+    texts = [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in WORKER_SOURCES]
+    return "window.SCAN_WORKER_SOURCES=" + json.dumps(texts, ensure_ascii=True).replace("<", "\\u003c") + ";"
+
+
 def _parts(env: str) -> tuple[str, str, str]:
     keep = env != "artifact"
     body = _site_only((SRC / "index.html").read_text(encoding="utf-8"), keep)
     css = (SRC / "style.css").read_text(encoding="utf-8")
     criteria = json.dumps(criteria_json(), separators=(",", ":"), ensure_ascii=False)
     scripts = [f"window.GRADING_LAB_ENV={json.dumps(env)};window.GRADING_CRITERIA={criteria};"]
-    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("grading.js", "vision.js", "inspect.js", "identify.js", "ocr.js", "prices.js", "webprices.js", "cardsight.js", "geminiid.js", "rbprices.js", "app.js")]
+    scripts += [_site_only((SRC / name).read_text(encoding="utf-8"), keep) for name in ("net.js", "grading.js", "vision.js", "inspect.js", "identify.js", "ocr.js", "prices.js", "webprices.js", "cardsight.js", "geminiid.js", "rbprices.js", "confidence.js", "surface.js", "scanworker.js", "app.js")]
+    scripts.insert(1, _worker_sources(keep))
     script_tags = "\n".join(f"<script>{_inline_script(code)}</script>" for code in scripts)
     return body, css, script_tags
 

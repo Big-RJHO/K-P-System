@@ -11,7 +11,9 @@
  * misread digit would otherwise silently pick a different card.
  *
  * The recogniser is injected: in the browser `browserRecognizer()` loads tesseract.js from cdnjs on first
- * use (about 7 MB once, then cached); tests pass a Node recogniser.
+ * use (about 7 MB once, then cached); tests pass a Node recogniser. The browser recogniser starts its worker
+ * once per read() (a failed start fails that read once, instead of once per crop) and has deadlines for
+ * the download, the worker start and each recognition.
  */
 (function (root, factory) {
   if (typeof module === "object" && module.exports) module.exports = factory();
@@ -298,10 +300,13 @@
   /**
    * Read the name and collector number of a card.
    * `src` is {img, H} (the original photo and the card-to-photo homography, best) or fromWarped(scan.warped).
-   * `recognize(image, {psm})` -> Promise<{text, confidence 0-100}>.
+   * `recognize(image, {psm})` -> Promise<{text, confidence 0-100}>. When it has a `session()` method (the
+   * browser recogniser), that is awaited first and its result recognises this read's crops: if the
+   * recogniser can't start, this read fails once here rather than once per crop.
    * -> {found, number, set_code, language, name, name_key, confidence 0..1, alternatives, readings}
    */
   async function read(src, game, recognize, opts = {}) {
+    if (recognize && typeof recognize.session === "function") recognize = await recognize.session();
     const R = REGIONS[game] || REGIONS.pokemon;
     const readings = [];
     const votes = new Map();
@@ -415,7 +420,28 @@
     core: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1",
     lang: "https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int",
   };
-  let workerPromise = null;
+  // Deadlines (ms): downloading tesseract.js, starting its worker (downloads the ~7 MB engine and language
+  // data the first time), and reading one crop.
+  const TIMEOUTS = { script: 30000, worker: 120000, recognize: 30000 };
+
+  function timeoutError(message) {
+    const err = new Error(message);
+    err.name = "TimeoutError";
+    err.timeout = true;
+    return err;
+  }
+
+  /** `promise`, or a TimeoutError after `ms`. A value that arrives after the deadline goes to `onLate`. */
+  function withDeadline(promise, ms, message, onLate) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => { settled = true; reject(timeoutError(message)); }, ms);
+      Promise.resolve(promise).then(
+        (v) => { if (settled) { if (onLate) onLate(v); return; } settled = true; clearTimeout(timer); resolve(v); },
+        (err) => { if (settled) return; settled = true; clearTimeout(timer); reject(err); },
+      );
+    });
+  }
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -425,41 +451,97 @@
       s.async = true;
       s.crossOrigin = "anonymous";
       s.onload = () => resolve();
-      s.onerror = () => reject(new Error("The text reader couldn't be downloaded (offline, or this page can't load it)."));
+      s.onerror = () => {
+        s.remove();   // the next read adds a fresh tag
+        reject(new Error("The text reader couldn't be downloaded (offline, or this page can't load it)."));
+      };
       document.head.append(s);
     });
   }
 
-  /** A recogniser for `read()` that runs tesseract.js in a Web Worker. Loaded on first use. */
-  function browserRecognizer(onStatus) {
-    async function worker() {
-      if (!workerPromise) {
-        workerPromise = (async () => {
+  function toCanvas(img) {
+    const canvas = document.createElement("canvas");
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext("2d").putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
+    return canvas;
+  }
+
+  const stop = (w) => {
+    try { const p = w && w.terminate && w.terminate(); if (p && p.catch) p.catch(() => {}); } catch (err) { /* already gone */ }
+  };
+
+  /**
+   * A recogniser for `read()` that runs tesseract.js in a Web Worker, loaded on first use.
+   * `read()` calls its `session()` once per reading: that starts the worker if there is none (one attempt;
+   * if it fails, that read fails and the next read tries again). A recognition past its deadline
+   * terminates the worker; the rest of that read's crops fail at once and the next read starts a new one.
+   * opts (for tests): {timeouts, loadScript(src), tesseract() -> Tesseract, toImage(img)}.
+   */
+  function browserRecognizer(onStatus, opts = {}) {
+    const T = { ...TIMEOUTS, ...(opts.timeouts || {}) };
+    const load = opts.loadScript || loadScript;
+    const tesseract = opts.tesseract || (() => (typeof window !== "undefined" ? window.Tesseract : null));
+    const toImage = opts.toImage || toCanvas;
+    let worker = null;     // the running worker
+    let starting = null;   // a start in progress
+
+    function start() {
+      if (worker) return Promise.resolve(worker);
+      if (!starting) {
+        starting = (async () => {
           onStatus && onStatus("Downloading the text reader (about 7 MB, first time only)…");
-          await loadScript(CDN.lib);
-          const w = await window.Tesseract.createWorker("eng", 1, { workerPath: CDN.worker, corePath: CDN.core, langPath: CDN.lang, workerBlobURL: true });
+          await withDeadline(load(CDN.lib), T.script, "The text reader took too long to download. Check the connection and try again.");
+          const Tess = tesseract();
+          if (!Tess || typeof Tess.createWorker !== "function") throw new Error("The text reader couldn't be started.");
+          const w = await withDeadline(
+            Tess.createWorker("eng", 1, { workerPath: CDN.worker, corePath: CDN.core, langPath: CDN.lang, workerBlobURL: true }),
+            T.worker, "The text reader took too long to start. Check the connection and try again.", stop);
+          worker = w;
           return w;
-        })().catch((err) => { workerPromise = null; throw err; });
+        })();
+        starting.then(() => { starting = null; }, () => { starting = null; });
       }
-      return workerPromise;
+      return starting;
     }
+
     let queue = Promise.resolve();
-    return (img, { psm = 6 } = {}) => {
+    function recognizeWith(getWorker, img, { psm = 6 } = {}) {
       const job = queue.then(async () => {
-        const w = await worker();
+        const w = await getWorker();
         onStatus && onStatus("Reading the card…");
-        await w.setParameters({ tessedit_pageseg_mode: String(psm) });
-        const canvas = document.createElement("canvas");
-        canvas.width = img.width;
-        canvas.height = img.height;
-        canvas.getContext("2d").putImageData(new ImageData(img.data, img.width, img.height), 0, 0);
-        const r = await w.recognize(canvas);
+        const work = (async () => {
+          await w.setParameters({ tessedit_pageseg_mode: String(psm) });
+          return w.recognize(toImage(img));
+        })();
+        let r;
+        try {
+          r = await withDeadline(work, T.recognize, "The text reader took too long on this photo.");
+        } catch (err) {
+          if (err && err.timeout) {   // a stuck worker: stop it; the next read starts a fresh one
+            if (worker === w) worker = null;
+            stop(w);
+          }
+          throw err;
+        }
         return { text: r.data.text, confidence: r.data.confidence };
       });
       queue = job.catch(() => {});
       return job;
+    }
+
+    // Called on its own (not through read()), each call starts the worker if needed.
+    const recognize = (img, o) => recognizeWith(start, img, o);
+    recognize.session = async () => {
+      const w = await start();
+      const current = () => {
+        if (worker !== w) throw new Error("The text reader stopped. Try reading the card again.");
+        return w;
+      };
+      return (img, o) => recognizeWith(current, img, o);
     };
+    return recognize;
   }
 
-  return { read, queries, crop, fromWarped, textLines, parseNumber, parseName, browserRecognizer, REGIONS, CDN, CARD_W, CARD_H };
+  return { read, queries, crop, fromWarped, textLines, parseNumber, parseName, browserRecognizer, REGIONS, CDN, TIMEOUTS, CARD_W, CARD_H };
 });
