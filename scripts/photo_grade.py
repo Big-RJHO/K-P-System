@@ -1,11 +1,13 @@
 """Run the grading system on card photos, the way the app does, from the command line.
 
-    python scripts/photo_grade.py scan FRONT.jpg BACK.jpg --out DIR [--angled-light]
+    python scripts/photo_grade.py scan FRONT.jpg BACK.jpg --out DIR [--angled-light] [--scale S] [--max-side N]
         Finds and flattens the card, measures centering, checks photo quality, and looks for edge/corner
         wear candidates (the same vision.js / inspect.js the app uses). Writes zoomable images to DIR and
         prints what the system found and could not assess. A flat photo can't show the surface (scratches,
         print lines, dents, creases, gloss loss), so the surface of both sides is photo-limited unless
         --angled-light says the surface was also examined or photographed under raking (angled) light.
+        --scale flattens the card at S times the app's 750 x 1048 px (default 1, ~11.9 px/mm); --max-side
+        downsizes photos to at most N px on their long side first (default 2400, as the app; 0 = full size).
 
     python scripts/photo_grade.py grade DIR/scan.json OBS.json [--json RESULT.json]
         Grades the card from the measured centering plus the inspector's observations (defects found and
@@ -42,14 +44,14 @@ from cardgrader import criteria_loader  # noqa: E402
 from cardgrader.engine import grade_all  # noqa: E402
 from cardgrader.models import CardAssessment, Defect, allowed_locations, photo_limit_components  # noqa: E402
 
-MAX_SIDE = 2400  # the app downsizes photos to this before scanning
+MAX_SIDE = 2400  # the app downsizes photos to this before scanning (--max-side)
 ANGLED_LIGHT_REASON = "surface needs angled light"
 NODE_SCRIPT = """
 const V = require(%s), I = require(%s), fs = require("fs");
 const jobs = JSON.parse(fs.readFileSync(0, "utf8"));
 const out = jobs.map((j) => {
   const img = { width: j.width, height: j.height, data: new Uint8ClampedArray(fs.readFileSync(j.path)) };
-  const scan = V.scan(img, "auto");
+  const scan = j.scale === 1 ? V.scan(img, "auto") : V.scan(img, "auto", null, { scale: j.scale });
   const quality = I.quality(img, scan);
   const check = I.edgesAndCorners(scan, { quality, face: j.side });
   fs.writeFileSync(j.path + ".warped", Buffer.from(scan.warped.data.buffer));
@@ -60,22 +62,22 @@ process.stdout.write(JSON.stringify(out));
 """
 
 
-def load(path: str) -> np.ndarray:
+def load(path: str, max_side: int = MAX_SIDE) -> np.ndarray:
     img = cv2.imread(path)
     if img is None:
         sys.exit(f"can't read {path}")
-    scale = min(1.0, MAX_SIDE / max(img.shape[:2]))
+    scale = min(1.0, max_side / max(img.shape[:2])) if max_side > 0 else 1.0
     if scale < 1:
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     return img
 
 
-def run_vision(images: dict[str, np.ndarray], tmp: Path) -> list[dict]:
+def run_vision(images: dict[str, np.ndarray], tmp: Path, scale: float = 1) -> list[dict]:
     jobs = []
     for side, img in images.items():
         p = tmp / f"{side}.rgba"
         p.write_bytes(cv2.cvtColor(img, cv2.COLOR_BGR2RGBA).tobytes())
-        jobs.append({"side": side, "path": str(p), "width": img.shape[1], "height": img.shape[0]})
+        jobs.append({"side": side, "path": str(p), "width": img.shape[1], "height": img.shape[0], "scale": scale})
     script = NODE_SCRIPT % (json.dumps(str(ROOT / "standalone/src/vision.js")), json.dumps(str(ROOT / "standalone/src/inspect.js")))
     res = subprocess.run(["node", "-e", script], input=json.dumps(jobs), capture_output=True, text=True, check=True)
     return json.loads(res.stdout)
@@ -158,8 +160,13 @@ def auto_unassessed(check: dict) -> dict[str, str]:
 def cmd_scan(args) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    images = {"front": load(args.front), "back": load(args.back)}
-    results = run_vision(images, out)
+    if args.scale <= 0:
+        sys.exit("--scale must be positive")
+    images = {"front": load(args.front, args.max_side), "back": load(args.back, args.max_side)}
+    results = run_vision(images, out, args.scale)
+    # the zoomed corner / edge crops cover the same part of the card at any --scale
+    crop, depth = round(160 * args.scale), round(44 * args.scale)
+    zc, ze = max(1, round(3 / args.scale)), max(1, round(2 / args.scale))
     summary = {"sides": {}}
     for r in results:
         side, sc = r["side"], r["scan"]
@@ -169,8 +176,8 @@ def cmd_scan(args) -> None:
         m = sc["margin"]
         card = warped[m : sc["height"] - m, m : sc["width"] - m]
         cv2.imwrite(str(out / f"{side}_card.jpg"), card, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        cv2.imwrite(str(out / f"{side}_corners.jpg"), corners_image(card), [cv2.IMWRITE_JPEG_QUALITY, 92])
-        cv2.imwrite(str(out / f"{side}_edges.jpg"), edges_image(card), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        cv2.imwrite(str(out / f"{side}_corners.jpg"), corners_image(card, crop, zc), [cv2.IMWRITE_JPEG_QUALITY, 92])
+        cv2.imwrite(str(out / f"{side}_edges.jpg"), edges_image(card, depth, ze), [cv2.IMWRITE_JPEG_QUALITY, 92])
         cv2.imwrite(str(out / f"{side}_overlay.jpg"), overlay_image(warped, r), [cv2.IMWRITE_JPEG_QUALITY, 92])
         axes = measured_axes(sc)
         blocked = r["quality"]["blocked"]
@@ -207,7 +214,7 @@ def cmd_scan(args) -> None:
         for d in r["check"]["defects"]:
             print(f"  candidate: {d['type']} {d['severity']} at {d['location']}: {d['note']}")
         print("limits: " + " | ".join(r["check"]["limitations"]))
-        print(f"images: {side}_card.jpg  {side}_corners.jpg (3x)  {side}_edges.jpg (2x)  {side}_overlay.jpg\n")
+        print(f"images: {side}_card.jpg  {side}_corners.jpg ({zc}x)  {side}_edges.jpg ({ze}x)  {side}_overlay.jpg\n")
     (out / "scan.json").write_text(json.dumps(summary, indent=1))
 
 
@@ -365,6 +372,11 @@ def main() -> None:
     s.add_argument("--angled-light", action="store_true",
                    help="the surface was also examined or photographed under raking (angled) light, so a flat "
                         "photo's surface limit doesn't apply")
+    s.add_argument("--scale", type=float, default=1,
+                   help="flatten the card at this times the app's 750 x 1048 px (~11.9 px/mm); default 1")
+    s.add_argument("--max-side", type=int, default=MAX_SIDE,
+                   help=f"downsize photos to at most this many px on the long side first (default {MAX_SIDE}, as the "
+                        "app; 0 = keep full resolution)")
     s.set_defaults(fn=cmd_scan)
     g = sub.add_parser("grade")
     g.add_argument("scan"); g.add_argument("obs"); g.add_argument("--json")

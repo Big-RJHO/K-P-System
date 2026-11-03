@@ -1,9 +1,14 @@
 /*
  * Photo-quality gate and edge / corner wear candidates, on top of vision.js.
  *
- * Works on a Vision.scan result: the card flattened to CARD_W x CARD_H (63 x 88 mm at ~300 dpi) with
- * `margin` px of photo around it, so the card's physical edge sits at x = margin and x = width-1-margin
- * (likewise for y). Plain RGBA buffers, no DOM, so it runs in the browser and in Node for tests.
+ * Works on a Vision.scan result: the card flattened to CARD_W x CARD_H (63 x 88 mm at ~300 dpi, or that times
+ * the scan's `scale`) with `margin` px of photo around it, so the card's physical edge sits at x = margin and
+ * x = width-1-margin (likewise for y). Plain RGBA buffers, no DOM, so it runs in the browser and in Node for tests.
+ *
+ * Distances are physical: every window, offset and depth below is a constant in mm (T.*Mm), turned into px of
+ * the scan with geom()'s px(mm) = round(mm * px/mm). Each was chosen as (its former px value) x 63/750 = x 0.084,
+ * so at the default 750 px card width (11.9 px/mm) it rounds back to exactly the px value it replaced and the
+ * results there are unchanged; at a higher scale the same physical sizes are looked at with more pixels.
  *
  *   quality(img, scan)        can this photo support centering / edge / corner checks, and what to fix
  *   edgesAndCorners(scan, o)  candidate edge whitening and corner wear, with overlay geometry
@@ -21,6 +26,7 @@
   const CORNERS = ["top_left", "top_right", "bottom_right", "bottom_left"];  // same order as scan.corners (after un-rotating)
   const CARD_MM = [63, 88];
   const CORNER_R = 0.048;  // corner radius as a fraction of the card's width (vision.js uses the same)
+  const REF_PX_PER_MM = 750 / 63;  // the flattened card's resolution at scale 1 (vision.js CARD_W over 63 mm)
 
   /*
    * Thresholds. All of these are PROPOSALS: tuned by hand on synthetic cards (tests/synthetic.py) and on
@@ -32,14 +38,20 @@
     // Sharpness: estimated blur (Gaussian sigma, px of the flattened 300 dpi card) of the sharpest edges.
     // Measured: synthetic cards 0.3, the two real photos 0.5-0.55; synthetic photos blurred by sigma 1.5 /
     // 2 / 3 px read 1.25 / 1.5 / 2.25 (the sharpest edges soften less than the blur applied).
-    blurOk: 1.3, blurFail: 2.0,
+    blurOkMm: 0.1092, blurFailMm: 0.168,  // 1.3 / 2.0 px at 11.9 px/mm (compared at 0.01 px)
     minEdgePixels: 150,      // fewer strong edges than this: can't judge focus
-    edgeContrast: 25,        // an edge must span at least this much L within +-5 px to be used
+    edgeContrast: 25,        // an edge must span at least this much L within +-sharpWindowMm to be used
+    edgeSlope: 3,            // L per px at 11.9 px/mm (divided by the scale): flatter pixels aren't edges
+    sharpInsetMm: 0.504,     // 6 px: the card's own outline is left out of the sharpness check
+    sharpWindowMm: 0.42,     // 5 px: +- window an edge's contrast is measured over
+    sigmaMaxMm: 0.672,       // 8 px: the blurriest edge the sigma table reads
     // Glare: clipped highlight = near-white and colourless (RGB ~252+). Printed white is rarely this bright.
     glareL: 98.5, glareC: 6,
     glareZone: 0.02,         // clipped fraction of an edge band / corner patch that blocks assessing it
     glareCardWarn: 0.01, glareCardFail: 0.15,
-    glareBand: 24,           // edge band depth (px in from the edge) the glare check looks at
+    glareBandMm: 2.016,      // 24 px: edge band depth (in from the edge) the glare check looks at
+    glareCornerMm: 1.344,    // 16 px: a corner's glare patch reaches this far past the corner radius
+    glareBinMm: 1.344,       // 16 px: length of the edge band's glare overlay pieces
     // Resolution: the card's short side in photo pixels. 600 px ~ 9.5 px/mm, whitening ~0.2 mm is ~2 px.
     resWarn: 600, resFail: 350,
     // Boundary: corners closer than this to the photo's edge (fraction of the photo's short side) are too tight.
@@ -52,19 +64,44 @@
     roundedMin: 0.1,
     // Sleeve: a line parallel to the card edge in the margin, on at least this many sides.
     sleeveStep: 8, sleeveSides: 2,
+    sleeveOuterMm: 0.168,    // 2 px: the sleeve profile starts this far in from the scan's own edge ...
+    sleeveGapMm: 0.42,       // 5 px: ... and ends this far outside the card
+    sleeveAlongMm: 0.504,    // 6 px: spacing of the samples along the edge
+    sleeveWinMm: 0.336,      // 4 px: either side of a profile position compared for a step or a line
 
-    // Edges (px of the flattened card; 1 mm ~ 11.9 px).
-    band0: 1, band1: 14,     // whitening band: depth in from the physical edge
-    startBy: 3,              // whitening must start within this many px of the edge (printing further in doesn't count)
-    ref0: 16, ref1: 28,      // local border colour: depth range ...
-    refHalf: 20,             // ... and +- px along the edge
+    // Edges (mm; the former px values of the flattened card at 1 mm ~ 11.9 px in the comments).
+    band0Mm: 0.084, band1Mm: 1.176,  // 1 / 14 px: whitening band: depth in from the physical edge
+    startByMm: 0.252,        // 3 px: whitening must start within this of the edge (printing further in doesn't count)
+    ref0Mm: 1.344, ref1Mm: 2.352,  // 16 / 28 px: local border colour: depth range ...
+    refHalfMm: 1.68,         // 20 px: ... and +- this along the edge
+    refStepMm: 0.336,        // 4 px: spacing of the local border colours along the edge (and of the side's samples)
+    refPadMm: 0.336,         // 4 px: the reference stays this far inside a measured border ...
+    ref1MinMm: 0.672, ref0MinMm: 0.42, refDepthMm: 0.84,  // 8 / 5 / 10 px: ... but at least this deep, over this range
+    arcPadMm: 0.672,         // 8 px: the side's positions skip the corner arcs and this much more
+    edgeBlockMm: 2.688,      // 32 px: edge-line blocks along the side
+    edgeClampMm: 0.336,      // 4 px: the fitted edge line moves at most this far from the flattened edge
+    outsideMm: [0.336, 0.504, 0.672],  // 4 / 6 / 8 px: samples of the photo just outside the edge
+    crossMm: 0.672,          // 8 px: how far past ref0 a light patch is followed into the card
+    floatLocalMm: 2.016,     // 24 px: either side of a run the border's own texture is counted
+    deeperMm: 0.168,         // 2 px: a run's stretch this much deeper than its median depth is wear under a line
+    unassessableMm: 1.008,   // 12 px: depth of the overlay marking an edge that isn't assessable
     whiteScore: 18,          // stock-like: (L - L_ref) + 0.5 * (C_ref - C) at least this
     stockL: 45, stockC: 18,  // and the pixel itself light and near-colourless
     headroom: 35,            // bare stock (L 95, C 3) would score less than this against the border: too light to judge
     lightSide: 0.5,          // fraction of an edge too light -> the whole side is not assessable
-    minPixels: 2,            // whitening pixels at one position along the edge
-    gap: 2, minRun: 3,       // merge runs across gaps; ignore shorter runs
-    edgeSearch: 5,           // px either way to look for the true edge line
+    minPixelsMm: 0.168,      // 2 px: depth of whitening at one position along the edge
+    gapMm: 0.168, minRunMm: 0.252,  // 2 / 3 px: merge runs across gaps; ignore shorter runs
+    edgeSearchMm: 0.42,      // 5 px: either way to look for the true edge line
+    edgePadMm: 0.252,        // 3 px: the edge-line profile reaches this much further either way
+    sampleMm: 0.168,         // 2 px: spacing of samples along an edge and across a border
+    refDepthStepMm: 0.252,   // 3 px: spacing in depth of a local border colour's samples
+    bandGapMm: 0.168,        // 2 px: a narrowed whitening band stops this short of the reference
+    fleckDepthMm: 0.168,     // 2 px: flecks along an edge's middle are looked for this deep
+    floatSkipMm: 0.252,      // 3 px: the border's own texture is looked for this far past the whitening
+    pixMm: 0.084,            // 1 px: a gap the whitening may skip in depth, the line fit's floor, a neighbour pixel
+    evenMm: 0.168,           // 2 px: within this of a run's median depth counts as even
+    shortRunMm: 0.504,       // 6 px: a run shorter than this is less certain
+    chipDepthMm: 0.588,      // 7 px: a short run at least this deep is a chip
     candidateConf: 0.4,      // below this a run is shown greyed out and not offered as a DING
     // Light printing meeting the edge (a cream ray, a white logo): typically reaches this deep into the card
     // while only moderately lighter than the border. On 16 TAG-graded slab photos of one card back (TAG 2-10),
@@ -82,12 +119,12 @@
     speckleRate: 0.05,
     // Slab rail, sleeve lip or reflection: a thin bright line hugging the edge, even along much of its length.
     // Seen on nearly every slab photo of the PSA/TAG blind test; worn stock is patchy and varies in depth.
-    railDepth: 6,            // px: reaches at most this deep (90th percentile) ...
+    railDepthMm: 0.504,      // 6 px: reaches at most this deep (90th percentile) ...
     railEven: 0.9,           // ... and within 1 px of its median depth at this fraction of its positions
     railRun: 0.2,            // such a run this long (fraction of the edge) is a line by itself
     railCover: 0.3,          // or such runs of at least railPieceMm together cover this fraction of the edge
     railPieceMm: 1.5,
-    edgeWide: 0.25,          // shallow whitening (railDepth) at this share of an edge's positions or more: a highlight
+    edgeWide: 0.25,          // shallow whitening (railDepthMm) at this share of an edge's positions or more: a highlight
     // Severity from length along the edge and depth into the card (mm), same scale for corner whitening.
     sev: { major: [15, 1.0], moderate: [5, 0.6], minor: [1.5, 0.35] },
     // Corners
@@ -102,7 +139,23 @@
     // are all clearly worn, but not four that read alike.
     roundNoise: 0.3,         // mm the relative excess must clear before the roundExcess scale starts
     roundPhotoTol: 1.2,
-    roughPx: 3,              // MAD of the corner outline (px) above which it is called rough / frayed
+    roughMm: 0.252,          // 3 px: MAD of the corner outline above which it is called rough / frayed
+    // Corner geometry (mm; former px in the comments). Ray steps of 0.5 px are kept to the half pixel.
+    nearMm: [0, 1.344, 2.688],  // 0 / 16 / 32 px: card colour from the sides' references this far from the corner
+    bgFromMm: 0.504, bgToMm: 3.36, bgStepMm: 0.168,  // 6 / 40 / 2 px: background beyond the arc, along the edge ...
+    bgOutMm: [0.504, 1.176],  // 6..14 px: ... and this far outside it
+    checkStepMm: 0.672,      // 8 px: self-check lines from R + this to R + bgToMm, every this
+    checkWinMm: 0.504,       // 6 px: +- window the self-check looks for the edge in ...
+    checkTolMm: 0.168,       // 2 px: ... and how close to the edge line it must be
+    rayOutMm: 0.42,          // 5 px: rays start this far outside both edge lines
+    rayStepMm: 0.042,        // 0.5 px: step along a ray
+    stayMm: [0.252, 0.504],  // 3 / 6 px: the outline point's pixels further in that must be card too
+    whiteMaxMm: 1.008,       // 12 px: how far in along a ray whitening is followed
+    whiteStartMm: 0.126,     // 1.5 px: whitening must start this close to the outline (and be this deep)
+    floatFromMm: 0.336, floatGapMm: 0.168,  // 4 / 2 px: the corner's own texture is looked for from here in
+    texMm: [0.504, 1.176],   // 6..14 px: the corner's texture next to the outline (fleck test's light tail)
+    cutTolMm: 0.168,         // 2 px: an outline this much inside a new corner's counts as cut away
+    roundedMm: [0.168, 0.126, 0.504, 1.68, 0.252],  // 2 px patch start, 1.5 px step along, 6..20 px step 3 across (vision's cornerRoundness)
     // Specks of stock at a corner's outline (fleckLike): lighter than the card's own light tail (95th percentile of
     // its texture next to the corner) and than the background by fleckDL, on at least fleckMinRays rays, and on a
     // larger share of the corner than fleckBaseK x the share of the edges' middles that show it.
@@ -173,12 +226,12 @@
   }
 
   // Keep points close to the line (drops a whitened stretch that moved one block's edge), then refit.
-  function robustFit(points) {
+  function robustFit(points, minTol = 1) {
     let line = fitLine(points);
     if (!line) return null;
     for (let iter = 0; iter < 2; iter++) {
       const res = points.map(([v, u]) => Math.abs(u - (line.a * v + line.b)));
-      const tol = Math.max(1, 2.5 * median(res));
+      const tol = Math.max(minTol, 2.5 * median(res));
       const next = fitLine(points.filter((_, i) => res[i] <= tol));
       if (!next) break;
       line = next;
@@ -223,10 +276,18 @@
 
   /* ---------------------------------------------------------------- card geometry */
 
+  // px(mm): a physical size in whole px of this scan; pxh(mm) to the half pixel (sub-pixel steps along rays);
+  // step/hstep the same, at least 1 / 0.5 px (loop increments). k: px per px of the default 750 px card (1 there).
   function geom(scan) {
     const W = scan.width, H = scan.height, M = scan.margin;
     const cw = W - 2 * M, ch = H - 2 * M;
-    return { W, H, M, cw, ch, R: CORNER_R * cw, pxPerMm: cw / CARD_MM[0] };
+    const pxPerMm = cw / CARD_MM[0];
+    const px = (mm) => Math.round(mm * pxPerMm);
+    const pxh = (mm) => Math.round(mm * pxPerMm * 2) / 2;
+    return {
+      W, H, M, cw, ch, R: CORNER_R * cw, pxPerMm, k: pxPerMm / REF_PX_PER_MM,
+      px, pxh, step: (mm) => Math.max(1, px(mm)), hstep: (mm) => Math.max(0.5, pxh(mm)),
+    };
   }
 
   const sideLen = (g, side) => (side === "top" || side === "bottom" ? g.cw : g.ch);
@@ -301,12 +362,13 @@
   function detectSleeve(lab, g) {
     const sides = {};
     let count = 0;
+    const w = g.px(T.sleeveWinMm), along = g.step(T.sleeveAlongMm);
     for (const side of SIDES) {
-      const len = sideLen(g, side), dMin = -g.M + 2, dMax = -5;
+      const len = sideLen(g, side), dMin = -g.M + g.px(T.sleeveOuterMm), dMax = -g.px(T.sleeveGapMm);
       const prof = [];
       for (let d = dMin; d <= dMax; d++) {
         const idx = [];
-        for (let t = Math.round(len * 0.15); t < len * 0.85; t += 6) idx.push(sidePix(g, side, t, d));
+        for (let t = Math.round(len * 0.15); t < len * 0.85; t += along) idx.push(sidePix(g, side, t, d));
         prof.push(medLab(lab, idx));
       }
       const mean = (i0, i1) => {
@@ -316,9 +378,9 @@
         return { L: m.L / n, a: m.a / n, b: m.b / n };
       };
       let best = 0, at = null;
-      for (let i = 4; i < prof.length - 4; i++) {
-        const step = dE(mean(i - 4, i - 1), mean(i + 1, i + 4));
-        const line = dE(prof[i], mean(i - 4, i - 4)) + dE(prof[i], mean(i + 4, i + 4));
+      for (let i = w; i < prof.length - w; i++) {
+        const step = dE(mean(i - w, i - 1), mean(i + 1, i + w));
+        const line = dE(prof[i], mean(i - w, i - w)) + dE(prof[i], mean(i + w, i + w));
         const v = Math.max(step, line / 2);
         if (v > best) { best = v; at = i + dMin; }
       }
@@ -336,10 +398,19 @@
     return s * (1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-a * a));
   };
   // For a step edge blurred by a Gaussian of `sigma` px: central-difference slope / contrast within +-5 px.
-  const stepRatio = (sigma) => erf(1 / (sigma * Math.SQRT2)) / 2 / erf(5 / (sigma * Math.SQRT2));
-  const SIGMAS = [];
-  for (let s = 0.3; s <= 8; s += 0.05) SIGMAS.push([s, stepRatio(s)]);
-  const sigmaOf = (ratio) => { for (const [s, r] of SIGMAS) if (r <= ratio) return s; return 8; };
+  // (The window K and the table's top end in px follow the scan's resolution: 5 and 8 px at 11.9 px/mm.)
+  const stepRatio = (sigma, K) => erf(1 / (sigma * Math.SQRT2)) / 2 / erf(K / (sigma * Math.SQRT2));
+  const SIGMAS = new Map();
+  const sigmaOf = (ratio, K, top) => {
+    const key = `${K}:${top}`;
+    if (!SIGMAS.has(key)) {
+      const tab = [];
+      for (let s = 0.3; s <= top; s += 0.05) tab.push([s, stepRatio(s, K)]);
+      SIGMAS.set(key, tab);
+    }
+    for (const [s, r] of SIGMAS.get(key)) if (r <= ratio) return s;
+    return top;
+  };
 
   /**
    * Focus as the blur width of the photo's sharpest edges, not as the raw variance of a Laplacian.
@@ -347,26 +418,27 @@
    * looks "blurry" and a busy one looks sharp. Instead, at every strong edge (local slope maximum with
    * at least T.edgeContrast of L within +-5 px) divide the slope by that edge's own contrast. For a step
    * blurred by a Gaussian this ratio depends only on the blur, so it is converted to an equivalent
-   * sigma in px of the 300 dpi flattened card (0.3 = as sharp as it can read). The 90th percentile (the
+   * sigma in px of the flattened card (0.3 = as sharp as it can read). The 90th percentile (the
    * sharpest 10% of edges: text, frame lines) is used, since artwork is often soft on purpose. The card's
-   * own outline is left out (6 px inset): a sleeve's lip or the background can soften it.
+   * own outline is left out (sharpInsetMm): a sleeve's lip or the background can soften it.
    */
   function sharpness(lab, g) {
     const W = g.W, L = (x, y) => lab[(y * W + x) * 3];
     const ratios = [];
-    for (let y = g.M + 6; y < g.H - g.M - 6; y++) {
-      for (let x = g.M + 6; x < W - g.M - 6; x++) {
+    const inset = g.px(T.sharpInsetMm), K = g.px(T.sharpWindowMm), minSlope = T.edgeSlope / g.k;
+    for (let y = g.M + inset; y < g.H - g.M - inset; y++) {
+      for (let x = g.M + inset; x < W - g.M - inset; x++) {
         const gx = (L(x + 1, y) - L(x - 1, y)) / 2, gy = (L(x, y + 1) - L(x, y - 1)) / 2;
         const ax = Math.abs(gx), ay = Math.abs(gy);
-        if (Math.max(ax, ay) < 3) continue;
+        if (Math.max(ax, ay) < minSlope) continue;
         let lo = Infinity, hi = -Infinity, slope;
         if (ax >= ay) {
           if (Math.abs(L(x + 2, y) - L(x, y)) / 2 > ax || Math.abs(L(x, y) - L(x - 2, y)) / 2 > ax) continue;
-          for (let k = -5; k <= 5; k++) { const v = L(x + k, y); if (v < lo) lo = v; if (v > hi) hi = v; }
+          for (let k = -K; k <= K; k++) { const v = L(x + k, y); if (v < lo) lo = v; if (v > hi) hi = v; }
           slope = ax;
         } else {
           if (Math.abs(L(x, y + 2) - L(x, y)) / 2 > ay || Math.abs(L(x, y) - L(x, y - 2)) / 2 > ay) continue;
-          for (let k = -5; k <= 5; k++) { const v = L(x, y + k); if (v < lo) lo = v; if (v > hi) hi = v; }
+          for (let k = -K; k <= K; k++) { const v = L(x, y + k); if (v < lo) lo = v; if (v > hi) hi = v; }
           slope = ay;
         }
         if (hi - lo < T.edgeContrast) continue;
@@ -374,7 +446,7 @@
       }
     }
     if (ratios.length < T.minEdgePixels) return { blur: null, edges: ratios.length };
-    return { blur: sigmaOf(percentile(ratios, 90)), edges: ratios.length };
+    return { blur: sigmaOf(percentile(ratios, 90), K, g.px(T.sigmaMaxMm)), edges: ratios.length };
   }
 
   /**
@@ -384,14 +456,16 @@
    * Returns one score per corner in [-1, 1]; +1 = clearly a rounded card corner.
    */
   function roundedCorners(lab, g) {
-    const R = g.R, q = Math.max(2, Math.round(R * 0.3));
+    const [p0, aStep, d0, d1, dStep] = T.roundedMm;
+    const u0 = g.px(p0), as = g.hstep(aStep), da = g.px(d0), db = g.px(d1), ds = g.step(dStep);
+    const R = g.R, q = Math.max(u0, Math.round(R * 0.3));
     const out = [];
     for (let ci = 0; ci < 4; ci++) {
       const at = (u, v) => { const [x, y] = cornerXY(g, ci, u, v); return pixAt(g, x, y); };
       const cut = [], inV = [], outV = [], inH = [], outH = [];
-      for (let u = 2; u <= q; u++) for (let v = 2; v <= q; v++) if ((R - u) ** 2 + (R - v) ** 2 > 1.2 * R * R) cut.push(at(u, v));
-      for (let a = 0.6 * R; a <= 1.8 * R; a += 1.5) {
-        for (let d = 6; d <= 20; d += 3) { inV.push(at(d, a)); outV.push(at(-d, a)); inH.push(at(a, d)); outH.push(at(a, -d)); }
+      for (let u = u0; u <= q; u++) for (let v = u0; v <= q; v++) if ((R - u) ** 2 + (R - v) ** 2 > 1.2 * R * R) cut.push(at(u, v));
+      for (let a = 0.6 * R; a <= 1.8 * R; a += as) {
+        for (let d = da; d <= db; d += ds) { inV.push(at(d, a)); outV.push(at(-d, a)); inH.push(at(a, d)); outH.push(at(a, -d)); }
       }
       if (cut.length < 3) { out.push(0); continue; }
       const C = medLab(lab, cut);
@@ -426,8 +500,8 @@
     if (sh.blur === null) {
       checks.sharpness = { value: null, status: "warn", note: "Too little fine detail on the card to judge focus. Make sure the card is in focus (tap on it) before relying on edge checks." };
     } else {
-      const b = r2(sh.blur);
-      const status = b <= T.blurOk ? "ok" : b <= T.blurFail ? "warn" : "fail";
+      const b = r2(sh.blur), blurOk = r2(T.blurOkMm * g.pxPerMm), blurFail = r2(T.blurFailMm * g.pxPerMm);
+      const status = b <= blurOk ? "ok" : b <= blurFail ? "warn" : "fail";
       const note = status === "ok" ? `Sharp enough (edges blurred by ~${b} px).`
         : status === "warn" ? `Slightly soft (edges blurred by ~${b} px): fine whitening under ~0.3 mm can be missed. Hold the phone steady, tap the card to focus and add light.`
         : `Blurry (edges blurred by ~${b} px): edge and corner wear can't be judged. Hold the phone steady, tap the card to focus and add light, then retake.`;
@@ -438,10 +512,10 @@
     // Glare: clipped, colourless highlights, overall and per edge band / corner patch.
     const zone = {}, zoneN = {};
     for (const z of [...SIDES, ...CORNERS]) { zone[z] = 0; zoneN[z] = 0; }
-    const BIN = 16, bins = {};
+    const BIN = g.step(T.glareBinMm), band = g.px(T.glareBandMm), bins = {};
     for (const s of SIDES) bins[s] = new Uint16Array(Math.ceil(sideLen(g, s) / BIN) + 1);
     let total = 0, clippedN = 0;
-    const R = g.R, cz = R + 16, rr = R * R;
+    const R = g.R, cz = R + g.px(T.glareCornerMm), rr = R * R;
     for (let y = g.M; y < g.H - g.M; y++) {
       const dy = y - g.M, dyr = g.H - 1 - g.M - y, ey = Math.min(dy, dyr);
       for (let x = g.M; x < g.W - g.M; x++) {
@@ -453,8 +527,8 @@
         if (isClip) clippedN++;
         let z = null;
         if (ex < cz && ey < cz) z = CORNERS[dy < dyr ? (dx < dxr ? 0 : 1) : (dx < dxr ? 3 : 2)];
-        else if (ey < T.glareBand) z = dy < dyr ? "top" : "bottom";
-        else if (ex < T.glareBand) z = dx < dxr ? "left" : "right";
+        else if (ey < band) z = dy < dyr ? "top" : "bottom";
+        else if (ex < band) z = dx < dxr ? "left" : "right";
         if (!z) continue;
         zoneN[z]++;
         if (isClip) {
@@ -475,9 +549,9 @@
     for (const s of SIDES) {  // overlay: stretches of edge band with glare
       const len = sideLen(g, s);
       for (let k = 0; k < bins[s].length; k++) {
-        if (bins[s][k] < 0.05 * BIN * T.glareBand) continue;
+        if (bins[s][k] < 0.05 * BIN * band) continue;
         const t0 = k * BIN, t1 = Math.min(len, t0 + BIN);
-        const [xa, ya] = sideXY(g, s, t0, 0), [xb, yb] = sideXY(g, s, t1, T.glareBand);
+        const [xa, ya] = sideXY(g, s, t0, 0), [xb, yb] = sideXY(g, s, t1, band);
         overlays.push({ type: "rect", kind: "glare", x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.abs(xb - xa), h: Math.abs(yb - ya), label: "glare" });
       }
     }
@@ -612,66 +686,72 @@
    */
   function analyseSide(lab, g, scan, side, printedMask) {
     const len = sideLen(g, side), R = g.R;
-    const tA = Math.ceil(R + 8), tB = Math.floor(len - R - 8);  // skip the rounded-corner arcs
+    const P = (mm) => g.px(mm), S = (mm) => g.step(mm);
+    const pix = P(T.pixMm), band0 = P(T.band0Mm), startBy = P(T.startByMm), minPixels = P(T.minPixelsMm);
+    const refStep = S(T.refStepMm), two = S(T.sampleMm);  // 4 / 2 px sample spacings
+    const tA = Math.ceil(R + P(T.arcPadMm)), tB = Math.floor(len - R - P(T.arcPadMm));  // skip the rounded-corner arcs
 
-    // The true edge line, to within a pixel: per 32 px block, the depth of the strongest colour step
+    // The true edge line, to within a pixel: per edgeBlockMm block, the depth of the strongest colour step
     // across the edge (median profile over the block), then a robust straight line through the blocks.
+    // The step compares the two pixels either side of it, `pix` apart (1 px at 11.9 px/mm).
     const pts = [];
-    for (let t0 = tA; t0 + 32 <= tB; t0 += 32) {
+    const blk = S(T.edgeBlockMm), es = P(T.edgeSearchMm), pad = Math.max(P(T.edgePadMm), pix + 1), clampE = P(T.edgeClampMm);
+    for (let t0 = tA; t0 + blk <= tB; t0 += blk) {
       const prof = [];
-      for (let d = -T.edgeSearch - 3; d <= T.edgeSearch + 3; d++) {
+      for (let d = -es - pad; d <= es + pad; d++) {
         const idx = [];
-        for (let t = t0; t < t0 + 32; t += 2) idx.push(sidePix(g, side, t, d));
+        for (let t = t0; t < t0 + blk; t += two) idx.push(sidePix(g, side, t, d));
         prof.push(medLab(lab, idx));
       }
       let best = 0, at = 0;
-      for (let d = -T.edgeSearch; d <= T.edgeSearch; d++) {
-        const i = d + T.edgeSearch + 3;
-        const a = prof[i - 1], b = prof[i], a2 = prof[i - 2], b2 = prof[i + 1];
+      for (let d = -es; d <= es; d++) {
+        const i = d + es + pad;
+        const a = prof[i - 1], b = prof[i], a2 = prof[i - 1 - pix], b2 = prof[i + pix];
         const s = dE({ L: (a.L + a2.L) / 2, a: (a.a + a2.a) / 2, b: (a.b + a2.b) / 2 }, { L: (b.L + b2.L) / 2, a: (b.a + b2.a) / 2, b: (b.b + b2.b) / 2 });
         if (s > best) { best = s; at = d; }
       }
-      if (best >= 6) pts.push([t0 + 16, at]);
+      if (best >= 6) pts.push([t0 + blk / 2, at]);
     }
-    const fit = pts.length >= 3 ? robustFit(pts) : null;
-    const edgeAt = (t) => (fit ? Math.max(-4, Math.min(4, Math.round(fit.a * t + fit.b))) : 0);
+    const fit = pts.length >= 3 ? robustFit(pts, pix) : null;
+    const edgeAt = (t) => (fit ? Math.max(-clampE, Math.min(clampE, Math.round(fit.a * t + fit.b))) : 0);
 
     // Border width from the measured frame (vision's lines), to keep the reference inside the border.
     const measured = scan.confidence && scan.confidence.per_side && scan.confidence.per_side[side] >= 0.3;
     const li = scan.lines.inner, lo = scan.lines.outer;
     const borderPx = side === "left" ? li.left - lo.left : side === "right" ? lo.right - li.right : side === "top" ? li.top - lo.top : lo.bottom - li.bottom;
-    let ref0 = T.ref0, ref1 = T.ref1, band1 = T.band1;
-    if (measured && borderPx < ref1 + 4) {
-      ref1 = Math.max(8, Math.floor(borderPx - 4));
-      ref0 = Math.max(5, ref1 - 10);
-      band1 = Math.min(band1, ref0 - 2);
+    const refPad = P(T.refPadMm);
+    let ref0 = P(T.ref0Mm), ref1 = P(T.ref1Mm), band1 = P(T.band1Mm);
+    if (measured && borderPx < ref1 + refPad) {
+      ref1 = Math.max(P(T.ref1MinMm), Math.floor(borderPx - refPad));
+      ref0 = Math.max(P(T.ref0MinMm), ref1 - P(T.refDepthMm));
+      band1 = Math.min(band1, ref0 - P(T.bandGapMm));
     }
 
     // Side border colour (median of the whole strip between the edge and the printed frame).
     let border = null;
     {
       const idx = [];
-      const d1 = measured ? Math.max(ref1, Math.floor(borderPx - 4)) : ref1;
-      for (let t = tA; t < tB; t += 4) for (let d = ref0; d <= d1; d += 2) idx.push(sidePix(g, side, t, d + edgeAt(t)));
+      const d1 = measured ? Math.max(ref1, Math.floor(borderPx - refPad)) : ref1;
+      for (let t = tA; t < tB; t += refStep) for (let d = ref0; d <= d1; d += two) idx.push(sidePix(g, side, t, d + edgeAt(t)));
       border = medLab(lab, idx);
       border.lightTail = percentile(idx.map((i) => lab[i * 3]), 95);
-      const out = [];
-      for (let t = tA; t < tB; t += 4) for (let d = 4; d <= 8; d += 2) out.push(sidePix(g, side, t, edgeAt(t) - d));
+      const out = [], [o0, , o1] = T.outsideMm.map(P);
+      for (let t = tA; t < tB; t += refStep) for (let d = o0; d <= o1; d += two) out.push(sidePix(g, side, t, edgeAt(t) - d));
       border.outside = medLab(lab, out);
     }
 
-    // Local border colour every 4 px (median over +-refHalf px along and ref0..ref1 in); follows lighting
+    // Local border colour every refStepMm (median over +-refHalfMm along and ref0..ref1 in); follows lighting
     // gradients across the photo and, on full-art cards, the artwork next to the edge.
-    const refs = [];
-    for (let t = tA; t < tB; t += 4) {
+    const refs = [], refHalf = P(T.refHalfMm), three = S(T.refDepthStepMm);
+    for (let t = tA; t < tB; t += refStep) {
       const idx = [];
-      for (let u = Math.max(tA, t - T.refHalf); u <= Math.min(tB - 1, t + T.refHalf); u += 4) {
+      for (let u = Math.max(tA, t - refHalf); u <= Math.min(tB - 1, t + refHalf); u += refStep) {
         const e = edgeAt(u);
-        for (let d = ref0; d <= ref1; d += 3) idx.push(sidePix(g, side, u, d + e));
+        for (let d = ref0; d <= ref1; d += three) idx.push(sidePix(g, side, u, d + e));
       }
       refs.push(medLab(lab, idx));
     }
-    const refAt = (t) => refs[Math.max(0, Math.min(refs.length - 1, Math.round((t - tA) / 4)))];
+    const refAt = (t) => refs[Math.max(0, Math.min(refs.length - 1, Math.round((t - tA) / refStep)))];
 
     // How often the outline along the middle of this edge carries flecks lighter than the border's texture: a
     // highlight along the whole edge (lighting catching the cut edge, a sleeve's lip) shows here as well as at
@@ -679,10 +759,11 @@
     let fleckFrac = 0;
     {
       let hits = 0, cnt = 0;
-      for (let t = Math.round(len * 0.15); t < len * 0.85; t += 2) {
+      const dMax = P(T.fleckDepthMm);
+      for (let t = Math.round(len * 0.15); t < len * 0.85; t += two) {
         const e = edgeAt(t), ref = refAt(t);
         cnt++;
-        for (let d = 0; d <= 2; d++) if (fleckLike(colorAt(lab, sidePix(g, side, t, d + e)), ref, border.lightTail, border.outside.L)) { hits++; break; }
+        for (let d = 0; d <= dMax; d++) if (fleckLike(colorAt(lab, sidePix(g, side, t, d + e)), ref, border.lightTail, border.outside.L)) { hits++; break; }
       }
       fleckFrac = cnt ? hits / cnt : 0;
     }
@@ -698,37 +779,37 @@
       // Only pixels inside the fitted card outline (d + e >= 0) can be exposed stock: when the edge line moved
       // outward onto a bright line just outside the card (a slab rail, a sleeve's lip), that line isn't card.
       // Depth is then counted from the outline.
-      const dIn = Math.max(T.band0, -e);
+      const dIn = Math.max(band0, -e);
       for (let d = dIn; d <= band1; d++) {
         const i = sidePix(g, side, t, d + e);
         if (printedMask && printedMask[i]) { if (first >= 0) break; continue; }
         const c = colorAt(lab, i);
         if (stockLike(c.L, c.C, ref)) {
-          if (first < 0) { if (d - dIn > T.startBy - T.band0) break; first = d; }
+          if (first < 0) { if (d - dIn > startBy - band0) break; first = d; }
           last = d; cnt++; sc += whiteScore(c.L, c.C, ref); gapRun = 0;
           if (clipped(c.L, c.C)) clips++;
-        } else if (first >= 0 && ++gapRun > 1) break;
+        } else if (first >= 0 && ++gapRun > pix) break;
       }
       // The same test away from the edge: stock-like pixels in the band that don't start at the edge. Wear starts
       // at the edge; printing, foil sparkle or texture turns up at any depth, so this measures the border's own noise.
       {
         let fc = 0;
-        for (let d = Math.max(dIn + T.startBy + 1, last + 3); d <= band1; d++) {
+        for (let d = Math.max(dIn + startBy + pix, last + P(T.floatSkipMm)); d <= band1; d++) {
           const i = sidePix(g, side, t, d + e);
           if (printedMask && printedMask[i]) continue;
           const c = colorAt(lab, i);
           if (stockLike(c.L, c.C, ref)) fc++;
         }
-        floating[k] = fc >= T.minPixels ? 1 : 0;
+        floating[k] = fc >= minPixels ? 1 : 0;
       }
-      if (cnt >= T.minPixels) {
+      if (cnt >= minPixels) {
         flag[k] = 1; depth[k] = last + 1 - Math.max(0, -e); score[k] = sc / cnt; clip[k] = clips / cnt; atEdge[k] = first === dIn ? 1 : 0;
         // Is the photo just outside the card as light (glare, a sleeve's reflection, a light background)?
-        const out = [4, 6, 8].map((d) => colorAt(lab, sidePix(g, side, t, e - d)));
+        const out = T.outsideMm.map((mm) => colorAt(lab, sidePix(g, side, t, e - P(mm))));
         outsideLight[k] = out.filter((c) => c.L >= T.stockL && whiteScore(c.L, c.C, ref) >= T.whiteScore).length >= 2 ? 1 : 0;
         // Does the light patch carry on well into the card (a reflection or printed highlight crossing the edge)?
         let deep = 0;
-        for (let d = ref0; d <= ref0 + 8; d += 2) { const c = colorAt(lab, sidePix(g, side, t, d + e)); if (stockLike(c.L, c.C, ref)) deep++; }
+        for (let d = ref0; d <= ref0 + P(T.crossMm); d += two) { const c = colorAt(lab, sidePix(g, side, t, d + e)); if (stockLike(c.L, c.C, ref)) deep++; }
         crossing[k] = deep >= 3 ? 1 : 0;
       }
     }
@@ -737,17 +818,18 @@
     for (let k = 0; k < n; k++) if (!light[k]) { fN++; fAll += floating[k]; eAll += flag[k]; }
     const floatFrac = fN ? fAll / fN : 0, edgeFrac = fN ? eAll / fN : 0;
 
-    // Runs of marked positions along the edge (gaps of up to T.gap merged).
+    // Runs of marked positions along the edge (gaps of up to gapMm merged).
+    const gap = P(T.gapMm), minRun = P(T.minRunMm), even = P(T.evenMm), near = P(T.floatLocalMm), deeper = P(T.deeperMm);
     const runsOf = (mark) => {
       const runs = [];
       let k = 0;
       while (k < n) {
         if (!mark[k]) { k++; continue; }
         let end = k;
-        for (let j = k + 1; j < n && j - end <= T.gap + 1; j++) if (mark[j]) end = j;
+        for (let j = k + 1; j < n && j - end <= gap + 1; j++) if (mark[j]) end = j;
         const s = k, e2 = end;
         k = end + 1;
-        if (e2 - s + 1 < T.minRun) continue;
+        if (e2 - s + 1 < minRun) continue;
         runs.push(runStats(mark, s, e2));
       }
       return runs;
@@ -761,13 +843,13 @@
       }
       const dMed = median(ds);
       let fl = 0, fn = 0;
-      for (let q = Math.max(0, s - 24); q <= Math.min(n - 1, e2 + 24); q++) if (!light[q]) { fn++; fl += floating[q]; }
+      for (let q = Math.max(0, s - near); q <= Math.min(n - 1, e2 + near); q++) if (!light[q]) { fn++; fl += floating[q]; }
       return {
         floatLocal: fn ? fl / fn : 0,
         t0: tA + s, t1: tA + e2 + 1, length: e2 - s + 1, depth: percentile(ds, 80), score: median(scs),
         coherence: hits / (e2 - s + 1), outsideLight: ol / hits, crossing: cr / hits, clipped: cl / hits,
         // shape across the edge: how deep typically / at most, how even along the run, how often it starts at the edge
-        depthMed: dMed, depthHi: percentile(ds, 90), even: ds.filter((v) => Math.abs(v - dMed) < 2).length / hits, atEdge: ae / hits,
+        depthMed: dMed, depthHi: percentile(ds, 90), even: ds.filter((v) => Math.abs(v - dMed) < even).length / hits, atEdge: ae / hits,
         e: edgeAt(tA + Math.round((s + e2) / 2)),
       };
     };
@@ -775,10 +857,10 @@
     // Stretches of a run that reach clearly deeper than its typical depth: wear under a bright line along the edge.
     const deeperIn = (run) => {
       const mark = new Uint8Array(n);
-      for (let q = run.t0 - tA; q < run.t1 - tA; q++) if (flag[q] && depth[q] >= run.depthMed + 2) mark[q] = 1;
+      for (let q = run.t0 - tA; q < run.t1 - tA; q++) if (flag[q] && depth[q] >= run.depthMed + deeper) mark[q] = 1;
       return runsOf(mark);
     };
-    return { side, len, tA, tB, runs, deeperIn, refs, refAt, edgeAt, border, measured, borderPx, lightFrac, band1, floatFrac, edgeFrac, fleckFrac };
+    return { side, len, tA, tB, runs, deeperIn, refs, refAt, edgeAt, border, measured, borderPx, lightFrac, band0, band1, floatFrac, edgeFrac, fleckFrac };
   }
 
   /* ---------------------------------------------------------------- corners */
@@ -796,14 +878,17 @@
     const tV = ci < 2 ? V.tA : V.tB - 1, tH = ci === 0 || ci === 3 ? Hh.tA : Hh.tB - 1;
     const u0 = V.edgeAt(tV), v0 = Hh.edgeAt(tH);  // the edges' true positions near this corner
     const px = (u, v) => { const [x, y] = cornerXY(g, ci, u0 + u, v0 + v); return pixAt(g, x, y); };
+    const P = (mm) => g.px(mm), rs = g.hstep(T.rayStepMm), pix = P(T.pixMm), minPixels = P(T.minPixelsMm);
+    const two = g.step(T.sampleMm);
 
     // Card colour next to the corner (from both sides' local border colours) and background just outside.
-    const near = (S, t0, dir) => [0, 16, 32].map((o) => S.refAt(t0 + dir * o));
+    const near = (S, t0, dir) => T.nearMm.map((mm) => S.refAt(t0 + dir * P(mm)));
     const cr = [...near(V, tV, ci < 2 ? 1 : -1), ...near(Hh, tH, ci === 0 || ci === 3 ? 1 : -1)];
     const card = { L: median(cr.map((c) => c.L)), a: median(cr.map((c) => c.a)), b: median(cr.map((c) => c.b)) };
     card.C = Math.hypot(card.a, card.b);
     const bgIdx = [];
-    for (let s = R0 + 6; s <= R0 + 40; s += 2) for (let o = 6; o <= 14; o += 2) { bgIdx.push(px(-o, s)); bgIdx.push(px(s, -o)); }
+    const bgTo = P(T.bgToMm), [bo0, bo1] = T.bgOutMm.map(P);
+    for (let s = R0 + P(T.bgFromMm); s <= R0 + bgTo; s += g.step(T.bgStepMm)) for (let o = bo0; o <= bo1; o += two) { bgIdx.push(px(-o, s)); bgIdx.push(px(s, -o)); }
     const bg = medLab(lab, bgIdx);
     const contrast = dE(card, bg);
     const bgLight = bg.L >= T.stockL && whiteScore(bg.L, bg.C, card) >= T.whiteScore;
@@ -820,52 +905,54 @@
 
     // Self-check: the same classifier must put the straight edges beyond the arc where they are.
     let okLines = 0, lines = 0;
-    for (let s = R0 + 8; s <= R0 + 40; s += 8) {
+    const cWin = P(T.checkWinMm), cTol = P(T.checkTolMm);
+    for (let s = R0 + P(T.checkStepMm); s <= R0 + bgTo; s += g.step(T.checkStepMm)) {
       for (const horiz of [false, true]) {
         lines++;
-        for (let o = -6; o <= 6; o++) {
+        for (let o = -cWin; o <= cWin; o++) {
           const i = horiz ? px(s, o) : px(o, s);
-          const i2 = horiz ? px(s, o + 1) : px(o + 1, s);
-          if (isCard(i) && isCard(i2)) { if (Math.abs(o) <= 2) okLines++; break; }
+          const i2 = horiz ? px(s, o + pix) : px(o + pix, s);
+          if (isCard(i) && isCard(i2)) { if (Math.abs(o) <= cTol) okLines++; break; }
         }
       }
     }
     const selfCheck = okLines / lines;
 
     // Rays across the corner through the nominal arc centre, walked inward from just outside the card
-    // (5 px beyond both edge lines, inside any sleeve edge) to the first pixels that are card and stay card
+    // (rayOutMm beyond both edge lines, inside any sleeve edge) to the first pixels that are card and stay card
     // further in. Walking inward means dark artwork inside the card can't cut the ray short; the "stays
     // card" test skips a thin light line outside (a sleeve's edge, a reflection) instead of stopping at it.
     const rays = [];
+    const rayOut = P(T.rayOutMm), [stay0, stay1] = T.stayMm.map(P), wMax = P(T.whiteMaxMm), wStart = g.pxh(T.whiteStartMm);
     for (let phi = 0; phi <= 90; phi += T.rayStep) {
       const c = Math.cos((phi * Math.PI) / 180), s = Math.sin((phi * Math.PI) / 180);
       const at = (rho) => px(R0 - rho * c, R0 - rho * s);
-      const rhoStart = (R0 + 5) / Math.max(c, s);
+      const rhoStart = (R0 + rayOut) / Math.max(c, s);
       if (isCard(at(rhoStart))) { rays.push({ phi, valid: false }); continue; }
       let rhoB = null;
-      for (let rho = rhoStart; rho >= 0; rho -= 0.5) {
-        if (isCard(at(rho)) && isCard(at(rho - 0.5)) && isCard(at(rho - 3)) && isCard(at(rho - 6))) { rhoB = rho; break; }
+      for (let rho = rhoStart; rho >= 0; rho -= rs) {
+        if (isCard(at(rho)) && isCard(at(rho - rs)) && isCard(at(rho - stay0)) && isCard(at(rho - stay1))) { rhoB = rho; break; }
       }
       if (rhoB === null) { rays.push({ phi, valid: false }); continue; }
-      // Stock-white pixels just inside the outline, starting at it.
+      // Stock-white pixels just inside the outline, starting at it (steps of rs; a gap of more than 2 steps ends it).
       let wd = 0, sc = 0, clips = 0, started = false, miss = 0;
       if (canWhiten) {
-        for (let q = 0; q <= 12; q += 0.5) {
+        for (let q = 0; q <= wMax; q += rs) {
           const i = at(rhoB - q);
           if (printedMask && printedMask[i]) break;
           const col = colorAt(lab, i);
           if (stockLike(col.L, col.C, card)) {
-            if (!started && q > 1.5) break;
-            started = true; wd = q + 0.5; sc += whiteScore(col.L, col.C, card); miss = 0;
+            if (!started && q > wStart) break;
+            started = true; wd = q + rs; sc += whiteScore(col.L, col.C, card); miss = 0;
             if (clipped(col.L, col.C)) clips++;
           } else if (started && ++miss > 2) break;
-          else if (!started && q > 1.5) break;
+          else if (!started && q > wStart) break;
         }
       }
       // The same test further in, not joined to the outline: the card's own light texture (as for the edges).
       let floating = 0;
       if (canWhiten) {
-        for (let q = Math.max(4, wd + 2); q <= 12; q += 1) {
+        for (let q = Math.max(P(T.floatFromMm), wd + P(T.floatGapMm)); q <= wMax; q += 1) {
           const i = at(rhoB - q);
           if (printedMask && printedMask[i]) continue;
           const col = colorAt(lab, i);
@@ -873,7 +960,8 @@
         }
       }
       const [x, y] = cornerXY(g, ci, u0 + R0 - rhoB * c, v0 + R0 - rhoB * s);
-      rays.push({ phi, valid: true, rho: rhoB, whiteDepth: wd >= 1.5 ? wd : 0, score: wd >= 1.5 ? sc / (wd * 2) : 0, clipped: clips > 0, x, y, at, floating: floating >= T.minPixels });
+      // score: mean over the samples taken (wd / rs of them)
+      rays.push({ phi, valid: true, rho: rhoB, whiteDepth: wd >= wStart ? wd : 0, score: wd >= wStart ? sc / (wd / rs) : 0, clipped: clips > 0, x, y, at, floating: floating >= minPixels });
     }
     const valid = rays.filter((r) => r.valid);
 
@@ -882,12 +970,13 @@
     let fleckRays = 0, fleckN = 0, fleckBase = 0;
     if (canWhiten && valid.length >= 10) {
       const tex = [];
-      for (const r of valid) for (let q = 6; q <= 14; q += 2) tex.push(lab[r.at(r.rho - q) * 3]);
+      const [t0, t1] = T.texMm.map(P);
+      for (const r of valid) for (let q = t0; q <= t1; q += two) tex.push(lab[r.at(r.rho - q) * 3]);
       const lightTail = percentile(tex, 95);
       for (const r of valid) {
         if (r.phi < 6 || r.phi > 84) continue;
         fleckN++;
-        for (let q = -0.5; q <= 1.5; q += 0.5) {
+        for (let q = -rs; q <= wStart; q += rs) {
           const i = r.at(r.rho - q);
           if (printedMask && printedMask[i]) continue;
           if (fleckLike(colorAt(lab, i), card, lightTail, bg.L)) { fleckRays++; r.fleck = true; break; }
@@ -918,9 +1007,9 @@
     // their median distance from the background (relative to card-vs-background contrast) is higher.
     const miss = [];
     for (const r of valid) {
-      if (r.phi < 15 || r.phi > 75 || r.rho > R0 - 2) continue;
+      if (r.phi < 15 || r.phi > 75 || r.rho > R0 - P(T.cutTolMm)) continue;
       const c = Math.cos((r.phi * Math.PI) / 180), s = Math.sin((r.phi * Math.PI) / 180);
-      for (let rho = r.rho + 1.5; rho <= R0 - 0.5; rho += 1) miss.push(dE(colorAt(lab, px(R0 - rho * c, R0 - rho * s)), bg) / Math.max(contrast, 1));
+      for (let rho = r.rho + wStart; rho <= R0 - g.pxh(T.rayStepMm); rho += g.step(T.pixMm)) miss.push(dE(colorAt(lab, px(R0 - rho * c, R0 - rho * s)), bg) / Math.max(contrast, 1));
     }
     const cutLook = miss.length >= 10 ? median(miss) : 0;
 
@@ -982,7 +1071,7 @@
         ...(opts.debug ? { debug: { fleckFrac: r3(s.fleckFrac), edgeFrac: r3(s.edgeFrac), floatFrac: r3(s.floatFrac) } } : {}),
       };
       if (!assessable) {
-        const [xa, ya] = sideXY(g, side, s.tA, 0), [xb, yb] = sideXY(g, side, s.tB, 12);
+        const [xa, ya] = sideXY(g, side, s.tA, 0), [xb, yb] = sideXY(g, side, s.tB, g.px(T.unassessableMm));
         overlays.push({ type: "rect", kind: "unassessable", x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.abs(xb - xa), h: Math.abs(yb - ya), label: `${side}: ${reason}` });
       }
       if (s.lightFrac > T.lightSide) continue;  // no candidates on a white border: it can't tell stock from ink
@@ -990,7 +1079,8 @@
       const span = s.tB - s.tA;
       // A slab's rail, a sleeve's lip or a reflection along the edge: a thin line starting right at the outline,
       // even in depth, over much of the edge (in one run, or in pieces). Worn stock is patchy and varies in depth.
-      const lineLike = (run) => run.depthHi <= T.railDepth && run.even >= T.railEven && run.atEdge >= T.railEven && run.coherence >= T.railEven;
+      const railDepth = g.px(T.railDepthMm);
+      const lineLike = (run) => run.depthHi <= railDepth && run.even >= T.railEven && run.atEdge >= T.railEven && run.coherence >= T.railEven;
       const cover = s.runs.filter((r) => lineLike(r) && r.length >= T.railPieceMm * g.pxPerMm).reduce((a, r) => a + r.length, 0) / Math.max(1, span);
       const queue = s.runs.map((run) => ({ run, under: false }));
       const sideWide = [];
@@ -1012,9 +1102,9 @@
         if (!s.measured) {
           conf *= 0.6;
           notes.push("no plain border here: light artwork at the edge can look like this");
-          if (run.depth >= s.band1 - 1) { conf *= 0.4; notes.push("reaches as deep as the check looks, more like artwork than wear"); }
+          if (run.depth >= s.band1 - g.px(T.pixMm)) { conf *= 0.4; notes.push("reaches as deep as the check looks, more like artwork than wear"); }
         }
-        if (run.length < 6) conf *= 0.7;
+        if (run.length < g.px(T.shortRunMm)) conf *= 0.7;
         if (!under && run.depthMed >= T.printDepthMm * g.pxPerMm && run.score < T.printScore) {
           conf *= 0.35;  // below candidateConf even at full confidence: shown greyed out, to check by eye
           notes.push("reaches well into the card without being as bright as bare stock: more like light printing meeting the edge than wear");
@@ -1024,7 +1114,7 @@
         // rail, only stretches reaching deeper than such a line can stand out as wear.
         // A worn edge can look the same (specks of stock all along it), so the strongest piece is still offered,
         // once per edge (below).
-        const wide = !under && !rail && s.edgeFrac >= T.edgeWide && run.depthHi <= T.railDepth;
+        const wide = !under && !rail && s.edgeFrac >= T.edgeWide && run.depthHi <= railDepth;
         const textured = !under && Math.max(run.floatLocal, s.floatFrac) >= T.speckleRate;
         const faint = !under && run.score < Math.min(T.runScore, T.runCover * headroomOf(s.refAt((run.t0 + run.t1) / 2)));
         let wideConf = null;
@@ -1046,7 +1136,7 @@
         const lengthMm = mm(run.length), depthMm = mm(run.depth);
         const severity = severityOf(lengthMm, depthMm);
         // Short and deep reads as a chip / nick rather than a line of whitening.
-        const type = run.depth >= 7 && run.length <= 3 * run.depth ? "edge_chipping" : "edge_whitening";
+        const type = run.depth >= g.px(T.chipDepthMm) && run.length <= 3 * run.depth ? "edge_chipping" : "edge_whitening";
         const item = {
           side, type, start: r3(run.t0 / s.len), end: r3(run.t1 / s.len), start_px: run.t0, end_px: run.t1,
           length_mm: lengthMm, depth: r1(run.depth), depth_mm: depthMm, contrast: r1(run.score),
@@ -1056,7 +1146,7 @@
         if (wideConf !== null && wideConf >= T.candidateConf) sideWide.push({ item, conf: wideConf, score: run.score, notes });
         if (opts.debug) item.debug = { coherence: r2(run.coherence), outsideLight: r2(run.outsideLight), crossing: r2(run.crossing), clipped: r2(run.clipped), even: r2(run.even), atEdge: r2(run.atEdge), depthMed: r1(run.depthMed), score: r1(run.score), measured: !!s.measured, under, floatLocal: r2(run.floatLocal), floatFrac: r3(s.floatFrac), edgeFrac: r3(s.edgeFrac), refL: r1(s.refAt(run.t0).L), refC: r1(s.refAt(run.t0).C) };
         edges.push(item);
-        const [xa, ya] = sideXY(g, side, run.t0, run.e + T.band0), [xb, yb] = sideXY(g, side, run.t1, run.e + run.depth + 1);
+        const [xa, ya] = sideXY(g, side, run.t0, run.e + s.band0), [xb, yb] = sideXY(g, side, run.t1, run.e + run.depth + 1);
         item.overlay = { type: "rect", kind: "edge", severity, confidence: item.confidence, likely: item.likely, x: Math.min(xa, xb), y: Math.min(ya, yb), w: Math.max(1, Math.abs(xb - xa)), h: Math.max(1, Math.abs(yb - ya)), label: `${side} ${rail ? "reflection" : severity}` };
         overlays.push(item.overlay);
       }
@@ -1099,10 +1189,11 @@
         const ex = T.roundExcess;
         const sev = excessMm >= ex[3] ? "major" : excessMm >= ex[2] ? "moderate" : excessMm >= ex[1] ? "minor" : excessMm >= ex[0] ? "micro" : null;
         let conf = clamp01((c.contrast - 12) / 30) * (0.3 + 0.7 * c.selfCheck);
-        conf *= c.rough > T.roughPx ? 0.7 : 1;
+        const roughPx = g.px(T.roughMm);
+        conf *= c.rough > roughPx ? 0.7 : 1;
         conf *= clamp01((0.45 - c.cutLook) / 0.25);
         if (sev && c.cutLook > 0.2) notes.push("the missing part of the corner doesn't look like the background (glare or sleeve haze?)");
-        rounding = { radius_px: r1(c.radius), expected_px: r1(g.R), card_median_px: ownR === null ? null : r1(ownR), excess_mm: r2(excessMm), roughness_px: r1(c.rough), rough: c.rough > T.roughPx, severity: sev, confidence: r2(conf) };
+        rounding = { radius_px: r1(c.radius), expected_px: r1(g.R), card_median_px: ownR === null ? null : r1(ownR), excess_mm: r2(excessMm), roughness_px: r1(c.rough), rough: c.rough > roughPx, severity: sev, confidence: r2(conf) };
       }
       // Whitening along the arc
       let whitening = null;

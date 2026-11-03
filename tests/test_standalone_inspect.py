@@ -40,7 +40,7 @@ const V = require(%s), I = require(%s), fs = require("fs");
 const jobs = JSON.parse(fs.readFileSync(0, "utf8"));
 const out = jobs.map((j) => {
   const img = { width: j.width, height: j.height, data: new Uint8ClampedArray(fs.readFileSync(j.path)) };
-  const s = V.scan(img, j.mode);
+  const s = j.scale ? V.scan(img, j.mode, null, { scale: j.scale }) : V.scan(img, j.mode);
   const t0 = Date.now();
   const q = I.quality(img, s);
   const opts = { quality: q, face: "back" };
@@ -376,6 +376,40 @@ def test_border_texture_highlights_and_faint_bands_are_not_wear(tmp_path):
     [faint] = [x for x in rf["e"]["edges"] if x["side"] == "bottom"]
     assert not faint["likely"] and "only a little lighter than the border" in faint["note"]
     assert rf["e"]["defects"] == []
+
+
+def test_corner_checks_agree_at_a_higher_flattening_scale(tmp_path):
+    """The edge / corner thresholds are physical (mm), so flattening the same photo at 3x the default resolution
+    (2250 px across the card, 35.7 px/mm) finds the same corner wear at the same corners with the same severities,
+    and nothing at the clean corners and edges; only the mm measurements may differ a little (resampling)."""
+    navy = make_card(33, 36, 30, 31, border_bgr=NAVY, frame_bgr=(40, 220, 240))
+    photo = place_on_background(paint_corner_whitening(navy, "top_right", depth=7), 2, mask=card_mask_worn(36, {"bottom_left": 70}))
+    r1, r3 = run([(photo, "auto"), (photo, "auto", {"scale": 3})], tmp_path)
+    assert (r1["width"], r1["margin"]) == (750 + 2 * 48, 48)
+    assert (r3["width"], r3["margin"]) == (3 * 750 + 2 * 144, 144)
+    want = {("top_right", "corner_whitening"), ("bottom_left", "corner_softening")}
+    for r in (r1, r3):
+        e = r["e"]
+        assert {(d["location"], d["type"]) for d in e["defects"]} == want
+        assert likely_edges(e) == []
+        for loc in ("top_left", "bottom_right"):  # clean corners: no flags at either scale
+            c = corner(e, loc)
+            assert c["assessable"] and c["severity"] is None and not c["likely"] and c["dings"] == []
+            assert c["whitening"]["severity"] is None and c["rounding"]["severity"] is None
+        assert r["q"]["verdict"] == "ok"
+    for loc in ("top_left", "top_right", "bottom_right", "bottom_left"):
+        a, b = corner(r1["e"], loc), corner(r3["e"], loc)
+        assert (a["severity"], a["likely"], a["assessable"]) == (b["severity"], b["likely"], b["assessable"])
+        assert a["whitening"]["severity"] == b["whitening"]["severity"]
+        assert a["rounding"]["severity"] == b["rounding"]["severity"]
+        assert abs(a["whitening"]["depth_mm"] - b["whitening"]["depth_mm"]) <= 0.15
+        assert abs(a["whitening"]["fraction"] - b["whitening"]["fraction"]) <= 0.1
+        assert abs(a["rounding"]["excess_mm"] - b["rounding"]["excess_mm"]) <= 0.25
+        assert abs(b["rounding"]["radius_px"] / 3 - a["rounding"]["radius_px"]) <= 3  # px scale with the flattening (3 px ~ 0.25 mm)
+    assert {d["severity"] for d in r1["e"]["defects"]} == {d["severity"] for d in r3["e"]["defects"]}
+    # Blur is reported in px of the flattened card, so it reads ~3x at 3x (the same physical sharpness).
+    b1, b3 = r1["q"]["checks"]["sharpness"]["value"], r3["q"]["checks"]["sharpness"]["value"]
+    assert abs(b3 / 3 - b1) <= 0.15
 
 
 def test_printed_mask_suppresses_candidates(tmp_path):
