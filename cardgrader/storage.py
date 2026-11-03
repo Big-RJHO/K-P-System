@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,10 +37,19 @@ class CardStore:
         with self._connect() as conn:
             conn.execute(SCHEMA)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """A connection for one operation: committed on success, rolled back on error, always closed.
+
+        (sqlite3's own `with conn:` only ends the transaction; it never closes the connection.)
+        """
         conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def save(
         self,

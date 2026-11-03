@@ -23,8 +23,29 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
+  /* ------------------------------------------------------------- request deadline (net.js) */
+
+  // The shared helper: required next to this file in Node, the page's global in the browser. Without it
+  // (this file loaded alone) requests still work, only without a deadline.
+  function netLib() {
+    try { if (typeof require === "function") return require("./net.js"); } catch (err) { /* not next to it */ }
+    const g = typeof self !== "undefined" ? self : typeof globalThis !== "undefined" ? globalThis : {};
+    return (g && g.Net) || null;
+  }
+  async function fetchJSON(url, opts) {
+    const N = netLib();
+    if (N) return N.fetchJSON(url, opts);
+    const { timeoutMs, fetch: F, ...init } = opts;
+    const res = await F(url, init);
+    let body = null;
+    try { body = await res.json(); } catch (err) { body = null; }
+    return { res, ok: !!res.ok, status: res.status, body };
+  }
+  const isTimeout = (err) => !!err && (err.timeout === true || err.name === "TimeoutError");
+
   const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
   const MODEL = "gemini-3.5-flash-lite";
+  const TIMEOUT_MS = 45000;   // per attempt, headers and body together
   const LANGS = { english: "EN", en: "EN", japanese: "JP", ja: "JP", jp: "JP", french: "FR", fr: "FR", german: "DE", de: "DE",
     italian: "IT", it: "IT", spanish: "ES", es: "ES", portuguese: "PT", pt: "PT", korean: "KO", ko: "KO", kr: "KO",
     chinese: "ZH", zh: "ZH", cn: "ZH" };
@@ -104,22 +125,25 @@
       contents: [{ parts: [{ inline_data: { mime_type: "image/jpeg", data: jpegBase64 } }, { text: PROMPT }] }],
       generationConfig: { responseMimeType: "application/json", responseSchema: SCHEMA, temperature: 0 },
     };
+    const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
     let res;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        res = await F(`${ENDPOINT}/${opts.model || MODEL}:generateContent`, {
+        res = await fetchJSON(`${ENDPOINT}/${opts.model || MODEL}:generateContent`, {
+          fetch: F, timeoutMs,
           method: "POST",
           headers: { "Content-Type": "application/json", "x-goog-api-key": opts.apiKey },
           body: JSON.stringify(body),
         });
       } catch (err) {
+        // Thrown (a timeout too), so the app falls back to the on-device reader.
+        if (isTimeout(err)) throw new Error(`Gemini didn't answer within ${Math.round(timeoutMs / 1000)} seconds.`);
         throw new Error("Gemini couldn't be reached (offline, or this page isn't allowed to contact it).");
       }
       if (res.status !== 503 || attempt) break;
       await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? 2000));
     }
-    let out = null;
-    try { out = await res.json(); } catch (err) { out = null; }
+    const out = res.body;
     if (!res.ok) throw new Error(friendlyError(res.status, out));
     const text = ((out && out.candidates && out.candidates[0] && out.candidates[0].content && out.candidates[0].content.parts) || [])
       .map((p) => p.text || "").join("");
@@ -128,5 +152,5 @@
     return toReading(g || {});
   }
 
-  return { identify, toReading, SCHEMA, PROMPT, MODEL };
+  return { identify, toReading, SCHEMA, PROMPT, MODEL, TIMEOUT_MS };
 });

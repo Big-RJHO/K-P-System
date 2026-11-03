@@ -27,6 +27,26 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
+  /* ------------------------------------------------------------- request deadline (net.js) */
+
+  // The shared helper: required next to this file in Node, the page's global in the browser. Without it
+  // (this file loaded alone) requests still work, only without a deadline.
+  function netLib() {
+    try { if (typeof require === "function") return require("./net.js"); } catch (err) { /* not next to it */ }
+    const g = typeof self !== "undefined" ? self : typeof globalThis !== "undefined" ? globalThis : {};
+    return (g && g.Net) || null;
+  }
+  async function fetchJSON(url, opts) {
+    const N = netLib();
+    if (N) return N.fetchJSON(url, opts);
+    const { timeoutMs, fetch: F, ...init } = opts;
+    const res = await F(url, init);
+    let body = null;
+    try { body = await res.json(); } catch (err) { body = null; }
+    return { res, ok: !!res.ok, status: res.status, body };
+  }
+  const isTimeout = (err) => !!err && (err.timeout === true || err.name === "TimeoutError");
+
   const ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
   // Google search needs billing on the key for the 3.x models (tested 2026-09-29 with a new free key: plain
   // requests work, search answers 429 "check your plan and billing"); 2.5 is refused to new users (404).
@@ -36,6 +56,7 @@
   ];
   const BLOCKED_SOURCES = ["pricecharting.com"];   // its terms don't allow its prices in apps without permission
   const MAX_PRICE = 10000000;
+  const TIMEOUT_MS = 45000;   // per attempt, headers and body together (a Gemini request, like geminiid.js)
 
   const domainOf = (s) => {
     const t = String(s || "").trim().toLowerCase();
@@ -188,22 +209,24 @@ Reply with only this JSON, no other text:
       tools: [{ google_search: {} }],
       generationConfig: { temperature: 0.1 },
     };
+    const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
     let res;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        res = await F(`${ENDPOINT}/${model}:generateContent`, {
+        res = await fetchJSON(`${ENDPOINT}/${model}:generateContent`, {
+          fetch: F, timeoutMs,
           method: "POST",
           headers: { "Content-Type": "application/json", "x-goog-api-key": opts.apiKey },
           body: JSON.stringify(req),
         });
       } catch (err) {
+        if (isTimeout(err)) throw new Error(`Gemini's web search didn't answer within ${Math.round(timeoutMs / 1000)} seconds. Try again.`);
         throw new Error("Gemini couldn't be reached (offline, or this page isn't allowed to contact it).");
       }
       if (res.status !== 503 || attempt) break;
       await new Promise((r) => setTimeout(r, opts.retryDelayMs ?? 2000));   // "high demand": one retry
     }
-    let body = null;
-    try { body = await res.json(); } catch (err) { body = null; }
+    const body = res.body;
     if (!res.ok) throw new Error(friendlyError(res.status, body));
     const r = readResponse(body);
     const checked = checkPrices(r.data, r.sources, grades);
@@ -224,5 +247,5 @@ Reply with only this JSON, no other text:
   // Older keys look like "AIza…" (39 characters); newer ones like "AQ.Ab8…" (with a dot).
   const validKey = (k) => /^[A-Za-z0-9_.-]{30,120}$/.test(String(k || "").trim());
 
-  return { search, wantedGrades, buildPrompt, extractJSON, readResponse, checkPrices, suggestionsDoc, domainOf, validKey, MODELS, BLOCKED_SOURCES };
+  return { search, wantedGrades, buildPrompt, extractJSON, readResponse, checkPrices, suggestionsDoc, domainOf, validKey, MODELS, BLOCKED_SOURCES, TIMEOUT_MS };
 });
