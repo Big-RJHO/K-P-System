@@ -112,7 +112,7 @@ const SURFACE_FILTERS = [
 ];
 const surfaceApi = () => (window.Surface && typeof window.Surface.filter === "function" ? window.Surface : null);
 
-/** Runs scans, mark finding and filters off the main thread when the worker module is present. */
+/** Same interface as ScanWorker (scanworker.js), on the main thread: used only if that module is missing. */
 function mainThreadRunner(reason) {
   const jobs = new Map();  // coalesceKey -> job
   const work = {
@@ -123,17 +123,18 @@ function mainThreadRunner(reason) {
         quality = Inspect.quality(p.pixels, scan);
         check = Inspect.edgesAndCorners(scan, { quality, face: p.face, ...(p.printedMask ? { printedMask: p.printedMask } : {}) });
       } catch (_) { quality = null; check = null; }
-      return { scan, quality, check };
+      return { scan, quality, check, pixels: p.pixels };
     },
     marks(p) {
       const api = surfaceApi();
       if (!api || typeof api.findMarks !== "function") return { status: "unavailable", candidates: [], cannotAssess: [], note: "Mark finding isn't available in this build." };
-      return api.findMarks(p.scan, p.options || {});
+      const { scan, ...opts } = p;
+      return api.findMarks(scan, opts);
     },
     filter(p) {
       const api = surfaceApi();
       if (!api) throw new Error("Filters aren't available in this build.");
-      return api.filter(p.src, p.options || {});
+      return api.filter(p.src, { kind: p.kind, intensity: p.intensity, reference: p.reference });
     },
   };
   return {
@@ -167,7 +168,11 @@ let runnerInstance = null;
 function runner() {
   if (runnerInstance) return runnerInstance;
   if (window.ScanWorker && typeof window.ScanWorker.create === "function") {
-    try { runnerInstance = window.ScanWorker.create({ sources: window.SCAN_WORKER_SOURCES || null }); } catch (_) { runnerInstance = null; }
+    try {
+      runnerInstance = window.ScanWorker.create({ sources: window.SCAN_WORKER_SOURCES });
+      // The worker can still fall back to the main thread (no answer within its start-up time): say so then.
+      if (runnerInstance.ready) runnerInstance.ready.then(() => { renderConfidence(); sv.render(); }, () => {});
+    } catch (_) { runnerInstance = null; }
   }
   if (!runnerInstance) runnerInstance = mainThreadRunner("Background processing isn't available here, so the page can pause briefly while a photo is measured.");
   return runnerInstance;
@@ -530,11 +535,12 @@ function applyScanResult(side, out, photo, { rev, outlineAdjusted = false } = {}
 function assessConfidence(side) {
   const s = state.scans[side];
   if (!s || !s.result) { state.conf[side] = s ? null : Confidence().notScanned(); return; }
-  const input = { scan: s.result, quality: s.quality, check: s.check, evidence: state.evidence[side], outlineAdjusted: !!s.outlineAdjusted };
+  const angledLight = !!(state.angled[side] && state.angled[side].result);   // an angled-light photo was added
+  const input = { scan: s.result, quality: s.quality, check: s.check, evidence: state.evidence[side], outlineAdjusted: !!s.outlineAdjusted, angledLight };
   try {
     state.conf[side] = Confidence().assess(input);
   } catch (_) {
-    state.conf[side] = FallbackConfidence.assess(input);
+    state.conf[side] = { level: "cannot_assess", label: CONF_LABEL.cannot_assess, areas: null, surfaceLimited: true, summary: "This scan couldn't be rated. Retake the photo.", reasons: [], actions: [{ id: "retake", label: "Retake photo" }] };
   }
 }
 
@@ -559,9 +565,10 @@ function refineWithReference(side, { force = false } = {}) {
   }, 20);
 }
 
-const scanPayload = (pixels, side, corners = null) => ({
-  // A worker may take ownership of the buffer it's given: send a copy and keep the photo here.
-  pixels: runner().mode === "worker" ? { width: pixels.width, height: pixels.height, data: new Uint8ClampedArray(pixels.data) } : pixels,
+// The scan job takes ownership of the pixel buffer (it moves to the worker and comes back as result.pixels).
+// keep: send a copy instead, when this photo must stay usable here even if the job is dropped (outline edits).
+const scanPayload = (pixels, side, corners = null, { keep = false } = {}) => ({
+  pixels: keep ? { width: pixels.width, height: pixels.height, data: new Uint8ClampedArray(pixels.data) } : pixels,
   mode: "auto", corners, face: side,
 });
 
@@ -592,7 +599,7 @@ function announceConfidence(side) {
 }
 
 /** Run a scan job for one side and apply it if it is still the latest request for that card and side. */
-async function runScan(side, pixels, { corners = null, outlineAdjusted = false } = {}) {
+async function runScan(side, pixels, { corners = null, outlineAdjusted = false, keep = false } = {}) {
   const pending = newRev();
   state.pendingRev[side] = pending;
   const token = { card: state.cardRev, side, pending };
@@ -603,9 +610,11 @@ async function runScan(side, pixels, { corners = null, outlineAdjusted = false }
   renderConfidence();
   let ok = false;
   try {
-    const out = await runner().run("scan", scanPayload(pixels, side, corners), { coalesceKey: `scan-${side}` });
+    // A newer photo for this side replaces a scan still running (supersede), not just one still waiting.
+    const out = await runner().run("scan", scanPayload(pixels, side, corners, { keep }), { coalesceKey: `scan-${side}`, supersede: true });
     if (!isCurrent(token)) return false;
-    applyScanResult(side, out, pixels, { rev: pending, outlineAdjusted });
+    // Keep the pixels the job handed back: the buffer sent with it may have been moved to the worker.
+    applyScanResult(side, out, out.pixels || pixels, { rev: pending, outlineAdjusted });
     refineWithReference(side);
     ok = true;
     return true;
@@ -697,10 +706,12 @@ function confidenceRow(side, { detail = true, compact = false } = {}) {
     $(".conf-head", row).append(lim);
   }
   if (!detail) return row;
-  if (c.summary) {
+  // The badge above already says the surface needs inspection: don't repeat it in the sentence.
+  const summary = c.surfaceLimited ? String(c.summary || "").replace(/\s*[;,—-]?\s*limited\s*[—-]\s*surface needs inspection\.?/i, ".").replace(/\.\.$/, ".") : c.summary;
+  if (summary && summary !== ".") {
     const p = document.createElement("p");
     p.className = "conf-summary";
-    p.textContent = c.summary;
+    p.textContent = summary;
     row.append(p);
   }
   // On the Scan screen only the actions that fix a weak scan are offered; Review offers all of them.
@@ -979,7 +990,7 @@ async function applyOutline() {
   leaveExample();
   setOutlineMode(false);
   const card = state.cardRev;
-  const ok = await runScan(side, s.photo, { corners, outlineAdjusted: true });
+  const ok = await runScan(side, s.photo, { corners, outlineAdjusted: true, keep: true });
   if (card !== state.cardRev) return;
   renderSlots();
   if (ok) {
@@ -3341,12 +3352,40 @@ const sv = {
     return null;
   },
 
+  /**
+   * The user-confirmed reference aligned to the front scan (Surface.compareReference), computed once per scan
+   * revision and reference. undefined while it's being computed, null when there's nothing to compare.
+   */
+  refCompare() {
+    const r = state.reference, s = state.scans.front, api = surfaceApi();
+    if (!r || !r.rgba || !r.usable || !s || !s.result || !api || typeof api.compareReference !== "function") return null;
+    const key = s.rev;
+    if (this.cmp && this.cmp.key === key && this.cmp.ref === r) return this.cmp.result;
+    if (this.cmpPending && this.cmpPending.key === key && this.cmpPending.ref === r) return undefined;
+    const job = { key, ref: r };
+    this.cmpPending = job;
+    setTimeout(() => {
+      if (this.cmpPending !== job) return;
+      let result;
+      try { result = api.compareReference(s.result.warped, s.margin, r.rgba); } catch (err) { result = { ok: false, reason: (err && err.message) || "The reference couldn't be compared." }; }
+      this.cmpPending = null;
+      if (state.reference !== r || !state.scans.front || state.scans.front.rev !== key) return;
+      this.cmp = { key, ref: r, result };
+      this.render();
+    }, 30);
+    return undefined;
+  },
+
   diffReference() {
     const r = state.reference;
     if (this.side !== "front") return { ok: false, why: "A reference image shows the card's front only." };
+    if (this.source !== "photo") return { ok: false, why: "Color difference compares the reference with the main photo." };
     if (!r) return { ok: false, why: "Needs a confirmed reference image: Card details → Find online, then confirm your card." };
     if (!r.rgba || !r.usable) return { ok: false, why: "The confirmed reference image can't be compared pixel by pixel." };
-    return { ok: true, reference: r.rgba };
+    const cmp = this.refCompare();
+    if (cmp === undefined) return { ok: false, why: "Lining up the reference image with your photo…" };
+    if (!cmp || !cmp.ok) return { ok: false, why: (cmp && cmp.reason) || "The reference image doesn't line up with this photo." };
+    return { ok: true, reference: cmp };
   },
 
   filterAvailable(kind) {
@@ -3491,17 +3530,18 @@ const sv = {
     this.filterBusy = true;
     this.filterError = "";
     const token = { card: state.cardRev, side: this.side, rev: src.rev, key };
-    const w = src.result.warped;
-    const opts = { kind, intensity: this.intensity / 100 };
-    if (kind === "difference") opts.reference = this.diffReference().reference;
-    // The scan's pixels are copied: a filter only ever produces a new image for this view.
-    runner().run("filter", { src: { width: w.width, height: w.height, data: new Uint8ClampedArray(w.data) }, options: opts }, { coalesceKey: "filter" })
+    // Only the newest request is kept (coalesced), so dragging the slider never queues stale previews. The scan
+    // is sent as a copy (never transferred): a filter only ever produces a new image for this view.
+    const payload = { src: src.result.warped, kind, intensity: this.intensity / 100 };
+    if (kind === "difference") payload.reference = this.diffReference().reference;
+    runner().run("filter", payload, { coalesceKey: "filter" })
       .then((out) => {
         if (token.card !== state.cardRev || this.pendingKey !== key) return;
         this.pendingKey = null;
         this.filterBusy = false;
         const cur = this.src();
         if (!cur || cur.rev !== token.rev) return;
+        if (out && out.unavailable) throw new Error(out.reason || "This filter isn't available for this photo.");
         const img = out && out.data ? out : out && out.image;
         if (!img || !img.data) throw new Error("The filter returned no image.");
         if (this.cache.size > 12) this.cache.delete(this.cache.keys().next().value);
@@ -3522,9 +3562,11 @@ const sv = {
     const side = this.side;
     const token = { card: state.cardRev, side, rev: src.rev, kind: src.kind };
     const base = src.kind === "photo" ? state.scans[side] : null;
+    // A reference that lines up with the photo lets printed structure be told apart from marks.
+    const cmp = side === "front" && src.kind === "photo" ? this.refCompare() : null;
     const options = {
       quality: base ? base.quality : null, check: base ? base.check : null, side, revision: src.rev,
-      reference: side === "front" && state.reference && state.reference.usable ? state.reference.rgba : null,
+      reference: cmp && cmp.ok ? cmp : null,
       maxCandidates: 12, timeBudgetMs: 4000,
     };
     if (side === "front" && state.reference && state.reference.usable && state.reference.rgba) {
@@ -3535,7 +3577,7 @@ const sv = {
     this.render();
     let res;
     try {
-      res = await runner().run("marks", { scan: src.result, options }, { coalesceKey: `marks-${side}` });
+      res = await runner().run("marks", { scan: src.result, ...options }, { coalesceKey: `marks-${side}`, supersede: true });
     } catch (err) {
       if (isStale(err)) return;
       res = { status: "error", candidates: [], cannotAssess: [], note: err && err.timeout ? "Looking for marks took too long. Try again." : (err && err.message) || "Mark finding failed." };
@@ -3676,6 +3718,7 @@ const sv = {
     else if (!fresh) status.textContent = m && m.rev !== src.rev ? "The photo changed, so earlier marks were cleared. Look again." : "Looks for spots that stand out from the card's print. Nothing is counted until you add it as a defect.";
     else if (running) status.textContent = "Looking for possible marks…";
     else if (m.status === "unavailable" || m.status === "error") status.textContent = m.note || "Mark finding isn't available.";
+    else if (m.status === "cannot_assess" && !m.candidates.length) status.textContent = m.note || "This photo can't show the surface well enough to look for marks. Retake it, or check the card in hand.";
     else if (!m.candidates.length) {
       status.textContent = "No visible marks found in this photo.";
       detail.hidden = false;
@@ -3693,7 +3736,7 @@ const sv = {
       }
     } else {
       const open = m.candidates.filter((c) => this.statusOf(c) === "pending").length;
-      status.textContent = `${m.candidates.length} possible mark${m.candidates.length === 1 ? "" : "s"} · ${open} to review. Detection confidence is an uncalibrated heuristic, not a measurement.${m.note ? ` ${m.note}` : ""}`;
+      status.textContent = `${m.candidates.length} possible mark${m.candidates.length === 1 ? "" : "s"} · ${open} to review. Detection confidence is an uncalibrated heuristic, not a measurement.${m.status === "timeout" ? " The search stopped at its time limit: run it again to finish." : ""}${m.note ? ` ${m.note}` : ""}`;
       m.candidates.forEach((c, i) => {
         const li = document.createElement("li");
         const b = document.createElement("button");
@@ -3767,6 +3810,8 @@ async function addAngledPhoto(side, file) {
     const scan = out.scan;
     // Only for looking at: it never changes centering, confidence, photo limits or grades.
     state.angled[side] = { status: "ready", img: canvasFromRGBA(scan.warped), result: scan, margin: scan.margin, width: scan.width, height: scan.height, rev: newRev() };
+    assessConfidence(side);   // the rating notes that angled light is available for this side
+    renderConfidence();
     toast(`Angled-light photo added for the ${side}. Switch to it in Inspect surface.`);
   } catch (err) {
     if (isStale(err)) return;

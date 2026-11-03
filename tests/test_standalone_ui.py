@@ -4,6 +4,10 @@ Covers: no horizontal overflow at phone widths, scan-confidence states, stale as
 de-duplicated card lookups with a deadline, compatibility with old History/backups (and the DINGS -> Defects
 wording), possible marks and filters never changing grades, and one end-to-end flow. Nothing leaves the machine:
 the harness aborts every network request.
+
+The scenarios run the build's real confidence.js, surface.js and scanworker.js (in a Web Worker). The front photo
+is a synthetic card with a drawn scratch, so surface.js finds real candidates. Only test_viewer_with_fixed_marks
+swaps in a fake Surface, to check the viewer against a fixed set of candidates.
 """
 
 from __future__ import annotations
@@ -19,11 +23,14 @@ from pathlib import Path
 import cv2
 import pytest
 
+import yaml
+
 from synthetic import make_card, make_swirl_back, place_on_background
 
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = Path(__file__).with_name("ui_harness.js")
 NODE = shutil.which("node")
+SURFACE_TYPES = {k for k, v in yaml.safe_load((ROOT / "cardgrader/criteria/defects.yaml").read_text())["types"].items() if "surface" in v["applies_to"]}
 
 
 def _node_path() -> str | None:
@@ -50,16 +57,21 @@ def app(tmp_path_factory):
         [sys.executable, str(ROOT / "scripts" / "build_standalone.py"), "--single", str(out / "lab.html"), "--site", str(out / "site")],
         check=True, capture_output=True, timeout=600,
     )
-    front = place_on_background(make_card(40, 34, 42, 44, seed=1), angle=2.0, seed=1)
+    # The same marked card as tests/test_standalone_surface.py: a plain patch, a light 2 px scratch, a dark dot.
+    card = make_card(40, 31, 44, 47, border_bgr=(40, 205, 245))
+    cv2.rectangle(card, (500, 760), (620, 880), (70, 60, 150), -1)
+    cv2.line(card, (250, 400), (420, 470), (225, 225, 225), 2)
+    cv2.circle(card, (560, 820), 3, (20, 20, 20), -1)
+    front = place_on_background(card, 3)
     back = place_on_background(make_swirl_back(38, 40, 40, 42, hidden=0.2, seed=2), angle=-1.5, seed=2)
     cv2.imwrite(str(out / "front.jpg"), front, [cv2.IMWRITE_JPEG_QUALITY, 92])
     cv2.imwrite(str(out / "back.jpg"), back, [cv2.IMWRITE_JPEG_QUALITY, 92])
     return out
 
 
-def run(app: Path, scenario: str) -> dict:
+def run(app: Path, scenario: str, page: str = "site/index.html") -> dict:
     res = subprocess.run(
-        [NODE, str(HARNESS), scenario, str(app / "site" / "index.html"), str(app / "front.jpg"), str(app / "back.jpg")],
+        [NODE, str(HARNESS), scenario, str(app / page), str(app / "front.jpg"), str(app / "back.jpg")],
         env={**os.environ, "NODE_PATH": NODE_PATH}, capture_output=True, text=True, timeout=900,
     )
     assert res.returncode == 0, res.stderr[-3000:]
@@ -152,17 +164,27 @@ def test_old_history_and_backups_still_load(app):
 def test_marks_and_filters_never_change_grades(app):
     r = run(app, "marks")
     assert r["unassessed0"] == ["front surface (photo can't show it)"]
-    assert "Detection confidence: Medium" in r["listText"] and "Detection confidence: Low" in r["listText"]
+    cands = r["candidates"]
+    assert cands, "surface.js should find the drawn scratch"
+    for c in cands:
+        assert c["method"] in ("local-ridge-v1", "border-colour-v1")
+        assert c["detection"] in ("low", "medium", "high")
+        assert set(c["suggestedTypes"]) <= SURFACE_TYPES
+    scratch = cands[0]
+    assert scratch["kind"] == "line" and "surface_scratch" in scratch["suggestedTypes"]
+    assert "Detection confidence:" in r["listText"]
     assert r["afterFind"] is True and r["afterFilters"] is True and r["afterDismissAndInHand"] is True
-    assert r["filterCalls"] >= 1
-    assert r["diffDisabled"] is True                           # no confirmed reference image
+    assert r["filterPreviews"] >= 4
+    assert r["diffDisabled"] is True and "reference" in r["diffWhy"].lower()   # no confirmed reference image
     assert "uncalibrated heuristic" in r["detail"]
-    assert r["sheetTypes"] == ["surface_scratch", "print_spot"]  # suggested types first; the user chooses
-    assert r["focusAfterSheet"].strip()                        # focus returns somewhere useful
+    # Suggested types come first and are marked; the user still chooses (here: surface scratch, moderate).
+    suggested = [t for t in scratch["suggestedTypes"] if t in SURFACE_TYPES]
+    assert r["sheetSuggested"] == suggested and r["sheetTypes"][: len(suggested)] == suggested
+    assert r["focusAfterSheet"].strip()
     d = r["defect"]
-    assert d["confirmed"] is True and d["side"] == "front" and d["location"] == "surface"
-    assert d["region"] == {"x": 0.4, "y": 0.3, "w": 0.05, "h": 0.04}
-    assert d["scan_revision"] and d["method"] == "local-contrast" and d["evidence"] == "A small light spot"
+    assert d["confirmed"] is True and d["side"] == "front" and d["location"] == "surface" and d["type"] == "surface_scratch"
+    assert d["region"] == {k: scratch[k] for k in ("x", "y", "w", "h")}
+    assert d["scan_revision"] and d["method"] == scratch["method"] and d["evidence"] == scratch["reason"][:200]
     # One accepted mark doesn't mark the surface as inspected.
     assert r["unassessed1"] == ["front surface (photo can't show it)"] and r["completeAfterAdd"] is False
     # Once checked in hand, the confirmed defect lowers the grade through the normal rules.
@@ -181,12 +203,28 @@ def test_marks_and_filters_never_change_grades(app):
     assert r["errors"] == []
 
 
-def test_end_to_end(app):
-    r = run(app, "e2e")
+def test_viewer_with_fixed_marks(app):
+    """The one scenario with a fake Surface: fixed candidates (medium and low) and a cannot-assess area."""
+    r = run(app, "fakemarks")
+    assert "Detection confidence: Medium" in r["listText"] and "Detection confidence: Low" in r["listText"]
+    assert r["cannot"] == 1
+    assert "uncalibrated heuristic" in r["detail"] and "A faint line" in r["detail"]
+    assert "Dismissed" in r["afterDismiss"]
+    assert r["unchanged"] is True
+    assert r["errors"] == []
+
+
+@pytest.mark.parametrize("page", ["site/index.html", "lab.html"])
+def test_end_to_end(app, page):
+    """Both builds; the artifact fragment is opened as a file too (the browser adds the document around it)."""
+    r = run(app, "e2e", page)
     assert r["steps"] == ["scanned", "offline identify", "marks", "graded", "reloaded", "restored"]
+    assert r["worker"]["mode"] == "worker", r["worker"]          # the real ScanWorker ran the jobs
+    assert r["marksStatus"]["status"] == "ok" and r["marksStatus"]["n"] >= 1
+    print(json.dumps({k: r[k] for k in ("msScanFront", "msScanBack", "msFilter", "msMarks")}))
     assert "You're offline" in r["offlineSheet"] and "Offline" in r["offlineRow"]
     assert r["focusBack"] == "open-details"                    # focus returns to the row that opened the sheet
-    assert "Added as a defect" in r["marksList"] and "Dismissed" in r["marksList"]
+    assert "Added as a defect" in r["marksList"]
     assert r["complete"] is True and "PSA" in r["grades"] and "Incomplete" not in r["grades"]
     assert "Test Card" in r["historyAfterReload"] and r["reloadedDefects"] == 1
     assert "Test Card" in r["historyAfterRestore"]

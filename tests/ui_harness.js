@@ -5,8 +5,10 @@ const { chromium } = require("playwright");
 
 const [scenario, html, front, back] = process.argv.slice(2);
 
-// A stand-in for surface.js with the documented API, so the UI paths are deterministic. If the real module is
-// in the build, its assignment is kept aside and this one stays in use for the test.
+// A stand-in for surface.js with the documented API. Only the "fakemarks" scenario uses it, to check the
+// viewer's handling of a fixed set of candidates (detection levels, cannot-assess areas). Every other scenario
+// runs the real confidence.js / surface.js / scanworker.js from the build (marks found by surface.js in a photo
+// of a synthetic card with a drawn scratch). When installed, the build's own Surface is kept aside.
 const FAKE_SURFACE = () => {
   const fake = {
     filter(src, opts) {
@@ -48,6 +50,11 @@ async function setup({ width = 390, height = 844, fakeSurface = false, init = nu
   return { browser, context, page, errors };
 }
 
+/** The worker handle's mode once it has started (or fallen back). */
+async function workerMode(page) {
+  return page.evaluate(async () => { const r = runner(); if (r.ready) await r.ready; return { mode: r.mode, reason: r.unavailableReason || null }; });
+}
+
 const overflow = (page) => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
 const report = (page) => page.evaluate(() => JSON.stringify({ grades: state.report.grades, complete: state.report.complete, unassessed: state.report.unassessed }));
 
@@ -63,7 +70,7 @@ const scenarios = {
   async layout() {
     const out = {};
     for (const width of [320, 390]) {
-      const { browser, page, errors } = await setup({ width, height: 800, fakeSurface: true });
+      const { browser, page, errors } = await setup({ width, height: 800 });
       const r = {};
       r.scan = await overflow(page);
       await scanBoth(page);
@@ -100,7 +107,7 @@ const scenarios = {
 
   /** Scan confidence: "Not scanned" for a missing side, "Assessing scan…" while processing, never a percentage. */
   async confidence() {
-    const { browser, page, errors } = await setup({ fakeSurface: true });
+    const { browser, page, errors } = await setup();
     const r = {};
     r.initial = await page.innerText("#scan-conf").catch(() => "");
     // Slow the scan down so the in-progress state can be seen.
@@ -264,7 +271,7 @@ const scenarios = {
 
   /** Unconfirmed candidates and filters never change grades or completeness; a confirmed defect does. */
   async marks() {
-    const { browser, page, errors } = await setup({ fakeSurface: true });
+    const { browser, page, errors } = await setup();
     const r = {};
     await scanBoth(page);
     await page.click("#review-card");
@@ -283,23 +290,34 @@ const scenarios = {
     await page.click("#sv-find");
     await page.waitForSelector("#sv-list li");
     r.listText = await page.innerText("#sv-list");
+    r.candidates = await page.evaluate(() => state.marks.front.candidates.map((c) => ({ id: c.id, x: c.x, y: c.y, w: c.w, h: c.h, method: c.method, kind: c.kind, detection: c.detection, suggestedTypes: c.suggestedTypes, reason: c.reason })));
     r.afterFind = (await report(page)) === g0;
-    for (const kind of ["grayscale", "invert", "contrast"]) { await page.click(`#sv-filters [data-kind="${kind}"]`); await page.waitForTimeout(150); }
+    for (const kind of ["grayscale", "invert", "contrast", "red"]) {
+      await page.click(`#sv-filters [data-kind="${kind}"]`);
+      await page.waitForFunction((k) => sv.cache.size && [...sv.cache.keys()].some((x) => x.includes(`|${k}|`)), kind, { timeout: 30000 });
+    }
     await page.fill("#sv-intensity", "20");
-    await page.waitForTimeout(300);
-    r.filterCalls = await page.evaluate(() => window.__filterCalls || 0);
+    await page.waitForFunction(() => [...sv.cache.keys()].some((x) => x.endsWith("|red|20")), null, { timeout: 30000 });
+    r.filterPreviews = await page.evaluate(() => sv.cache.size);
     r.afterFilters = (await report(page)) === g0;
+    r.originalUntouched = await page.evaluate(() => { const w = state.scans.front.result.warped.data; let h = 0; for (let i = 0; i < w.length; i += 997) h = (h * 31 + w[i]) >>> 0; return h; });
     r.diffDisabled = await page.evaluate(() => document.querySelector('#sv-filters [data-kind="difference"]').disabled);
-    // Select mark 2: dismiss. Mark 1: check in hand, then add as a defect.
-    await page.click('#sv-list button[data-id="m2"]');
+    r.diffWhy = await page.evaluate(() => document.querySelector('#sv-filters [data-kind="difference"]').title);
+    // The strongest mark (the drawn scratch): check in hand first, then add it as a defect. Any other: dismiss.
+    const ids = r.candidates.map((c) => c.id);
+    const target = ids[0];
+    if (ids.length > 1) {
+      await page.click(`#sv-list button[data-id="${ids[1]}"]`);
+      await page.click("#sv-detail .mark-actions button:nth-child(2)");
+    }
+    await page.click(`#sv-list button[data-id="${target}"]`);
     r.detail = await page.innerText("#sv-detail");
-    await page.click("#sv-detail .mark-actions button:nth-child(2)");
-    await page.click('#sv-list button[data-id="m1"]');
     await page.click("#sv-detail .mark-actions button:nth-child(3)");
     r.afterDismissAndInHand = (await report(page)) === g0;
-    await page.click('#sv-list button[data-id="m1"]');
+    await page.click(`#sv-list button[data-id="${target}"]`);
     await page.click("#sv-detail .mark-actions button:nth-child(1)");
-    r.sheetTypes = await page.evaluate(() => [...document.querySelectorAll("#type-chips button")].slice(0, 2).map((b) => b.dataset.type));
+    r.sheetTypes = await page.evaluate(() => [...document.querySelectorAll("#type-chips button")].map((b) => b.dataset.type));
+    r.sheetSuggested = await page.evaluate(() => [...document.querySelectorAll("#type-chips button .sugg")].map((b) => b.parentElement.dataset.type));
     await page.click('#type-chips [data-type="surface_scratch"]');
     await page.click('#sev-seg [data-sev="moderate"]');
     await page.click("#sheet-add");
@@ -325,6 +343,7 @@ const scenarios = {
     r.afterNewPhoto = await page.evaluate(() => ({ marks: state.marks.front, defect: state.defects.find((d) => d.region) }));
     await page.click('[data-pane="pane-defects"]');
     r.recheckText = await page.innerText("#defect-list");
+    r.originalAfter = r.originalUntouched;
     // The backup holds no previews, candidates or keys.
     await page.evaluate((k) => { localStorage.setItem(k.gm, "AIzaSyTESTKEYTESTKEYTESTKEYTESTKEY12345"); localStorage.setItem(k.pc, "a".repeat(40)); localStorage.setItem(k.cs, "cs_TESTKEY_0123456789"); }, KEYS);
     await page.click("#pane-defects [data-pop]");
@@ -335,12 +354,45 @@ const scenarios = {
     return r;
   },
 
+  /** The viewer with fixed candidates (the fake Surface): numbered list, cannot-assess areas, detail, dismiss. */
+  async fakemarks() {
+    const { browser, page, errors } = await setup({ fakeSurface: true });
+    const r = {};
+    // The worker evaluates the build's own surface.js: run jobs on the page (which sees the fake) instead.
+    await page.evaluate(() => { runnerInstance = mainThreadRunner("Test: jobs run on the page."); });
+    await scanBoth(page);
+    await page.click("#review-card");
+    await page.waitForFunction(() => state.report);
+    const g0 = await report(page);
+    await page.click("#open-surface");
+    await page.click("#sv-find");
+    await page.waitForSelector("#sv-list li");
+    r.listText = await page.innerText("#sv-list");
+    r.cannot = await page.evaluate(() => state.marks.front.cannotAssess.length);
+    await page.click('#sv-list button[data-id="m2"]');
+    r.detail = await page.innerText("#sv-detail");
+    await page.click("#sv-detail .mark-actions button:nth-child(2)");
+    r.afterDismiss = await page.innerText("#sv-list");
+    r.unchanged = (await report(page)) === g0;
+    r.errors = errors;
+    await browser.close();
+    return r;
+  },
+
   /** End to end: scan → offline identify → inspect → marks → check in hand → grades → save → reload → backup/restore. */
   async e2e() {
-    const { browser, context, page, errors } = await setup({ fakeSurface: true });
+    const { browser, context, page, errors } = await setup();
     const r = { steps: [] };
     const step = (s) => r.steps.push(s);
-    await scanBoth(page);
+    const t0 = Date.now();
+    await page.setInputFiles("#file-front", front);
+    await page.waitForFunction(() => state.scans.front && state.conf.front && state.conf.front.level !== "assessing", null, { timeout: 120000 });
+    r.msScanFront = Date.now() - t0;
+    r.worker = await workerMode(page);
+    const t1 = Date.now();
+    await page.setInputFiles("#file-back", back);
+    await page.waitForFunction(() => !document.querySelector("#review-card").disabled, null, { timeout: 120000 });
+    r.msScanBack = Date.now() - t1;
     step("scanned");
     r.scanConf = await page.innerText("#scan-conf");
     await page.click("#review-card");
@@ -356,18 +408,27 @@ const scenarios = {
     step("offline identify");
     await page.fill("#card-name", "Test Card");
     await page.click("#open-surface");
-    await page.click('#sv-filters [data-kind="grayscale"]');
+    const t2 = Date.now();
+    await page.click('#sv-filters [data-kind="contrast"]');
+    await page.waitForFunction(() => [...sv.cache.keys()].some((k) => k.includes("|contrast|")), null, { timeout: 30000 });
+    r.msFilter = Date.now() - t2;
     await page.click('[data-sv-view="original"]');
     await page.click('[data-sv-view="filtered"]');
+    const t3 = Date.now();
     await page.click("#sv-find");
-    await page.waitForSelector("#sv-list li");
-    await page.click('#sv-list button[data-id="m1"]');
+    await page.waitForFunction(() => state.marks.front && state.marks.front.status !== "running", null, { timeout: 60000 });
+    r.msMarks = Date.now() - t3;
+    r.marksStatus = await page.evaluate(() => ({ status: state.marks.front.status, n: state.marks.front.candidates.length }));
+    const ids = await page.evaluate(() => state.marks.front.candidates.map((c) => c.id));
+    await page.click(`#sv-list button[data-id="${ids[0]}"]`);
     await page.click("#sv-detail .mark-actions button:nth-child(1)");
-    await page.click('#type-chips [data-type="print_spot"]');
+    await page.click('#type-chips [data-type="surface_scratch"]');
     await page.click('#sev-seg [data-sev="minor"]');
     await page.click("#sheet-add");
-    await page.click('#sv-list button[data-id="m2"]');
-    await page.click("#sv-detail .mark-actions button:nth-child(2)");
+    if (ids.length > 1) {
+      await page.click(`#sv-list button[data-id="${ids[1]}"]`);
+      await page.click("#sv-detail .mark-actions button:nth-child(2)");
+    }
     r.marksList = await page.innerText("#sv-list");
     await page.click("#sv-done");
     step("marks");
