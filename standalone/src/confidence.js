@@ -23,7 +23,9 @@
  *   level: "high" | "medium" | "low" | "cannot_assess" | "not_scanned" | "assessing",
  *   label: "High" | "Medium" | "Low" | "Cannot assess" | "Not scanned" | "Assessing scan…",
  *   areas: { outline, centering, corners_edges, surface_visibility }: each {level, reason}
- *          (centering adds unread: ["lr"|"tb"]; corners_edges adds blocked: ["top edge", "top-right corner", ...]),
+ *          (additions: outline.adjusted; centering.unread: ["lr"|"tb"]; corners_edges.blocked: ["top edge",
+ *          "top-right corner", ...], corners_edges.groups: {reason: [where]}, corners_edges.photoFailure;
+ *          surface_visibility.limited),
  *   surfaceLimited: bool, summary: one plain sentence, reasons: [string],
  *   actions: [{id: "retake" | "adjust_outline" | "angled_light", label}],
  *   covered: [area ids the overall level speaks for], notCovered: [area ids it can't speak for],

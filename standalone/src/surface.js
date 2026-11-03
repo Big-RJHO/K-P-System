@@ -20,7 +20,7 @@
  *   Never mutates src; always returns a new image. Unknown kind -> throws. Cost is O(pixels) (two box passes for
  *   "contrast"); pass the same `cache` object ({}) between calls to reuse its float buffers.
  *
- * ---------------------------------------------------------------- 2. compareReference(scanWarped, margin, refRgba, opts)
+ * ---------------------------------------------------------------- 2. compareReference(scanWarped, margin, refRgba)
  *   -> {ok, reason, aligned, correlation, shift: {dx, dy}, exposure: {gain: [r,g,b], offset: [r,g,b]}, coverage}
  *   Trims a plain background off the reference, checks it is card-shaped, resizes it into the card box of the
  *   warp, then aligns it by a coarse-to-fine shift search (64 px wide, then 1/4, then full resolution; shifts only,
@@ -33,10 +33,12 @@
  *
  * ---------------------------------------------------------------- 3. findMarks(scan, opts)
  *   opts: {quality, check, side, revision, printedMask, reference, maxCandidates: 12, timeBudgetMs: 1500,
- *          analysisMaxSide: 1100, cache}
+ *          analysisMaxSide: 1100, cache, debug}     (cache / debug are additions; reference = a compareReference
+ *          result, or a raw reference image, which is then aligned here first)
  *   -> {status: "ok" | "timeout" | "cannot_assess", candidates: [Candidate], cannotAssess: [{x, y, w, h, reason}],
  *       note, recoverable (timeout: true), stats: {threshold, analysisScale, elapsedMs, rawComponents,
- *       rejected: {...counts by reason}, truncated}}                               (recoverable / stats are additions)
+ *       rejected: {...counts by reason}, truncated, textureTiles, debug? (with opts.debug: the rejected marks)}}
+ *       (recoverable / stats are additions; cannotAssess boxes are 0..1 card coordinates like candidates)
  *   Candidate = {id, side, revision, method, kind: "line" | "spot" | "discoloration", x, y, w, h (0..1 of the card,
  *     the card being the warp inside the margin), score (0..1 heuristic strength, NOT a probability),
  *     detection: "low" | "medium" | "high", detectionNote, reason, suggestedTypes: [defects.yaml ids],
@@ -59,7 +61,8 @@
  *     - "boundary": a line whose two sides differ (it runs along the edge between two printed areas: artwork
  *       structure, text outline, JPEG ringing) and a dot whose surroundings aren't plain;
  *     - "cluster": a mark with several others within clusterRadiusMm (printed text, patterns, foil sparkle);
- *       tiles full of such marks are reported in cannotAssess ("busy print" or, colourful, "foil / holo texture");
+ *       ~4 mm tiles full of such marks are reported in cannotAssess: "foil / holo texture" when most of the marks
+ *       are tiny light specks or colour changes everywhere (sparkle, shimmer), otherwise "busy print" (text, pattern);
  *     - "reference": the same structure in the aligned reference image (printed, not damage);
  *     - "reflection": a long, straight, colourless light line, or a light line on a broad light band (sleeve or
  *       slab reflection, light streak); thresholds go up by sleeveBoost when quality saw a sleeve;
@@ -329,7 +332,7 @@
     return best;
   }
 
-  function compareReference(scanWarped, margin, refRgba, opts = {}) {
+  function compareReference(scanWarped, margin, refRgba) {
     const fail = (reason, extra) => Object.assign({ ok: false, reason, aligned: null }, extra || {});
     if (!validImg(scanWarped)) return fail("The scan image is missing or malformed.");
     if (!validImg(refRgba)) return fail("The reference image is missing or malformed.");
@@ -394,7 +397,6 @@
         covered++;
       }
     }
-    void opts;
     return { ok: true, reason: null, aligned, correlation: r3(r), shift: { dx, dy }, exposure: { gain: gain.map(r3), offset: offset.map(r2) }, coverage: r3(covered / (cw * ch)) };
   }
 
@@ -701,7 +703,7 @@
       if (Math.abs(R[i]) >= lo) tilePx[t]++;
       if (x + 1 < aw && y + 1 < ah) tileHF[t] += Math.abs(CB[i] - CB[i + 1]) + Math.abs(CR[i] - CR[i + 1]) + Math.abs(CB[i] - CB[i + aw]) + Math.abs(CR[i] - CR[i + aw]);
     }
-    const tileFlag = new Uint8Array(tw * th);  // 1 busy print, 2 foil-like (colourful)
+    const tileFlag = new Uint8Array(tw * th);  // 1 busy print, 2 foil-like (specks / colour shimmer)
     for (let t = 0; t < tw * th; t++) {
       const nv = tileValid[t];
       if (nv < 0.25 * (ts * ts) / 4) continue;
