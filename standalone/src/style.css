@@ -203,7 +203,7 @@ label:focus-within:has(.file-hidden:focus-visible) { outline: 3px solid var(--ac
 
 .seg { display: flex; padding: 2px; border-radius: 10px; background: var(--fill); gap: 2px; margin: 0 0 12px; }
 .seg button {
-  flex: 1; min-width: 0; min-height: 40px; border: 0; border-radius: 8px; background: none; color: var(--ink);
+  flex: 1; min-width: 0; min-height: 44px; border: 0; border-radius: 8px; background: none; color: var(--ink);
   font-size: 0.9375rem; font-weight: 500; padding: 0 6px;
 }
 .seg button[aria-checked="true"], .seg button[aria-selected="true"], .seg button[aria-pressed="true"], .seg button.active {
@@ -525,7 +525,7 @@ label:focus-within:has(.file-hidden:focus-visible) { outline: 3px solid var(--ac
   #viewer-canvas { max-width: 340px; }
   .content.review { max-width: 1120px; display: grid; grid-template-columns: minmax(340px, 440px) minmax(0, 1fr); gap: 0 32px; align-items: start; }
   .content.review > .banner { grid-column: 1 / -1; }
-  .review-media { position: sticky; top: calc(56px + var(--safe-t)); }
+  .review-media { position: sticky; top: calc(56px + var(--safe-t)); max-height: calc(100vh - 56px - var(--safe-t) - var(--tabbar-h)); overflow-y: auto; overscroll-behavior: contain; }
   .review-rows > .group:first-child { margin-top: 0; }
 }
 

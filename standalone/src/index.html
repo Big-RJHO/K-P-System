@@ -40,28 +40,28 @@
         <div class="slot" data-side="front">
           <div class="slot-frame">
             <img class="slot-img" alt="Front photo, flattened" hidden>
-            <span class="slot-empty" aria-hidden="true"><svg class="ic"><use href="#i-scan"/></svg></span>
+            <span class="slot-empty" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-scan"/></svg></span>
             <span class="slot-busy" role="status">Measuring…</span>
           </div>
           <p class="slot-label"><b>Front</b> <span class="slot-meta">No photo</span></p>
           <div class="slot-actions">
-            <label class="btn tinted" for="camera-front"><svg class="ic"><use href="#i-camera"/></svg><span>Camera</span>
+            <label class="btn tinted" for="camera-front"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg><span>Camera</span>
               <input type="file" id="camera-front" accept="image/*" capture="environment" class="file-hidden"></label>
-            <label class="btn tinted" for="file-front"><svg class="ic"><use href="#i-photos"/></svg><span>Photos</span>
+            <label class="btn tinted" for="file-front"><svg class="ic" aria-hidden="true"><use href="#i-photos"/></svg><span>Photos</span>
               <input type="file" id="file-front" accept="image/*" class="file-hidden"></label>
           </div>
         </div>
         <div class="slot" data-side="back">
           <div class="slot-frame">
             <img class="slot-img" alt="Back photo, flattened" hidden>
-            <span class="slot-empty" aria-hidden="true"><svg class="ic"><use href="#i-scan"/></svg></span>
+            <span class="slot-empty" aria-hidden="true"><svg class="ic" aria-hidden="true"><use href="#i-scan"/></svg></span>
             <span class="slot-busy" role="status">Measuring…</span>
           </div>
           <p class="slot-label"><b>Back</b> <span class="slot-meta">No photo</span></p>
           <div class="slot-actions">
-            <label class="btn tinted" for="camera-back"><svg class="ic"><use href="#i-camera"/></svg><span>Camera</span>
+            <label class="btn tinted" for="camera-back"><svg class="ic" aria-hidden="true"><use href="#i-camera"/></svg><span>Camera</span>
               <input type="file" id="camera-back" accept="image/*" capture="environment" class="file-hidden"></label>
-            <label class="btn tinted" for="file-back"><svg class="ic"><use href="#i-photos"/></svg><span>Photos</span>
+            <label class="btn tinted" for="file-back"><svg class="ic" aria-hidden="true"><use href="#i-photos"/></svg><span>Photos</span>
               <input type="file" id="file-back" accept="image/*" class="file-hidden"></label>
           </div>
         </div>
@@ -80,8 +80,8 @@
       <ul class="group tips" id="tips" aria-label="Photo tips"></ul>
 
       <div class="group">
-        <button type="button" class="row row-btn" id="resume" hidden><span class="row-main"><span class="row-title" id="resume-text">Resume last card</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
-        <button type="button" class="row row-btn" id="try-example"><span class="row-main"><span class="row-title">See an example card</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+        <button type="button" class="row row-btn" id="resume" hidden><span class="row-main"><span class="row-title" id="resume-text">Resume last card</span></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+        <button type="button" class="row row-btn" id="try-example"><span class="row-main"><span class="row-title">See an example card</span></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
       </div>
     </div>
   </section>
@@ -89,13 +89,13 @@
   <!-- ============ REVIEW ============ -->
   <section class="screen" id="report-screen" aria-labelledby="report-title" hidden>
     <header class="navbar">
-      <span class="nav-side"><button type="button" class="nav-btn back" id="back-to-scan"><svg class="ic"><use href="#i-back"/></svg><span>Scan</span></button></span>
+      <span class="nav-side"><button type="button" class="nav-btn back" id="back-to-scan"><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>Scan</span></button></span>
       <h1 class="nav-title" id="report-title">Review</h1>
       <span class="nav-side end"><button type="button" class="nav-btn strong" id="save-card">Save</button></span>
     </header>
     <div class="content review">
       <div class="banner" id="example-note" hidden>
-        <svg class="ic"><use href="#i-info"/></svg>
+        <svg class="ic" aria-hidden="true"><use href="#i-info"/></svg>
         <span>This is an example card.</span>
         <button type="button" class="btn plain" id="scan-own">Scan my card</button>
       </div>
@@ -115,7 +115,7 @@
             <span>Overlay</span>
           </label>
           <div class="conf-review" id="review-conf"></div>
-          <button type="button" class="btn tinted wide" id="open-surface"><svg class="ic"><use href="#i-loupe"/></svg><span>Inspect surface</span></button>
+          <button type="button" class="btn tinted wide" id="open-surface"><svg class="ic" aria-hidden="true"><use href="#i-loupe"/></svg><span>Inspect surface</span></button>
         </div>
       </div>
 
@@ -124,34 +124,34 @@
           <label class="row field-row" for="card-name"><span class="row-label">Name</span><input id="card-name" placeholder="Name this card" autocomplete="off"></label>
           <button type="button" class="row row-btn" id="open-details" aria-haspopup="dialog">
             <span class="row-main"><span class="row-title">Card details</span><span class="row-sub" id="identity-sub"></span><span class="row-sub status" id="id-row-status"></span></span>
-            <span class="row-value" id="game-chip"></span><svg class="ic chev"><use href="#i-chevron"/></svg>
+            <span class="row-value" id="game-chip"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg>
           </button>
         </div>
 
         <h2 class="group-title">Estimated grades</h2>
         <div class="group" id="estimates">
           <div class="row notice" id="score-missing" hidden>
-            <svg class="ic"><use href="#i-warn"/></svg>
+            <svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg>
             <span class="row-main"><span class="row-title">Incomplete: best case, not a grade</span><span class="row-sub">Not checked yet: <span id="score-missing-list"></span>.</span>
               <button type="button" class="btn plain inline" id="go-checklist">Open checklist</button></span>
           </div>
           <div id="tiles"></div>
-          <button type="button" class="row row-btn" id="open-subgrades"><span class="row-main"><span class="row-title">Subgrades and breakdowns</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" id="open-subgrades"><span class="row-main"><span class="row-title">Subgrades and breakdowns</span></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
           <div class="row"><span class="row-main"><span class="row-title">Rank in History</span></span><span class="row-value num" id="rank-value">—</span></div>
         </div>
         <p class="footnote" id="best-line"></p>
 
         <h2 class="group-title">Condition</h2>
         <div class="group">
-          <button type="button" class="row row-btn" data-pane="pane-centering"><span class="row-main"><span class="row-title">Centering</span></span><span class="row-value num" id="centering-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
-          <button type="button" class="row row-btn" data-pane="pane-edges"><span class="row-main"><span class="row-title">Corners &amp; edges</span></span><span class="row-value" id="scancheck-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
-          <button type="button" class="row row-btn" data-pane="pane-surface"><span class="row-main"><span class="row-title">Surface</span></span><span class="row-value" id="surface-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
-          <button type="button" class="row row-btn" data-pane="pane-defects"><span class="row-main"><span class="row-title">Defects &amp; checklist</span></span><span class="row-value" id="defect-summary"></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="pane-centering"><span class="row-main"><span class="row-title">Centering</span></span><span class="row-value num" id="centering-summary"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="pane-edges"><span class="row-main"><span class="row-title">Corners &amp; edges</span></span><span class="row-value" id="scancheck-summary"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="pane-surface"><span class="row-main"><span class="row-title">Surface</span></span><span class="row-value" id="surface-summary"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="pane-defects"><span class="row-main"><span class="row-title">Defects &amp; checklist</span></span><span class="row-value" id="defect-summary"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
         </div>
 
         <h2 class="group-title">Prices</h2>
         <div class="group">
-          <button type="button" class="row row-btn" data-pane="prices-panel"><span class="row-main"><span class="row-title">Prices</span><span class="row-sub" id="prices-summary"></span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+          <button type="button" class="row row-btn" data-pane="prices-panel"><span class="row-main"><span class="row-title">Prices</span><span class="row-sub" id="prices-summary"></span></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
         </div>
 
         <p class="footnote" id="disclaimer"></p>
@@ -165,7 +165,7 @@
   <!-- ============ DETAIL: CENTERING ============ -->
   <section class="screen pane" id="pane-centering" aria-labelledby="pc-title" hidden>
     <header class="navbar">
-      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>Review</span></button></span>
       <h1 class="nav-title" id="pc-title">Centering</h1>
       <span class="nav-side end"></span>
     </header>
@@ -205,7 +205,7 @@
   <!-- ============ DETAIL: CORNERS & EDGES ============ -->
   <section class="screen pane" id="pane-edges" aria-labelledby="pe-title" hidden>
     <header class="navbar">
-      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>Review</span></button></span>
       <h1 class="nav-title" id="pe-title">Corners &amp; edges</h1>
       <span class="nav-side end"></span>
     </header>
@@ -224,7 +224,7 @@
   <!-- ============ DETAIL: SURFACE ============ -->
   <section class="screen pane" id="pane-surface" aria-labelledby="ps-title" hidden>
     <header class="navbar">
-      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>Review</span></button></span>
       <h1 class="nav-title" id="ps-title">Surface</h1>
       <span class="nav-side end"></span>
     </header>
@@ -235,8 +235,8 @@
       </div>
       <p class="footnote">A flat photo can't show the surface (creases, dents, stains, scuffs, scratches, print lines). Inspect the photo for clues, then check the card in hand under angled light.</p>
       <div class="group">
-        <button type="button" class="row row-btn" id="pane-open-surface"><svg class="ic lead"><use href="#i-loupe"/></svg><span class="row-main"><span class="row-title">Inspect surface</span><span class="row-sub" id="marks-summary"></span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
-        <label class="row row-btn" for="angled-file"><svg class="ic lead"><use href="#i-light"/></svg><span class="row-main"><span class="row-title">Add angled-light photo</span><span class="row-sub" id="angled-status">Optional. Helps you spot marks; it doesn't change centering or grades.</span></span>
+        <button type="button" class="row row-btn" id="pane-open-surface"><svg class="ic lead" aria-hidden="true"><use href="#i-loupe"/></svg><span class="row-main"><span class="row-title">Inspect surface</span><span class="row-sub" id="marks-summary"></span></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+        <label class="row row-btn" for="angled-file"><svg class="ic lead" aria-hidden="true"><use href="#i-light"/></svg><span class="row-main"><span class="row-title">Add angled-light photo</span><span class="row-sub" id="angled-status">Optional. Helps you spot marks; it doesn't change centering or grades.</span></span>
           <input type="file" id="angled-file" accept="image/*" class="file-hidden"></label>
       </div>
       <div id="surface-check"></div>
@@ -250,7 +250,7 @@
   <!-- ============ DETAIL: DEFECTS & CHECKLIST ============ -->
   <section class="screen pane" id="pane-defects" aria-labelledby="pd-title" hidden>
     <header class="navbar">
-      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>Review</span></button></span>
       <h1 class="nav-title" id="pd-title">Defects</h1>
       <span class="nav-side end"></span>
     </header>
@@ -275,7 +275,7 @@
   <!-- ============ DETAIL: PRICES ============ -->
   <section class="screen pane" id="prices-panel" aria-labelledby="pp-title" hidden>
     <header class="navbar">
-      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>Review</span></button></span>
       <h1 class="nav-title" id="pp-title">Prices</h1>
       <span class="nav-side end"><button type="button" class="nav-btn" id="refresh-prices">Update</button></span>
     </header>
@@ -299,7 +299,7 @@
         </div>
       </div>
       <div class="group">
-        <button type="button" class="row row-btn" data-goto="settings"><span class="row-main"><span class="row-title accent">API keys in Settings</span></span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
+        <button type="button" class="row row-btn" data-goto="settings"><span class="row-main"><span class="row-title accent">API keys in Settings</span></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></button>
       </div>
     </div>
   </section>
@@ -307,7 +307,7 @@
   <!-- ============ DETAIL: SUBGRADES & BREAKDOWNS ============ -->
   <section class="screen pane" id="pane-company" aria-labelledby="pb-title" hidden>
     <header class="navbar">
-      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic"><use href="#i-back"/></svg><span>Review</span></button></span>
+      <span class="nav-side"><button type="button" class="nav-btn back" data-pop><svg class="ic" aria-hidden="true"><use href="#i-back"/></svg><span>Review</span></button></span>
       <h1 class="nav-title" id="pb-title">Breakdowns</h1>
       <span class="nav-side end"></span>
     </header>
@@ -353,7 +353,7 @@
       <p class="footnote">Keys stay on this device. They're never included in backups, History or drafts, and each is only sent to its own service.</p>
       <div class="group">
         <details class="row-details" id="gm-settings">
-          <summary class="row row-btn"><span class="row-main"><span class="row-title">Gemini</span><span class="row-sub">Card reading and web price search</span></span><span class="row-value" id="gm-state"></span><svg class="ic chev"><use href="#i-chevron"/></svg></summary>
+          <summary class="row row-btn"><span class="row-main"><span class="row-title">Gemini</span><span class="row-sub">Card reading and web price search</span></span><span class="row-value" id="gm-state"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
           <div class="details-body">
             <p class="footnote tight">With this key, Gemini reads your card from the front photo (free; the photo is sent to Google, and on Google's free tier it may be used to improve their products). Web search asks Gemini what this card recently sold for, and shows the sources. Get a key at aistudio.google.com. Google only allows web search on keys with billing turned on (5,000 searches a month are then free; each card search uses a few, plus a fraction of a cent). Results aren't saved, as Google's terms require.</p>
             <label for="gm-key" class="field">Gemini API key<input id="gm-key" type="password" autocomplete="off" spellcheck="false" placeholder="AQ.… or AIza…"></label>
@@ -366,7 +366,7 @@
           </div>
         </details>
         <details class="row-details" id="pc-settings">
-          <summary class="row row-btn"><span class="row-main"><span class="row-title">PriceCharting</span><span class="row-sub">Graded prices (paid subscription)</span></span><span class="row-value" id="pc-state"></span><svg class="ic chev"><use href="#i-chevron"/></svg></summary>
+          <summary class="row row-btn"><span class="row-main"><span class="row-title">PriceCharting</span><span class="row-sub">Graded prices (paid subscription)</span></span><span class="row-value" id="pc-state"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
           <div class="details-body">
             <p class="footnote tight">Graded prices come from PriceCharting's API, which needs your own paid PriceCharting subscription. Paste the 40-character token from its Subscription page (API/Download). It's only sent to pricecharting.com. PriceCharting licenses this data for your own use.</p>
             <label for="pc-token" class="field">API token<input id="pc-token" type="password" autocomplete="off" spellcheck="false" placeholder="40 letters and digits"></label>
@@ -378,7 +378,7 @@
           </div>
         </details>
         <details class="row-details" id="cs-settings">
-          <summary class="row row-btn"><span class="row-main"><span class="row-title">CardSight</span><span class="row-sub">Recent sales, Pokémon</span></span><span class="row-value" id="cs-state"></span><svg class="ic chev"><use href="#i-chevron"/></svg></summary>
+          <summary class="row row-btn"><span class="row-main"><span class="row-title">CardSight</span><span class="row-sub">Recent sales, Pokémon</span></span><span class="row-value" id="cs-state"></span><svg class="ic chev" aria-hidden="true"><use href="#i-chevron"/></svg></summary>
           <div class="details-body">
             <p class="footnote tight">Recent sales come from CardSight AI with your own API key (free plan: 750 calls a month, no charges; each card lookup uses 2, and answers are kept for a day). It's only sent to CardSight. CardSight's terms don't allow sharing the key.</p>
             <label for="cs-key" class="field">CardSight API key<input id="cs-key" type="password" autocomplete="off" spellcheck="false" placeholder="Your CardSight key"></label>
@@ -409,9 +409,9 @@
   </section>
 
   <nav class="tabbar" aria-label="Main">
-    <button type="button" data-tab="scan" aria-current="page"><svg class="ic"><use href="#i-scan"/></svg><span>Scan</span></button>
-    <button type="button" data-tab="history"><svg class="ic"><use href="#i-history"/></svg><span>History</span></button>
-    <button type="button" data-tab="settings"><svg class="ic"><use href="#i-settings"/></svg><span>Settings</span></button>
+    <button type="button" data-tab="scan" aria-current="page"><svg class="ic" aria-hidden="true"><use href="#i-scan"/></svg><span>Scan</span></button>
+    <button type="button" data-tab="history"><svg class="ic" aria-hidden="true"><use href="#i-history"/></svg><span>History</span></button>
+    <button type="button" data-tab="settings"><svg class="ic" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span></button>
   </nav>
 </div>
 
@@ -533,7 +533,7 @@
         <label class="slider-row" for="sv-intensity" id="sv-intensity-row"><span>Intensity</span><input type="range" id="sv-intensity" min="0" max="100" value="60"><span class="num" id="sv-intensity-val">60</span></label>
       </div>
       <div class="sv-marks">
-        <button type="button" class="btn filled wide" id="sv-find"><svg class="ic"><use href="#i-loupe"/></svg><span>Find possible marks</span></button>
+        <button type="button" class="btn filled wide" id="sv-find"><svg class="ic" aria-hidden="true"><use href="#i-loupe"/></svg><span>Find possible marks</span></button>
         <p class="footnote tight status" id="sv-status" role="status"></p>
         <ol class="group mark-list" id="sv-list"></ol>
         <div class="mark-detail" id="sv-detail" hidden></div>
