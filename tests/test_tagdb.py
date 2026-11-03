@@ -202,6 +202,16 @@ def test_evicted_cache_keeps_stored_records(db):
     assert run("--root", root, "verify") == 0
 
 
+def test_excluded_certs_leave_the_store(db):
+    root, orig = db
+    assert "T0010000" in {r["cert"] for r in build(root, orig)}
+    (root / "excluded.txt").write_text("# cert reason\nT0010000 same artwork as a dev card\n")
+    recs = build(root, orig)   # excluded although its folder, its list entry and its old record are all still there
+    assert "T0010000" not in {r["cert"] for r in recs} and len(recs) == 22
+    assert run("--root", root, "split") == 0
+    assert "T0010000" not in json.dumps(json.loads((root / "splits.json").read_text())["membership"])
+
+
 def test_grouped_split_has_no_leakage(db):
     root, orig = db
     recs = build(root, orig)

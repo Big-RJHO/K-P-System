@@ -170,8 +170,21 @@ def read_list(p: Path) -> list[str]:
     return [c for c in p.read_text().split() if c] if p.exists() else []
 
 
+def excluded_certs(root: Path) -> dict[str, str]:
+    """ROOT/excluded.txt: "CERT reason..." per line. Excluded certs are left out of the store, every pool and split
+    (for example a test cert whose artwork matches a dev card); the reason stays on record in that file."""
+    p = root / "excluded.txt"
+    out = {}
+    for line in (p.read_text().splitlines() if p.exists() else []):
+        if line.strip() and not line.lstrip().startswith("#"):
+            cert, _, why = line.strip().partition(" ")
+            out[cert] = why.strip()
+    return out
+
+
 def pool_certs(root: Path) -> dict[str, str]:
-    """cert -> pool, from the cert lists and the per-pool image directories. A cert in both pools is an error."""
+    """cert -> pool, from the cert lists and the per-pool image directories. A cert in both pools is an error.
+    Certs in excluded.txt are left out."""
     found = {"dev": set(read_list(root / "dev_certs.txt")), "test": set()}
     for f in sorted(root.glob("test_*certs.txt")):
         found["test"].update(read_list(f))
@@ -184,7 +197,8 @@ def pool_certs(root: Path) -> dict[str, str]:
     bad = [c for s in found.values() for c in s if not CERT_RE.match(c)]
     if bad:
         raise Fail(f"malformed certs in lists: {bad[:10]}")
-    return {c: pool for pool, s in found.items() for c in s}
+    excluded = excluded_certs(root)
+    return {c: pool for pool, s in found.items() for c in s if c not in excluded}
 
 
 # ---------------------------------------------------------------- build
@@ -338,7 +352,10 @@ def cmd_build(a) -> int:
                 if im.get("sha256") and im.get("phash"):
                     prev[im["sha256"]] = {k: im[k] for k in ("width", "height", "phash")}
     pv = parser_version()
+    excluded = excluded_certs(root)
     for c, r in prev_recs.items():
+        if c in excluded:
+            continue
         if c not in pools:   # a cert stays in the store once recorded, even if its list entry and cache are gone
             pools[c] = r["pool"]
     certs = sorted(pools)
@@ -349,7 +366,7 @@ def cmd_build(a) -> int:
     write_atomic(root / "certs.jsonl", "".join(dumps(r) + "\n" for r in recs))
     by = Counter(r["pool"] for r in recs)
     print(f"wrote {root / 'certs.jsonl'}: {len(recs)} records ({dict(sorted(by.items()))}); "
-          f"{len(pending)} listed certs without a report yet; parser {pv}")
+          f"{len(pending)} listed certs without a report yet; {len(excluded)} excluded; parser {pv}")
     changed = [r["cert"] for r in recs if r["report_changed_on_refetch"]]
     if changed:
         print(f"reports changed on refetch: {len(changed)} e.g. {changed[:5]}")
