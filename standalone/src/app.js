@@ -2895,7 +2895,12 @@ function closeDialog(sel) {
   updateInert();
   const o = dialogOpeners[sel];
   dialogOpeners[sel] = null;
-  if (o && o.isConnected && !o.closest("[hidden]")) o.focus({ preventScroll: true });
+  if (o && o.isConnected && !o.closest("[hidden]")) { o.focus({ preventScroll: true }); return; }
+  // The opener was redrawn meanwhile: focus the equivalent place in what's now on top.
+  const top = topDialog();
+  const scope = top ? $(top) : $(`#${currentScreenId()}`);
+  const target = scope && ($('[aria-pressed="true"]', scope) || $(".nav-title", scope));
+  if (target) { if (target.classList.contains("nav-title")) target.tabIndex = -1; target.focus({ preventScroll: true }); }
 }
 
 function topDialog() {
@@ -3707,6 +3712,11 @@ const sv = {
       });
       const sel = m.candidates.find((c) => c.id === this.selected);
       if (sel) this.renderDetail(sel, m.candidates.indexOf(sel), src);
+    }
+    // Redrawing replaced the focused control: keep keyboard focus on the selected mark.
+    if (topDialog() === "#surface-viewer" && (!document.activeElement || document.activeElement === document.body)) {
+      const f = $('#sv-list [aria-pressed="true"]') || $("#sv-find");
+      if (f) f.focus({ preventScroll: true });
     }
     $("#sv-runner-note").hidden = !(runnerInstance && runnerInstance.mode === "main-thread");
     $("#sv-runner-note").textContent = runnerInstance ? runnerInstance.unavailableReason || "" : "";
