@@ -14,6 +14,8 @@
 
   const CARD_W = 750, CARD_H = 1048;  // 63 x 88 mm at ~300 dpi
   const MARGIN = 48;                  // px of surrounding photo kept around the card (room to drag the edge guides)
+  // The flattened card's size in px at output scale `scale` (scan's opts.scale; 1 = CARD_W x CARD_H, ~11.9 px/mm).
+  const cardPx = (scale = 1) => [Math.round(CARD_W * scale), Math.round(CARD_H * scale)];
   const SIDES = ["left", "right", "top", "bottom"];
 
   /* ---------------------------------------------------------------- colour */
@@ -642,14 +644,17 @@
     return [...hvec, 1];
   }
 
-  /** Output-pixel -> source-pixel homography for warping `corners` upright with `margin` px around. */
-  function warpMatrix(corners, margin) {
+  /**
+   * Output-pixel -> source-pixel homography for warping `corners` upright with `margin` px around, the card
+   * itself cardPx(scale) px (default CARD_W x CARD_H).
+   */
+  function warpMatrix(corners, margin, scale = 1) {
     let [tl, tr, br, bl] = corners;
     const d = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
     const width = (d(tr, tl) + d(br, bl)) / 2, height = (d(bl, tl) + d(br, tr)) / 2;
     if (width > height) [tl, tr, br, bl] = [bl, tl, tr, br];  // landscape photo of a portrait card
-    const m = margin;
-    const dst = [[m, m], [m + CARD_W - 1, m], [m + CARD_W - 1, m + CARD_H - 1], [m, m + CARD_H - 1]];
+    const m = margin, [cw, ch] = cardPx(scale);
+    const dst = [[m, m], [m + cw - 1, m], [m + cw - 1, m + ch - 1], [m, m + ch - 1]];
     return homography(dst, [tl, tr, br, bl]);
   }
 
@@ -658,10 +663,11 @@
     return [(H[0] * u + H[1] * v + H[2]) / den, (H[3] * u + H[4] * v + H[5]) / den];
   };
 
-  /** Perspective-warp the card upright to CARD_W x CARD_H with `margin` px of context on every side. */
-  function warpCard(img, corners, margin = MARGIN) {
-    const H = warpMatrix(corners, margin);
-    const W = CARD_W + 2 * margin, Ht = CARD_H + 2 * margin;
+  /** Perspective-warp the card upright to CARD_W x CARD_H (times `scale`) with `margin` px of context on every side. */
+  function warpCard(img, corners, margin = MARGIN, scale = 1) {
+    const H = warpMatrix(corners, margin, scale);
+    const [cw, ch] = cardPx(scale);
+    const W = cw + 2 * margin, Ht = ch + 2 * margin;
     const out = new Uint8ClampedArray(W * Ht * 4);
     const sw = img.width, sh = img.height, src = img.data;
     for (let v = 0; v < Ht; v++) {
@@ -919,7 +925,8 @@
     return -1;
   }
 
-  function measureSide(lab, w, h, side, margin) {
+  // `scale`: the flattened card's px per px of the default 750 px card; the 3 px run and the 4 px window follow it.
+  function measureSide(lab, w, h, side, margin, scale = 1) {
     const extent = (side === "left" || side === "right" ? w : h) - 2 * margin;
     const depth = margin + Math.floor(extent * 0.22);
     const refStart = margin + Math.floor(extent * 0.012), refEnd = margin + Math.floor(extent * 0.03);
@@ -950,7 +957,7 @@
     for (let l = 0; l < lines; l++) {
       const row = l * depth;
       for (let i = 0; i < depth; i++) over[i] = dist[row + i] > thresh ? 1 : 0;
-      const rel = firstRun(over, refEnd, depth, 3);
+      const rel = firstRun(over, refEnd, depth, Math.max(1, Math.round(3 * scale)));
       if (rel < 0) continue;
       found++;
       const pos = rel + refEnd;
@@ -971,7 +978,7 @@
     // contradict it. So confidence comes from how many rows agree, minus the contradicting ones; a spread
     // of late rows doesn't count against the reading.
     const sorted = Float64Array.from(inner).sort();
-    const win = Math.max(4, extent * 0.006);
+    const win = Math.max(4 * scale, extent * 0.006);
     let best = 0, lo = 0;
     for (let i = 0, j = 0; i < found; i++) {
       while (sorted[j] < sorted[i] - win) j++;
@@ -998,12 +1005,12 @@
     return { outer: median(outer), inner: median(agree), confidence: (found / lines) * support * contradiction };
   }
 
-  function measureBorders(card, margin = MARGIN) {
+  function measureBorders(card, margin = MARGIN, scale = 1) {
     const w = card.width, h = card.height;
     const lab = toLab(blur3(card));
     const edges = {};
     for (const side of SIDES) {
-      let e = measureSide(lab, w, h, side, margin);
+      let e = measureSide(lab, w, h, side, margin, scale);
       if (isNaN(e.inner)) {  // full-art card or no clear frame: guess a typical border
         const extent = (side === "left" || side === "right" ? w : h) - 2 * margin;
         e = { outer: e.outer, inner: e.outer + extent * 0.05, confidence: 0 };
@@ -1022,8 +1029,15 @@
 
   const share = (a, b) => (a + b <= 0 ? 50 : (Math.max(a, b) / (a + b)) * 100);
 
-  /** Full pipeline, same result shape as the Python app's POST /api/scan. */
-  function scan(img, mode = "auto", manualCorners = null) {
+  /**
+   * Full pipeline, same result shape as the Python app's POST /api/scan.
+   * opts.scale (default 1): the flattened card is CARD_W x CARD_H times this, with MARGIN times this around it,
+   * and its lines/borders are in those px (the result then also carries `scale`). Finding the outline doesn't
+   * change; only the final flattening and border measurement do. At 1 the result is exactly as without it.
+   */
+  function scan(img, mode = "auto", manualCorners = null, opts = {}) {
+    const scale = opts && opts.scale > 0 ? opts.scale : 1;
+    const margin = Math.round(MARGIN * scale);
     let corners, cardConf;
     if (manualCorners) {
       corners = manualCorners;
@@ -1077,8 +1091,8 @@
         corners = best.corners;
       }
     }
-    const warped = warpCard(img, corners, MARGIN);
-    const m = measureBorders(warped, MARGIN);
+    const warped = warpCard(img, corners, margin, scale);
+    const m = measureBorders(warped, margin, scale);
     const W = warped.width, H = warped.height, e = m.edges;
     const r2 = (v) => Math.round(v * 100) / 100;
     return {
@@ -1086,7 +1100,8 @@
       corners,
       width: W,
       height: H,
-      margin: MARGIN,
+      margin,
+      ...(scale !== 1 ? { scale } : {}),
       lines: {
         outer: { left: e.left.outer, right: W - e.right.outer, top: e.top.outer, bottom: H - e.bottom.outer },
         inner: { left: e.left.inner, right: W - e.right.inner, top: e.top.inner, bottom: H - e.bottom.inner },

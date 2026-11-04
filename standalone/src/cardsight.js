@@ -21,10 +21,31 @@
 })(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
+  /* ------------------------------------------------------------- request deadline (net.js) */
+
+  // The shared helper: required next to this file in Node, the page's global in the browser. Without it
+  // (this file loaded alone) requests still work, only without a deadline.
+  function netLib() {
+    try { if (typeof require === "function") return require("./net.js"); } catch (err) { /* not next to it */ }
+    const g = typeof self !== "undefined" ? self : typeof globalThis !== "undefined" ? globalThis : {};
+    return (g && g.Net) || null;
+  }
+  async function fetchJSON(url, opts) {
+    const N = netLib();
+    if (N) return N.fetchJSON(url, opts);
+    const { timeoutMs, fetch: F, ...init } = opts;
+    const res = await F(url, init);
+    let body = null;
+    try { body = await res.json(); } catch (err) { body = null; }
+    return { res, ok: !!res.ok, status: res.status, body };
+  }
+  const isTimeout = (err) => !!err && (err.timeout === true || err.name === "TimeoutError");
+
   const BASE = "https://api.cardsight.ai";
   const CACHE_MS = 24 * 3600 * 1000;
   const CACHE_PREFIX = "kp.cs.";
   const PERIOD = "1y";
+  const TIMEOUT_MS = 15000;   // per request, headers and body together
 
   const norm = (s) => String(s == null ? "" : s).toLowerCase().normalize("NFKD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
   /** "125/197" -> "125", "025" -> "25", "SP3/006" -> "SP3". */
@@ -57,14 +78,15 @@
     const F = opts.fetch || (typeof fetch === "function" ? fetch : null);
     if (!F) throw new Error("No network available.");
     const qs = Object.entries(params || {}).filter(([, v]) => v != null && v !== "").map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+    const timeoutMs = opts.timeoutMs ?? TIMEOUT_MS;
     let res;
     try {
-      res = await F(`${BASE}${path}${qs ? `?${qs}` : ""}`, { headers: { "X-API-Key": opts.apiKey, Accept: "application/json" } });
+      res = await fetchJSON(`${BASE}${path}${qs ? `?${qs}` : ""}`, { fetch: F, timeoutMs, headers: { "X-API-Key": opts.apiKey, Accept: "application/json" } });
     } catch (err) {
+      if (isTimeout(err)) throw new Error(`CardSight didn't answer within ${Math.round(timeoutMs / 1000)} seconds. Try again.`);
       throw new Error("CardSight couldn't be reached (offline, or this page isn't allowed to contact it).");
     }
-    let body = null;
-    try { body = await res.json(); } catch (err) { body = null; }
+    const body = res.body;
     if (!res.ok) {
       const msg = String((body && (body.message || body.error)) || "");
       if (res.status === 401 || res.status === 403) throw new Error("CardSight didn't accept the API key. Check it at app.cardsight.ai.");
@@ -201,5 +223,5 @@
 
   const validKey = (k) => /^[A-Za-z0-9_\-.]{20,200}$/.test(String(k || "").trim());
 
-  return { findCard, sales, forReport, versions, stats, rankCards, cardNo, clearCache, validKey };
+  return { findCard, sales, forReport, versions, stats, rankCards, cardNo, clearCache, validKey, TIMEOUT_MS };
 });

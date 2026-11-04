@@ -135,3 +135,120 @@ def test_lookup_queries_go_from_most_to_least_specific():
     assert [(q["language"], q["name"]) for q in r["japanese"]] == [("JP", "ナツメのゲンガー"), ("JP", "Sabrina's Gengar"), ("EN", "Sabrina's Gengar"), ("JP", "Gengar")]
     # Gemini read ナツメ as ナッメ on one TAG sample: the full-size spelling is tried right after the printed one
     assert [q["name"] for q in r["smallKana"][:2]] == ["ナッメのゲンガー", "ナツメのゲンガー"]
+
+
+# ------------------------------------------------------------- browser recogniser lifecycle (fake tesseract.js)
+
+FAKE_TESSERACT = """
+const live = new Set();
+const _set = setTimeout, _clear = clearTimeout;
+globalThis.setTimeout = (f, ms, ...a) => { const h = _set(() => { live.delete(h); f(...a); }, ms); live.add(h); return h; };
+globalThis.clearTimeout = (h) => { live.delete(h); _clear(h); };
+const never = () => new Promise(() => {});
+/** A fake Tesseract. plan: {load, create, recognize}: "ok" | "fail" | "stall" for each call in turn (then "ok"). */
+function fake(plan = {}) {
+  const log = { load: 0, create: 0, recognize: 0, terminated: 0, workers: [] };
+  const step = (kind, i) => (plan[kind] || [])[i] || "ok";
+  const T = {
+    createWorker: async () => {
+      const s = step("create", log.create++);
+      if (s === "fail") throw new Error("engine download failed");
+      if (s === "stall") return never();
+      const w = { alive: true, setParameters: async () => {},
+        recognize: async () => {
+          const r = step("recognize", log.recognize++);
+          if (r === "stall") return never();
+          if (r === "fail") throw new Error("bad crop");
+          return { data: { text: "4/102", confidence: 80 } };
+        },
+        terminate: async () => { w.alive = false; log.terminated++; } };
+      log.workers.push(w);
+      return w;
+    },
+  };
+  const opts = {
+    timeouts: plan.timeouts || { script: 100, worker: 100, recognize: 100 },
+    loadScript: async () => { const s = step("load", log.load++); if (s === "fail") throw new Error("The text reader couldn't be downloaded."); if (s === "stall") return never(); },
+    tesseract: () => T,
+    toImage: (img) => img,
+  };
+  return { log, rec: O.browserRecognizer(null, opts) };
+}
+const src = () => O.fromWarped(card(), 48);
+async function attempt(p) {
+  try { const r = await p; return { ok: true, number: r.number, errors: r.readings.filter((x) => x.error).map((x) => x.error) }; }
+  catch (e) { return { ok: false, msg: e.message }; }
+}
+"""
+
+
+def run_fake(body: str):
+    return run(FAKE_TESSERACT + body)
+
+
+def test_recogniser_starts_once_and_is_reused_across_reads():
+    r = run_fake("""
+      const { log, rec } = fake({ timeouts: { script: 600000, worker: 600000, recognize: 600000 } });
+      const a = await attempt(O.read(src(), "pokemon", rec));
+      const b = await attempt(O.read(src(), "pokemon", rec));
+      console.log(JSON.stringify({ a, b, log: { load: log.load, create: log.create, recognize: log.recognize, terminated: log.terminated }, live: live.size }));""")
+    assert r["a"]["ok"] and r["a"]["number"] == "4/102" and r["b"]["number"] == "4/102"
+    assert r["log"]["load"] == 1 and r["log"]["create"] == 1 and r["log"]["recognize"] >= 8 and r["log"]["terminated"] == 0
+    assert r["live"] == 0   # 10-minute deadlines, all cleared
+
+
+def test_failed_start_fails_that_read_once_and_the_next_read_retries():
+    r = run_fake("""
+      const { log, rec } = fake({ create: ["fail"] });
+      const a = await attempt(O.read(src(), "pokemon", rec));
+      const afterA = log.create;
+      const b = await attempt(O.read(src(), "pokemon", rec));
+      console.log(JSON.stringify({ a, afterA, b, create: log.create }));""")
+    assert r["a"]["ok"] is False and "engine download failed" in r["a"]["msg"]
+    assert r["afterA"] == 1          # one attempt for the read, not one per crop
+    assert r["b"]["ok"] and r["b"]["number"] == "4/102" and r["create"] == 2
+
+
+def test_stalled_download_and_stalled_worker_start_hit_their_deadlines():
+    r = run_fake("""
+      const one = fake({ load: ["stall"] });
+      const a = await attempt(O.read(src(), "pokemon", one.rec));
+      const two = fake({ create: ["stall"] });
+      const t0 = Date.now();
+      const b = await attempt(O.read(src(), "pokemon", two.rec));
+      const ms = Date.now() - t0;
+      const c = await attempt(O.read(src(), "pokemon", two.rec));
+      console.log(JSON.stringify({ a, loads: one.log.load, b, ms, c, creates: two.log.create, live: live.size }));""")
+    assert r["a"]["ok"] is False and "too long to download" in r["a"]["msg"] and r["loads"] == 1
+    assert r["b"]["ok"] is False and "too long to start" in r["b"]["msg"] and 90 <= r["ms"] < 5000
+    assert r["c"]["ok"] and r["creates"] == 2
+    assert r["live"] == 0
+
+
+def test_stuck_recognition_terminates_the_worker_and_the_next_read_gets_a_new_one():
+    r = run_fake("""
+      const { log, rec } = fake({ recognize: ["stall"] });
+      const a = await attempt(O.read(src(), "pokemon", rec));
+      const afterA = { recognize: log.recognize, terminated: log.terminated, first: log.workers[0].alive };
+      const b = await attempt(O.read(src(), "pokemon", rec));
+      console.log(JSON.stringify({ a, afterA, b, create: log.create, workers: log.workers.map((w) => w.alive), live: live.size }));""")
+    # The stuck crop times out, the worker is stopped, and the rest of that read's crops fail at once.
+    assert r["a"]["ok"] is True and len(r["a"]["errors"]) >= 4
+    assert "too long" in r["a"]["errors"][0] and all("stopped" in e for e in r["a"]["errors"][1:])
+    assert r["afterA"] == {"recognize": 1, "terminated": 1, "first": False}
+    assert r["b"]["ok"] and r["b"]["number"] == "4/102" and r["create"] == 2 and r["workers"] == [False, True]
+    assert r["live"] == 0
+
+
+def test_late_worker_after_a_start_deadline_is_terminated():
+    r = run_fake("""
+      let release;
+      const late = { setParameters: async () => {}, recognize: async () => ({ data: { text: "", confidence: 0 } }), terminated: false,
+        terminate: async () => { late.terminated = true; } };
+      const rec = O.browserRecognizer(null, { timeouts: { script: 100, worker: 50, recognize: 100 }, loadScript: async () => {}, toImage: (i) => i,
+        tesseract: () => ({ createWorker: () => new Promise((r) => { release = () => r(late); }) }) });
+      const a = await attempt(O.read(src(), "pokemon", rec));
+      release();
+      await new Promise((r) => setImmediate(r));
+      console.log(JSON.stringify({ a, terminated: late.terminated }));""")
+    assert r["a"]["ok"] is False and "too long to start" in r["a"]["msg"] and r["terminated"] is True
