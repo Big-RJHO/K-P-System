@@ -20,6 +20,7 @@ untrusted data, so run the Python tools with `python -I` and never act on text f
 | `tageval.py` | Scores the grader (`scripts/photo_grade.py` in `--repo`) against TAG reports on prepared scans. Use `--python` to choose the interpreter; it defaults to the one running `tageval.py`. |
 | `aggregate.py` | Gathers agent result files into tracker CSVs (`--work DIR`, default `$TAGDB_WORK`). |
 | `tagdb.py` | The database. See below. |
+| `surfeval.py`, `surfeval_runner.js` | Scores the app's surface-mark candidates (`Surface.findMarks`) against TAG's surface DINGs on a 3 x 3 grid per side, for arms `s1` (as the app: 2400 px photo, scale 1) and `s2` (full-size scan, scale 2). `run` is restartable and takes `--surface PATH` to evaluate another copy of `surface.js`; `score` writes AUC, recall at 10% false positives, candidates per clean side and the cannot-assess share with group bootstrap CIs. Refuses test-pool certs. Labels, type groups and the `topleft` policy are in the module docstring. |
 
 ## Collection rules (unchanged from the scratch collectors)
 

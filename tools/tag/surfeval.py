@@ -221,9 +221,10 @@ def side_view(res: dict) -> dict:
 
 # ---------------------------------------------------------------- units
 
-def units(sides: list, group: str) -> dict:
+def units(sides: list, group: str, ca_exclude: bool = True) -> dict:
     """sides: [{key, view (side_view), dings (this side's surface DINGs)}].
-    -> {"cell": [(key, label, score)], "side": [...], "counts": {...}}"""
+    -> {"cell": [(key, label, score)], "side": [...], "counts": {...}}
+    ca_exclude=False keeps cells under cannotAssess regions (a comparison only: the protocol excludes them)."""
     cell_u, side_u = [], []
     cnt = {"cells_total": 0, "cells_cannot_assess": 0, "cells_side_not_ok": 0, "cells_excluded_other_ding": 0,
            "cell_dings_unscorable": 0, "sides_total": 0, "sides_not_ok": 0, "sides_excluded_other_ding": 0}
@@ -247,7 +248,7 @@ def units(sides: list, group: str) -> dict:
         else:
             cnt["sides_excluded_other_ding"] += 1
         for cell in CELLS:
-            if v["ca_excluded"][cell]:
+            if ca_exclude and v["ca_excluded"][cell]:
                 cnt["cells_cannot_assess"] += 1
                 cnt["cell_dings_unscorable"] += cell in pos_cells
                 continue
@@ -371,14 +372,20 @@ def timing(sides: list) -> dict:
     return out
 
 
+def group_tables(sides: list, key_index: dict, D: np.ndarray, ca_exclude: bool = True) -> dict:
+    out = {}
+    for g in GROUPS:
+        u = units(sides, g, ca_exclude)
+        out[g] = {"cell": metric_block(u["cell"], key_index, D), "side": metric_block(u["side"], key_index, D),
+                  "counts": u["counts"]}
+    return out
+
+
 def arm_report(sides: list, key_index: dict, D: np.ndarray) -> dict:
-    rep = {"sides": len(sides), "status": {}, "groups": {}}
+    rep = {"sides": len(sides), "status": {}}
     for s in sides:
         rep["status"][s["view"]["status"]] = rep["status"].get(s["view"]["status"], 0) + 1
-    for g in GROUPS:
-        u = units(sides, g)
-        rep["groups"][g] = {"cell": metric_block(u["cell"], key_index, D), "side": metric_block(u["side"], key_index, D),
-                            "counts": u["counts"]}
+    rep["groups"] = group_tables(sides, key_index, D)
     # group independent: candidates per clean side, share of cells that can't be assessed
     clean = [s for s in sides if not s["dings"] and s["view"]["status"] == "ok"]
     k = np.array([key_index[s["key"]] for s in clean], int)
@@ -416,29 +423,33 @@ def label_summary(certs: list, recs: dict) -> dict:
             "by_type": {t: dict(sorted(v.items(), key=lambda x: -x[1])) for t, v in sorted(by_type.items(), key=lambda x: -sum(x[1].values()))}}
 
 
-def diagnostics(sides: list) -> dict:
+def diagnostics(sides: list, ca_exclude: bool = False) -> dict:
     """Grid orientation (does a mirrored / rotated reading of TAG's cells agree better with the candidates?) and the
     'topleft' question (do 'topleft' cells look like real locations?). Cell AUC vs clean cells, 'all' group,
-    'topleft' taken literally; per face."""
+    'topleft' taken literally; per face. Cells under cannotAssess regions are kept unless ca_exclude (the texture
+    regions often cover most of the card, which would leave nothing to compare)."""
+    def usable(s, c):
+        return not (ca_exclude and s["view"]["ca_excluded"][c])
+
     out = {"orientation": {}, "topleft": {}}
     for face in SIDES:
         fs = [s for s in sides if s["side"] == face and s["view"]["status"] == "ok"]
-        clean = [s["view"]["cell_score"][c] for s in fs if not s["dings"] for c in CELLS if not s["view"]["ca_excluded"][c]]
+        clean = [s["view"]["cell_score"][c] for s in fs if not s["dings"] for c in CELLS if usable(s, c)]
         for name, f in LOC_MAPS.items():
             pos = [s["view"]["cell_score"][f(c)] for s in fs
                    for c in {d["location"] for d in s["dings"] if d["location"] in CELLS and d["location"] != "topleft"}
-                   if not s["view"]["ca_excluded"][f(c)]]
+                   if usable(s, f(c))]
             out["orientation"].setdefault(name, {})[face] = {"positive_cells": len(pos), "auc": auc(pos, clean),
                                                              "recall_any": sum(v > 0 for v in pos) / len(pos) if pos else None}
         # 'topleft' DING cells vs other located DING cells vs clean topleft cells
-        tl_clean = [s["view"]["cell_score"]["topleft"] for s in fs if not s["dings"] and not s["view"]["ca_excluded"]["topleft"]]
+        tl_clean = [s["view"]["cell_score"]["topleft"] for s in fs if not s["dings"] and usable(s, "topleft")]
         for nm, sel in (("topleft_playwear", lambda d: d["location"] == "topleft" and d["type"] == "play wear"),
                         ("topleft_other_types", lambda d: d["location"] == "topleft" and d["type"] != "play wear"),
                         ("other_cells", lambda d: d["location"] in CELLS and d["location"] != "topleft")):
             pos = []
             for s in fs:
                 for c in {d["location"] for d in s["dings"] if sel(d)}:
-                    if not s["view"]["ca_excluded"][c]:
+                    if usable(s, c):
                         pos.append(s["view"]["cell_score"][c])
             out["topleft"].setdefault(nm, {})[face] = {"cells": len(pos), "auc_vs_clean_same_cell" if nm != "other_cells" else "auc_vs_clean": auc(pos, tl_clean if nm != "other_cells" else clean),
                                                        "recall_any": sum(v > 0 for v in pos) / len(pos) if pos else None}
@@ -462,7 +473,9 @@ def cmd_score(a):
     D = draws(len(keys), a.boot)
     report = {"split": a.split or Path(a.certs).stem, "certs": len(certs), "group_keys": len(keys),
               "bootstrap": {"resamples": a.boot, "seed": SEED, "unit": "group_key"},
-              "primary_topleft_policy": a.topleft, "run_config": cfg, "labels": label_summary(certs, recs), "arms": {}}
+              "primary_topleft_policy": a.topleft, "run_config": cfg,
+              "score_code": {"repo_commit": git(REPO, "rev-parse", "HEAD"), "repo_dirty": bool(git(REPO, "status", "--porcelain")),
+                             "surfeval_sha256": sha256(Path(__file__))}, "labels": label_summary(certs, recs), "arms": {}}
     policies = [a.topleft] + [p for p in TOPLEFT_POLICIES if p != a.topleft]
     for arm in arms:
         arep = {}
@@ -473,6 +486,8 @@ def cmd_score(a):
             if pol == a.topleft:
                 arep.update(r)
                 arep["diagnostics"] = diagnostics(sides)
+                # comparison only: cells under cannotAssess regions kept (the protocol excludes them)
+                arep["groups_cannot_assess_kept"] = group_tables(sides, key_index, D, ca_exclude=False)
             else:  # comparison: only the group tables
                 arep[f"groups_topleft_{pol}"] = r["groups"]
         report["arms"][arm] = arep
@@ -494,6 +509,10 @@ def summary_table(rep: dict) -> str:
                 m = gr[unit]
                 lines.append(f"{arm:4} {g:17} {unit:5} {m['positive']:5d} {m['clean']:6d}  {f(m['auc']) + c(m.get('auc_ci95')):22} "
                              f"{f(m['recall_at_10fp']) + c(m.get('recall_at_10fp_ci95')):24} {f(m['flag_rate_clean'])}")
+        for g, gr in ar.get("groups_cannot_assess_kept", {}).items():
+            m = gr["cell"]
+            lines.append(f"{arm:4} {g:17} {'cell*':5} {m['positive']:5d} {m['clean']:6d}  {f(m['auc']) + c(m.get('auc_ci95')):22} "
+                         f"{f(m['recall_at_10fp']) + c(m.get('recall_at_10fp_ci95')):24} {f(m['flag_rate_clean'])}   (* cannot-assess cells kept)")
         mc, ca = ar["mean_candidates_per_clean_side"], ar["share_cells_cannot_assess"]
         t = ar["timing_ms_per_side"].get("total", {})
         tf = ar["timing_ms_per_side"].get("findMarks", {})
