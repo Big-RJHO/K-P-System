@@ -44,8 +44,18 @@ flagged (score > 0), mean candidates per clean side, share of cells that can't b
 resampling group_key (card identity) with replacement, 2000 resamples, fixed seed. Timing per side is reported
 from the runner (wall clock; depends on machine load and --jobs).
 
+Faster tuning: `cache` runs Vision.scan / Inspect once per side and arm and stores the flattened card (lossless PNG)
+with the scan geometry, quality and check (CACHE/<arm>/<cert>/); `run --from-cache CACHE` then re-runs only
+findMarks on them (identical marks to a full run for the same code; the cache refuses other vision.js / inspect.js /
+tagprep.py). Timing from a cached run: findMarks is measured, scan / quality / check are the cached times.
+`compare BASE.json TUNED.json` gives paired, card-grouped bootstrap CIs of TUNED - BASE (same resamples for both).
+
   python -I surfeval.py run   --root TAGDB --certs LIST.txt --out OUT [--arms s1,s2] [--jobs 3] [--surface PATH]
+                              [--from-cache CACHE]
+  python -I surfeval.py cache --root TAGDB --certs LIST.txt --cache CACHE [--arms s1] [--jobs 3] [--out OUT]
   python -I surfeval.py score --root TAGDB --certs LIST.txt --out OUT --report REPORT.json [--boot 2000]
+  python -I surfeval.py compare BASE.json TUNED.json --root TAGDB --certs LIST.txt --report CMP.json [--pair s1[:s2]]
+                              [--base-out DIR] [--tuned-out DIR]
 """
 import argparse
 import hashlib
@@ -472,6 +482,7 @@ def cmd_score(a):
     key_index = {k: i for i, k in enumerate(keys)}
     D = draws(len(keys), a.boot)
     report = {"split": a.split or Path(a.certs).stem, "certs": len(certs), "group_keys": len(keys),
+              "out": str(out.resolve()), "certs_file": str(Path(a.certs).resolve()),
               "bootstrap": {"resamples": a.boot, "seed": SEED, "unit": "group_key"},
               "primary_topleft_policy": a.topleft, "run_config": cfg,
               "score_code": {"repo_commit": git(REPO, "rev-parse", "HEAD"), "repo_dirty": bool(git(REPO, "status", "--porcelain")),
@@ -521,6 +532,124 @@ def summary_table(rep: dict) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------- paired comparison of two runs
+
+def paired_metric(rows_a: list, rows_b: list, key_index: dict, D: np.ndarray, m: int) -> dict:
+    """Metric m (0 AUC, 1 recall at <= FPR, 2 share of clean flagged) of runs a and b and of b - a, with a paired
+    bootstrap: every resample draws the same group keys for both runs."""
+    pa, pb = Prepared(rows_a, key_index), Prepared(rows_b, key_index)
+    va, vb = pa.metrics(np.ones(len(rows_a)))[m], pb.metrics(np.ones(len(rows_b)))[m]
+    diffs, wins = [], 0
+    for d in D:
+        x, y = pa.metrics(d[pa.k].astype(float))[m], pb.metrics(d[pb.k].astype(float))[m]
+        if x is not None and y is not None:
+            diffs.append(y - x)
+            wins += y > x
+    return {"base": va, "tuned": vb, "diff": None if va is None or vb is None else vb - va, "diff_ci95": ci(diffs),
+            "share_resamples_tuned_better": wins / len(diffs) if diffs else None}
+
+
+def paired_ratio(a: tuple, b: tuple, D: np.ndarray) -> dict:
+    """a, b: (num, den, k) arrays as ratio_block; difference b - a with a paired bootstrap."""
+    def val(t, w):
+        num, den, k = t
+        ww = w[k] if w is not None else np.ones(len(k))
+        dd = (ww * den).sum()
+        return float((ww * num).sum() / dd) if dd > 0 else None
+    va, vb = val(a, None), val(b, None)
+    diffs, lower = [], 0
+    for d in D:
+        x, y = val(a, d), val(b, d)
+        if x is not None and y is not None:
+            diffs.append(y - x)
+            lower += y < x
+    return {"base": va, "tuned": vb, "diff": None if va is None or vb is None else vb - va, "diff_ci95": ci(diffs),
+            "share_resamples_tuned_lower": lower / len(diffs) if diffs else None}
+
+
+def ratio_arrays(sides: list, key_index: dict, what: str) -> tuple:
+    if what == "candidates_per_clean_side":
+        clean = [s for s in sides if not s["dings"] and s["view"]["status"] == "ok"]
+        return (np.array([s["view"]["n_cands"] for s in clean], float), np.ones(len(clean)),
+                np.array([key_index[s["key"]] for s in clean], int))
+    if what == "share_clean_sides_flagged":
+        clean = [s for s in sides if not s["dings"] and s["view"]["status"] == "ok"]
+        return (np.array([s["view"]["n_cands"] > 0 for s in clean], float), np.ones(len(clean)),
+                np.array([key_index[s["key"]] for s in clean], int))
+    ca = np.array([9 if s["view"]["status"] != "ok" else sum(s["view"]["ca_excluded"].values()) for s in sides], float)
+    return ca, np.full(len(sides), 9.0), np.array([key_index[s["key"]] for s in sides], int)
+
+
+def cmd_compare(a):
+    """Paired, card-grouped bootstrap comparison of two runs (BASE and TUNED score reports, or --base-out /
+    --tuned-out result directories) on the same cert list."""
+    root = Path(a.root)
+    recs, sealed = records(root)
+    try:
+        certs = load_certs(a.certs, recs, sealed)
+    except SealedCert as e:
+        sys.exit(str(e))
+    reps = [json.loads(Path(p).read_text()) for p in (a.base, a.tuned)]
+    outs = []
+    for rep, override, name in ((reps[0], a.base_out, "base"), (reps[1], a.tuned_out, "tuned")):
+        o = override or rep.get("out")
+        if not o:
+            sys.exit(f"the {name} report doesn't name its results directory: pass --{name}-out")
+        if rep.get("certs") != len(certs):
+            sys.exit(f"the {name} report was scored on {rep.get('certs')} certs, --certs lists {len(certs)}")
+        outs.append(Path(o))
+    arm_a, _, arm_b = a.pair.partition(":")
+    arm_b = arm_b or arm_a
+    keys = sorted({recs[c]["group_key"] for c in certs})
+    key_index = {k: i for i, k in enumerate(keys)}
+    D = draws(len(keys), a.boot)
+    sa, miss_a = load_sides(outs[0], arm_a, certs, recs, a.topleft)
+    sb, miss_b = load_sides(outs[1], arm_b, certs, recs, a.topleft)
+    if miss_a or miss_b:
+        sys.exit(f"missing results: base {len(miss_a)}, tuned {len(miss_b)} cert(s) (e.g. {(miss_a + miss_b)[0]})")
+    rep = {"split": a.split or Path(a.certs).stem, "certs": len(certs), "group_keys": len(keys),
+           "base": {"report": str(Path(a.base).resolve()), "out": str(outs[0]), "arm": arm_a,
+                    "surface_js_sha256": (reps[0].get("run_config") or {}).get("surface_js_sha256")},
+           "tuned": {"report": str(Path(a.tuned).resolve()), "out": str(outs[1]), "arm": arm_b,
+                     "surface_js_sha256": (reps[1].get("run_config") or {}).get("surface_js_sha256")},
+           "bootstrap": {"resamples": a.boot, "seed": SEED, "unit": "group_key", "paired": True},
+           "topleft_policy": a.topleft, "groups": {}}
+    for g in GROUPS:
+        ua, ub = units(sa, g), units(sb, g)
+        ka, kb = units(sa, g, ca_exclude=False), units(sb, g, ca_exclude=False)
+        rep["groups"][g] = {
+            "side_auc": paired_metric(ua["side"], ub["side"], key_index, D, 0),
+            "side_recall_at_10fp": paired_metric(ua["side"], ub["side"], key_index, D, 1),
+            "side_flag_rate_clean": paired_metric(ua["side"], ub["side"], key_index, D, 2),
+            "cell_auc": paired_metric(ua["cell"], ub["cell"], key_index, D, 0),
+            "cell_auc_cannot_assess_kept": paired_metric(ka["cell"], kb["cell"], key_index, D, 0),
+            "side_units": {"base": [len(ua["side"]), sum(r[1] for r in ua["side"])],
+                           "tuned": [len(ub["side"]), sum(r[1] for r in ub["side"])]},
+        }
+    for what in ("candidates_per_clean_side", "share_clean_sides_flagged", "share_cells_cannot_assess"):
+        rep[what] = paired_ratio(ratio_arrays(sa, key_index, what), ratio_arrays(sb, key_index, what), D)
+    rep = rnd(rep)
+    Path(a.report).write_text(json.dumps(rep, indent=1))
+    print(compare_table(rep))
+    print(f"\nwrote {a.report}")
+
+
+def compare_table(rep: dict) -> str:
+    f = lambda v: "  -   " if v is None else f"{v:+.3f}" if isinstance(v, float) and v < 0 else f"{v:.3f}"
+    c = lambda v: "" if not v else f" [{v[0]:+.3f},{v[1]:+.3f}]"
+    lines = [f"paired comparison on {rep['split']}: {rep['certs']} certs, {rep['group_keys']} group keys; "
+             f"base {rep['base']['arm']} vs tuned {rep['tuned']['arm']}; topleft policy {rep['topleft_policy']}",
+             f"{'group':17} {'metric':28} {'base':>7} {'tuned':>7}  {'tuned - base [95% CI, paired]'}"]
+    for g, gr in rep["groups"].items():
+        for m in ("side_auc", "side_recall_at_10fp", "side_flag_rate_clean", "cell_auc", "cell_auc_cannot_assess_kept"):
+            v = gr[m]
+            lines.append(f"{g:17} {m:28} {f(v['base']):>7} {f(v['tuned']):>7}  {f(v['diff'])}{c(v['diff_ci95'])}")
+    for m in ("candidates_per_clean_side", "share_clean_sides_flagged", "share_cells_cannot_assess"):
+        v = rep[m]
+        lines.append(f"{'':17} {m:28} {f(v['base']):>7} {f(v['tuned']):>7}  {f(v['diff'])}{c(v['diff_ci95'])}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- running the arms
 
 def sha256(p: Path) -> str:
@@ -538,23 +667,40 @@ def load_arm_image(img: np.ndarray, max_side: int) -> np.ndarray:
     return cv2.resize(img, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1 else img
 
 
-def run_node(images: dict, scale: float, surface: Path, tmp: Path, node: str = "node") -> list:
+def run_node(images: dict, scale: float, surface: Path, tmp: Path, node: str = "node", mode: str = "full",
+             cached: dict = None) -> list:
+    """images: {side: BGR photo} (mode full / cache) or {side: RGBA warp} (mode marks, with cached[side] = the
+    runner's `cache` output for that side). Mode cache adds each side's `cache` and `warp` (RGBA array)."""
     import cv2
     jobs = []
     for side, img in images.items():
         p = tmp / f"{side}.rgba"
-        p.write_bytes(cv2.cvtColor(img, cv2.COLOR_BGR2RGBA).tobytes())
-        jobs.append({"side": side, "path": str(p), "width": int(img.shape[1]), "height": int(img.shape[0]), "scale": scale})
-    cfg = {"vision": str(SRC / "vision.js"), "inspect": str(SRC / "inspect.js"), "surface": str(surface), "jobs": jobs}
+        p.write_bytes((img if mode == "marks" else cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)).tobytes())
+        j = {"side": side, "path": str(p), "width": int(img.shape[1]), "height": int(img.shape[0]), "scale": scale}
+        if mode == "cache":
+            j["warp_out"] = str(tmp / f"{side}.warp.rgba")
+        if mode == "marks":
+            j["cached"] = cached[side]
+        jobs.append(j)
+    cfg = {"vision": str(SRC / "vision.js"), "inspect": str(SRC / "inspect.js"), "surface": str(surface), "mode": mode,
+           "jobs": jobs}
     try:
         p = subprocess.run([node, "--max-old-space-size=4096", str(RUNNER)], input=json.dumps(cfg),
                            capture_output=True, text=True)
+        if p.returncode:
+            raise RuntimeError(f"node failed ({p.returncode}): {(p.stderr or p.stdout)[-400:]}")
+        res = json.loads(p.stdout)
+        if mode == "cache":
+            for r, j in zip(res, jobs):
+                if r.get("status") != "error":
+                    w, h = r["cache"]["scan"]["width"], r["cache"]["scan"]["height"]
+                    r["warp"] = np.frombuffer(Path(j["warp_out"]).read_bytes(), np.uint8).reshape(h, w, 4)
+        return res
     finally:
         for j in jobs:
             Path(j["path"]).unlink(missing_ok=True)
-    if p.returncode:
-        raise RuntimeError(f"node failed ({p.returncode}): {(p.stderr or p.stdout)[-400:]}")
-    return json.loads(p.stdout)
+            if j.get("warp_out"):
+                Path(j["warp_out"]).unlink(missing_ok=True)
 
 
 def run_one(cert: str, rec: dict, a) -> tuple:
@@ -565,6 +711,8 @@ def run_one(cert: str, rec: dict, a) -> tuple:
     if not todo:
         return cert, "skipped"
     check_record(rec)
+    if a.from_cache:
+        return run_one_cached(cert, todo, a)
     tmp = Path(tempfile.mkdtemp(prefix=f"surfeval_{cert}_", dir=a.tmp))
     try:
         t0 = time.time()
@@ -579,14 +727,94 @@ def run_one(cert: str, rec: dict, a) -> tuple:
             cfg = ARMS[arm]
             res = run_node({s: load_arm_image(prepped[s], cfg["max_side"]) for s in SIDES}, cfg["scale"],
                            Path(a.surface), tmp)
-            o = out / arm / cert
-            o.mkdir(parents=True, exist_ok=True)
-            doc = {"cert": cert, "arm": arm, "prep_ms": prep_ms, "sides": {r["side"]: r for r in res}}
-            part = o / "marks.json.part"
-            part.write_text(json.dumps(doc))
-            os.replace(part, o / "marks.json")
+            write_marks(out, arm, cert, res, prep_ms)
         return cert, "ok " + " ".join(f"{arm}:" + ",".join(f"{s}={doc_status(out, arm, cert, s)}" for s in SIDES) for arm in todo)
     except Exception as e:  # noqa: BLE001 - report and carry on with the other certs
+        return cert, f"failed: {e}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def write_marks(out: Path, arm: str, cert: str, res: list, prep_ms) -> None:
+    o = out / arm / cert
+    o.mkdir(parents=True, exist_ok=True)
+    doc = {"cert": cert, "arm": arm, "prep_ms": prep_ms, "sides": {r["side"]: r for r in res}}
+    part = o / "marks.json.part"
+    part.write_text(json.dumps(doc))
+    os.replace(part, o / "marks.json")
+
+
+def run_one_cached(cert: str, todo: list, a) -> tuple:
+    """findMarks only, on the cached warp + scan / quality / check of each side (see `cache`)."""
+    import cv2
+    out, cdir = Path(a.out), Path(a.from_cache)
+    tmp = Path(tempfile.mkdtemp(prefix=f"surfeval_{cert}_", dir=a.tmp))
+    try:
+        for arm in todo:
+            d = cdir / arm / cert
+            if not (d / "meta.json").exists():
+                return cert, f"not cached ({arm})"
+            meta = json.loads((d / "meta.json").read_text())
+            if meta["cert"] != cert or meta["arm"] != arm:
+                return cert, f"cache mismatch ({arm})"
+            ok = {s: v for s, v in meta["sides"].items() if v.get("status") != "error"}
+            images = {}
+            for side in ok:
+                bgra = cv2.imread(str(d / f"{side}.png"), cv2.IMREAD_UNCHANGED)
+                images[side] = cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA)
+            res = run_node(images, ARMS[arm]["scale"], Path(a.surface), tmp, mode="marks",
+                           cached={s: v["cache"] for s, v in ok.items()}) if images else []
+            res += [{"side": s, "status": "error", "error": v.get("error")} for s, v in meta["sides"].items() if s not in ok]
+            write_marks(out, arm, cert, sorted(res, key=lambda r: SIDES.index(r["side"])), meta.get("prep_ms"))
+        return cert, "ok " + " ".join(f"{arm}:" + ",".join(f"{s}={doc_status(out, arm, cert, s)}" for s in SIDES) for arm in todo)
+    except Exception as e:  # noqa: BLE001 - report and carry on with the other certs
+        return cert, f"failed: {e}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def cache_one(cert: str, rec: dict, a) -> tuple:
+    """Vision.scan / Inspect once per side and arm: OUT_CACHE/<arm>/<cert>/{front,back}.png (the flattened card,
+    RGBA, lossless) + meta.json ({side: {status, cache: {scan without pixels, quality, check, timing_ms, input}}}).
+    With --out, the full-path marks of --surface are written there too (as `run`)."""
+    import cv2
+    from tagprep import prep
+    cdir = Path(a.cache)
+    todo = [arm for arm in a.arms if not (cdir / arm / cert / "meta.json").exists()]
+    if not todo:
+        return cert, "skipped"
+    check_record(rec)
+    tmp = Path(tempfile.mkdtemp(prefix=f"surfcache_{cert}_", dir=a.tmp))
+    try:
+        t0 = time.time()
+        prepped = {}
+        for side in SIDES:
+            img = cv2.imread(str(Path(a.root) / rec["images"][side]["path"]), cv2.IMREAD_COLOR)
+            if img is None:
+                return cert, f"no {side} image"
+            prepped[side] = prep(img)
+        prep_ms = round((time.time() - t0) * 1000)
+        for arm in todo:
+            cfg = ARMS[arm]
+            res = run_node({s: load_arm_image(prepped[s], cfg["max_side"]) for s in SIDES}, cfg["scale"],
+                           Path(a.surface), tmp, mode="cache")
+            d = cdir / arm / cert
+            d.mkdir(parents=True, exist_ok=True)
+            meta = {"cert": cert, "arm": arm, "prep_ms": prep_ms, "sides": {}}
+            for r in res:
+                if r.get("status") == "error":
+                    meta["sides"][r["side"]] = {"status": "error", "error": r.get("error")}
+                    continue
+                cv2.imwrite(str(d / f"{r['side']}.png"), cv2.cvtColor(r.pop("warp"), cv2.COLOR_RGBA2BGRA),
+                            [cv2.IMWRITE_PNG_COMPRESSION, 3])
+                meta["sides"][r["side"]] = {"status": r["status"], "cache": r.pop("cache")}
+            if a.out:
+                write_marks(Path(a.out), arm, cert, res, prep_ms)
+            part = d / "meta.json.part"
+            part.write_text(json.dumps(meta))
+            os.replace(part, d / "meta.json")
+        return cert, "cached " + ",".join(todo)
+    except Exception as e:  # noqa: BLE001
         return cert, f"failed: {e}"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -606,7 +834,8 @@ def write_config(a, n_certs: int) -> None:
            "vision_js_sha256": sha256(SRC / "vision.js"), "inspect_js_sha256": sha256(SRC / "inspect.js"),
            "runner_sha256": sha256(RUNNER), "surfeval_sha256": sha256(Path(__file__)),
            "node": subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip(),
-           "findMarks_options": {"revision": 1, "defaults": "module (maxCandidates 12, timeBudgetMs 1500, analysisMaxSide 1100)"}}
+           "findMarks_options": {"revision": 1, "defaults": "module (maxCandidates 12, timeBudgetMs 1500, analysisMaxSide 1100)"},
+           "from_cache": str(Path(a.from_cache).resolve()) if getattr(a, "from_cache", None) else None}
     path = out / "config.json"
     if path.exists():
         old = json.loads(path.read_text())
@@ -618,6 +847,50 @@ def write_config(a, n_certs: int) -> None:
     cfg["written"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     out.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cfg, indent=1))
+
+
+def cache_config() -> dict:
+    return {"vision_js_sha256": sha256(SRC / "vision.js"), "inspect_js_sha256": sha256(SRC / "inspect.js"),
+            "tagprep_sha256": sha256(HERE / "tagprep.py"), "arms": ARMS}
+
+
+def check_cache(cdir: Path) -> None:
+    """A cache made with other vision.js / inspect.js / tagprep.py would not be what a full run sees: refuse it."""
+    p = cdir / "config.json"
+    if not p.exists():
+        sys.exit(f"{cdir} has no config.json: build it with `surfeval.py cache` first")
+    old, cur = json.loads(p.read_text()), cache_config()
+    for k in ("vision_js_sha256", "inspect_js_sha256", "tagprep_sha256"):
+        if old.get(k) != cur[k]:
+            sys.exit(f"{p} was made with a different {k}; rebuild the cache (a new --cache directory)")
+
+
+def cmd_cache(a):
+    root, cdir = Path(a.root), Path(a.cache)
+    recs, sealed = records(root)
+    try:
+        certs = load_certs(a.certs, recs, sealed)
+    except SealedCert as e:
+        sys.exit(str(e))
+    certs = certs[: a.limit or None]
+    a.arms = a.arms.split(",")
+    for arm in a.arms:
+        if arm not in ARMS:
+            sys.exit(f"unknown arm {arm!r}; arms are {', '.join(ARMS)}")
+    a.surface = str(Path(a.surface).resolve())
+    Path(a.tmp).mkdir(parents=True, exist_ok=True)
+    cdir.mkdir(parents=True, exist_ok=True)
+    if (cdir / "config.json").exists():
+        check_cache(cdir)
+    else:
+        (cdir / "config.json").write_text(json.dumps({**cache_config(), "written": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                                      "repo_commit": git(REPO, "rev-parse", "HEAD")}, indent=1))
+    if a.out:
+        a.from_cache = None
+        write_config(a, len(certs))
+    with ThreadPoolExecutor(a.jobs) as ex:
+        for cert, status in ex.map(lambda c: cache_one(c, recs[c], a), certs):
+            print(cert, status, flush=True)
 
 
 def cmd_run(a):
@@ -634,6 +907,8 @@ def cmd_run(a):
             sys.exit(f"unknown arm {arm!r}; arms are {', '.join(ARMS)}")
     a.surface = str(Path(a.surface).resolve())
     Path(a.tmp).mkdir(parents=True, exist_ok=True)
+    if a.from_cache:
+        check_cache(Path(a.from_cache))
     write_config(a, len(certs))
     with ThreadPoolExecutor(a.jobs) as ex:
         for cert, status in ex.map(lambda c: run_one(c, recs[c], a), certs):
@@ -643,27 +918,48 @@ def cmd_run(a):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, fn in (("run", cmd_run), ("score", cmd_score)):
+    for name, fn in (("run", cmd_run), ("cache", cmd_cache), ("score", cmd_score)):
         s = sub.add_parser(name)
         s.add_argument("--root", required=True, help="TAG database directory (certs.jsonl, images/)")
         s.add_argument("--certs", required=True, help="cert list file (one cert per line); test-pool certs are refused")
         s.add_argument("--split", default="", help="name for the cert list (default: the file's stem)")
-        s.add_argument("--out", required=True, help="results directory: OUT/<arm>/<cert>/marks.json, OUT/config.json")
+        s.add_argument("--out", required=name != "cache", default="",
+                       help="results directory: OUT/<arm>/<cert>/marks.json, OUT/config.json"
+                            + (" (optional for cache: also write the full-path marks of --surface there)" if name == "cache" else ""))
         s.add_argument("--arms", default="s1,s2")
         s.set_defaults(fn=fn)
-        if name == "run":
+        if name in ("run", "cache"):
             s.add_argument("--jobs", type=int, default=3)
             s.add_argument("--limit", type=int, default=0)
             s.add_argument("--surface", default=str(SRC / "surface.js"), help="surface.js to evaluate (default: the repo's)")
             s.add_argument("--tmp", default=tempfile.gettempdir(), help="where per-cert temp images go (deleted after)")
+            if name == "run":
+                s.add_argument("--from-cache", default="", metavar="CACHE",
+                               help="re-run only findMarks on the warps / quality / check stored by `cache` in CACHE")
+            else:
+                s.add_argument("--cache", required=True, help="cache directory: CACHE/<arm>/<cert>/{front,back}.png, meta.json")
         else:
             s.add_argument("--report", required=True, help="score report JSON to write")
             s.add_argument("--boot", type=int, default=2000)
             s.add_argument("--topleft", choices=TOPLEFT_POLICIES, default="side",
                            help="'topleft' DINGs: side level only (default) or taken as the top-left cell")
+    s = sub.add_parser("compare", help="paired, card-grouped bootstrap CIs of TUNED - BASE")
+    s.add_argument("base", help="score report of the baseline run (its `out` names the results directory)")
+    s.add_argument("tuned", help="score report of the tuned run")
+    s.add_argument("--root", required=True, help="TAG database directory (certs.jsonl)")
+    s.add_argument("--certs", required=True, help="the cert list both runs were scored on")
+    s.add_argument("--split", default="")
+    s.add_argument("--base-out", default="", help="results directory of the base run (default: the report's `out`)")
+    s.add_argument("--tuned-out", default="", help="results directory of the tuned run (default: the report's `out`)")
+    s.add_argument("--pair", default="s1", help="arms to compare, BASE_ARM[:TUNED_ARM] (default s1)")
+    s.add_argument("--report", required=True, help="comparison report JSON to write")
+    s.add_argument("--boot", type=int, default=2000)
+    s.add_argument("--topleft", choices=TOPLEFT_POLICIES, default="side")
+    s.set_defaults(fn=cmd_compare, out="")
     a = ap.parse_args(argv)
-    for p in [a.out, a.root] + ([a.report] if a.cmd == "score" else []):
-        if Path(p).resolve().is_relative_to(REPO):
+    for p in [a.out, a.root] + ([a.report] if a.cmd in ("score", "compare") else []) + ([a.cache] if a.cmd == "cache" else []) \
+            + ([a.from_cache] if a.cmd == "run" and a.from_cache else []):
+        if p and Path(p).resolve().is_relative_to(REPO):
             sys.exit(f"{p} must be outside the repository (TAG data and results stay out of the repo)")
     a.fn(a)
 

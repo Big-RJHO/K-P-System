@@ -307,3 +307,56 @@ def test_runner_end_to_end(tmp_path):
     assert arm["groups"]["not_visible_flat"]["side"]["positive"] == 1   # play wear '' counts at side level
     assert arm["groups"]["not_visible_flat"]["cell"]["positive"] == 0
     assert rep["labels"]["surface_dings"] == 2 and rep["run_config"]["surface_js_sha256"] == cfg["surface_js_sha256"]
+
+    # cache once, then findMarks only: the same marks as the full run
+    cache, full2, fast = tmp_path / "cache", tmp_path / "full2", tmp_path / "fast"
+    p = subprocess.run(base + ["cache", "--root", str(root), "--certs", str(tmp_path / "c.txt"), "--cache", str(cache), "--arms", "s1",
+                               "--jobs", "1", "--tmp", str(tmp), "--out", str(full2)], capture_output=True, text=True, timeout=300)
+    assert p.returncode == 0 and "C0000001 cached s1" in p.stdout, p.stderr
+    assert (cache / "s1" / "C0000001" / "front.png").exists() and json.loads((cache / "config.json").read_text())["vision_js_sha256"]
+    p = subprocess.run(base + ["run", "--root", str(root), "--certs", str(tmp_path / "c.txt"), "--out", str(fast), "--arms", "s1",
+                               "--jobs", "1", "--tmp", str(tmp), "--from-cache", str(cache)], capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0 and "C0000001 ok" in p.stdout, p.stderr
+    assert not any(tmp.iterdir())
+    docs = [json.loads((d / "s1" / "C0000001" / "marks.json").read_text()) for d in (out, full2, fast)]
+    for s in ("front", "back"):
+        a, b, c = (d["sides"][s] for d in docs)
+        for k in ("status", "candidates", "cannotAssess", "note"):
+            assert a[k] == b[k] == c[k], (s, k)
+        assert set(c["timing_ms"]) == {"scan", "quality", "check", "findMarks", "total"}
+    assert json.loads((fast / "config.json").read_text())["from_cache"] == str(cache.resolve())
+    # a cache made by other vision.js is refused
+    cfgc = json.loads((cache / "config.json").read_text())
+    (cache / "config.json").write_text(json.dumps({**cfgc, "vision_js_sha256": "x"}))
+    p = subprocess.run(base + ["run", "--root", str(root), "--certs", str(tmp_path / "c.txt"), "--out", str(tmp_path / "fast2"),
+                               "--arms", "s1", "--from-cache", str(cache)], capture_output=True, text=True, timeout=60)
+    assert p.returncode != 0 and "different vision_js_sha256" in p.stderr
+
+    # paired comparison of two runs (here the same marks: every difference is 0)
+    rep2 = tmp_path / "report2.json"
+    p = subprocess.run(base + ["score", "--root", str(root), "--certs", str(tmp_path / "c.txt"), "--out", str(fast), "--report", str(rep2),
+                               "--boot", "50"], capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, p.stderr
+    cmp_path = tmp_path / "cmp.json"
+    p = subprocess.run(base + ["compare", str(report), str(rep2), "--root", str(root), "--certs", str(tmp_path / "c.txt"),
+                               "--report", str(cmp_path), "--boot", "50"], capture_output=True, text=True, timeout=120)
+    assert p.returncode == 0, p.stderr
+    cmp = json.loads(cmp_path.read_text())
+    assert cmp["base"]["out"] == str(out.resolve()) and cmp["tuned"]["out"] == str(fast.resolve())
+    assert cmp["candidates_per_clean_side"]["diff"] == 0 and cmp["groups"]["all"]["side_flag_rate_clean"]["diff"] == 0
+    assert "tuned - base" in p.stdout
+
+
+def test_paired_bootstrap_math():
+    rows_a = [("a", 1, 0.2), ("b", 0, 0.5), ("c", 0, 0.1), ("c", 1, 0.3)]
+    rows_b = [("a", 1, 0.9), ("b", 0, 0.5), ("c", 0, 0.1), ("c", 1, 0.8)]
+    ki = {"a": 0, "b": 1, "c": 2}
+    D = se.draws(3, 300)
+    m = se.paired_metric(rows_a, rows_b, ki, D, 0)
+    assert m["base"] == pytest.approx(resexp.auc([0.2, 0.3], [0.5, 0.1]))
+    assert m["tuned"] == pytest.approx(1.0) and m["diff"] == pytest.approx(1.0 - m["base"])
+    lo, hi = m["diff_ci95"]
+    assert 0 <= lo <= hi and m["share_resamples_tuned_better"] > 0.5
+    k = np.array([0, 1, 2])
+    r = se.paired_ratio((np.array([1., 2., 3.]), np.ones(3), k), (np.array([1., 1., 1.]), np.ones(3), k), D)
+    assert r["base"] == pytest.approx(2.0) and r["tuned"] == pytest.approx(1.0) and r["diff_ci95"][1] <= 0

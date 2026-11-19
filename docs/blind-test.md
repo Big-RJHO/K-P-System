@@ -239,3 +239,36 @@ the detector. What it points at instead (to be tested, not assumed): TAG's corne
 flat scanner images at all, TAG's location names may not map onto the app's areas, or the detector's whitening
 and rounding measures don't capture what TAG marks. TAG scans are flat and evenly lit, so this is a best case for
 sharpness; it says nothing about angled-light photos.
+
+## Training round 2: surface marks and colour channels on TAG cards (2026-11-19)
+
+Scored with `tools/tag/surfeval.py` on the research database's full-size TAG scans (data outside this repo):
+tuning on dev-tune (316 certs), each decision checked once on dev-check (148). The sealed test set was not used.
+TAG scans are flat, evenly lit scanner images, so none of this measures phone photos.
+
+**Surface detector ("Find possible marks").** Baseline on dev-tune: visible-defect side AUC 0.54, with
+6.7 possible marks on the average clean side and 97% of clean sides flagged. A tuned version (local
+thresholds, lower weight for lines and border stains, a minimum score, local "can't assess" regions; colour
+channels built but off by default because they added nothing and cost 2.5× the time) reached 0.62 on dev-tune.
+The rule fixed before the check: adopt only if dev-check visible side AUC rises by ≥ 0.05 with the 95% interval
+above 0 and false marks don't rise. On dev-check:
+
+| Metric (dev-check, s1) | Baseline | Tuned | Change [95% CI, paired] |
+|---|---|---|---|
+| Visible side AUC | 0.539 | 0.519 | −0.020 [−0.110, +0.076] |
+| Marks per clean side | 6.75 | 3.81 | −2.94 [−3.44, −2.52] |
+| Clean sides with any mark | 100% | 92.5% | −7.5 points |
+
+**Not adopted:** the dev-tune gain didn't carry over (over-fitting on 65 card designs), so the app keeps the
+baseline detector. Colour channels (the idea behind the colour filters) found no real-card gain either.
+
+**Corner/edge naming.** TAG's corner and edge names match the app's areas (no mirror or rotation beats
+identity). Backs get far more corner DINGs than fronts (182 vs 28 of 316 cards) because the wear is there,
+probably more visible on dark back borders. The app flags 34–42% of front edges where TAG flags under 3%.
+
+**Surface signal and grades.** The app's photo-only grade is nearly constant (9–10), so it overgrades every
+low-graded card, with or without surface damage; at equal TAG grade, surface damage makes no difference.
+The number of possible marks on a card's BACK does track damage, and this was confirmed once on dev-check:
+Spearman with TAG's surface-DING count 0.37 [0.21, 0.50], with creases/dents 0.27 [0.02, 0.44], with TAG grade
+−0.44 [−0.54, −0.23]. Fronts show no such signal (busy art and foil). A "check the surface in hand first" cue
+driven by the back count is supported on flat scans but not yet built or checked on phone photos.
