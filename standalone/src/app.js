@@ -665,6 +665,8 @@ function renderSlots() {
     slot.classList.toggle("done", done);
     img.hidden = !done;
     if (done) img.src = thumb;
+    // The whole photo spot is the button: tap it to add the photo, or to replace it.
+    $(`#file-${side}`).setAttribute("aria-label", done ? `Replace ${side} photo` : `Add ${side} photo`);
     $(".slot-meta", slot).textContent = done
       ? `${splitText(state.centering[side].lr)} · ${splitText(state.centering[side].tb)}`
       : "No photo";
@@ -3849,7 +3851,6 @@ function init() {
   setGame(localStore.read(KEYS.game, "pokemon"), { remember: false });
   for (const side of SIDES) {
     bindFile($(`#file-${side}`), (f) => scanFile(side, f));
-    bindFile($(`#camera-${side}`), (f) => scanFile(side, f));
   }
   $("#review-card").addEventListener("click", () => setView("report"));
   $("#front-only").addEventListener("click", () => setView("report"));

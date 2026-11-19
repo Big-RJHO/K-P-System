@@ -220,10 +220,16 @@ label:focus-within:has(.file-hidden:focus-visible) { outline: 3px solid var(--ac
 .slot-frame {
   position: relative; display: grid; place-items: center; aspect-ratio: 63 / 88; overflow: hidden;
   border-radius: 10px; background: var(--surface); border: 1px dashed var(--fill-2);
+  cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background-color .15s, transform .1s;
 }
+.slot-frame:hover { background: var(--fill); }
+.slot-frame:active { transform: scale(0.985); }
+.slot-frame:focus-within:has(.file-hidden:focus-visible) { outline: 3px solid var(--accent); outline-offset: 2px; }
+.slot.busy .slot-frame { cursor: progress; }
 .slot.done .slot-frame { border-style: solid; border-color: transparent; background: var(--stage); }
 .slot-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.slot-empty { color: var(--faint); }
+.slot-empty { color: var(--faint); display: grid; justify-items: center; gap: 6px; text-align: center; padding: 8px; }
+.slot-hint { font-size: 0.9375rem; font-weight: 600; color: var(--accent); }
 .slot-empty .ic { width: 40px; height: 40px; stroke-width: 1.4; }
 .slot.done .slot-empty { display: none; }
 .slot-busy { display: none; position: absolute; inset: 0; place-items: center; background: color-mix(in srgb, var(--surface) 82%, transparent); font-weight: 600; font-size: 0.9375rem; }
@@ -231,8 +237,6 @@ label:focus-within:has(.file-hidden:focus-visible) { outline: 3px solid var(--ac
 .slot-label { margin: 8px 2px 6px; font-size: 0.9375rem; }
 .slot-label .slot-meta { display: block; }
 .slot-meta { font-size: 0.8125rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-.slot-actions { display: grid; gap: 8px; }
-.slot-actions .btn { width: 100%; padding: 0 8px; font-size: 0.9375rem; }
 .tips li { padding: 10px 16px; font-size: 0.9375rem; }
 .tips li + li { box-shadow: inset 16px 0.5px 0 0 var(--surface), inset 0 0.5px 0 0 var(--sep); }
 
@@ -530,6 +534,8 @@ label:focus-within:has(.file-hidden:focus-visible) { outline: 3px solid var(--ac
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .slot-frame { transition: none; }
+  .slot-frame:active { transform: none; }
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 @media (forced-colors: active) {
